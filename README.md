@@ -65,12 +65,21 @@ Every connected **MCP** server adds its tools to the same index, namespaced by s
 (`filesystem__read_file`), and the built-in file tools are named `workspace_*` so it is
 never ambiguous which directory a call is about.
 
-**The library is local-only by selection.** Every one of its ten recipes runs as a process
-on your machine and needs no third-party account: filesystem, Git, SQLite, Postgres,
-Web Fetch, Playwright, knowledge-graph memory, sequential thinking, time, and the protocol's
-own reference server. Two of them reach the network *at your instruction* — Web Fetch opens
-the URL you name, Playwright drives a browser to the page you name — and neither holds a
-credential.
+**The library is local-only by selection.** Every one of its eleven recipes runs as a
+process on your machine and needs no third-party account: **Pandas Frames** (bundled with
+this repository), filesystem, Git, SQLite, Postgres, Web Fetch, Playwright, knowledge-graph
+memory, sequential thinking, time, and the protocol's own reference server. Two of them
+reach the network *at your instruction* — Web Fetch opens the URL you name, Playwright
+drives a browser to the page you name — and neither holds a credential.
+
+**Pandas Frames** is the one server that ships here rather than being fetched: it runs on
+the interpreter already serving the API, so there is no launcher to install. It loads CSV,
+Excel and Parquet files into real dataframes and lets the agent query them — joins,
+group-bys, statistics — through an expression sandbox, inside a killable worker with memory
+and CPU ceilings, with every call written to an append-only audit log. Its docstring is
+honest about what that sandbox is: real defence against mistakes and runaway work, not a
+security boundary against a determined attacker. Point it at data you are willing to have
+read.
 
 A server that talks to a hosted API is still one "custom server" form away, over stdio or
 HTTP. It is simply a decision you make deliberately rather than one the shelf makes look

@@ -12,7 +12,8 @@ import { Spinner, cls } from './ui';
 const MAX_HEIGHT = 260;
 
 export interface ComposerProps {
-  onSend: (text: string, attachments: string[]) => void;
+  /** May be async; the composer stays disabled until it settles. */
+  onSend: (text: string, attachments: string[]) => void | Promise<void>;
   onStop: () => void;
   onUpload: (file: File) => Promise<UploadResult>;
   running: boolean;
@@ -30,6 +31,10 @@ export function Composer({
   const [files, setFiles] = useState<UploadResult[]>([]);
   const [uploading, setUploading] = useState(0);
   const [dragging, setDragging] = useState(false);
+  // The parent's `running` only turns true after a network round trip. Between the
+  // keystroke and that moment the input would otherwise accept a second Enter — which is
+  // exactly how one question becomes two runs.
+  const [submitting, setSubmitting] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -44,8 +49,8 @@ export function Composer({
   }, [text]);
 
   useEffect(() => {
-    if (!running) area.current?.focus();
-  }, [running]);
+    if (!running && !submitting) area.current?.focus();
+  }, [running, submitting]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -76,10 +81,12 @@ export function Composer({
 
   const send = () => {
     const value = text.trim();
-    if ((!value && files.length === 0) || running || disabled) return;
-    onSend(value, files.map((f) => f.id));
+    if ((!value && files.length === 0) || running || disabled || submitting) return;
+    setSubmitting(true);
     setText('');
     setFiles([]);
+    void Promise.resolve(onSend(value, files.map((f) => f.id)))
+      .finally(() => setSubmitting(false));
   };
 
   const onPaste = (event: ClipboardEvent) => {
@@ -94,7 +101,7 @@ export function Composer({
     if (dropped.length) void attach(dropped);
   };
 
-  const canSend = (text.trim().length > 0 || files.length > 0) && !running && !disabled;
+  const canSend = (text.trim().length > 0 || files.length > 0) && !running && !disabled && !submitting;
 
   return (
     <div className={cls('relative w-full', centred ? 'max-w-2xl' : 'max-w-3xl')}>
@@ -163,8 +170,8 @@ export function Composer({
             className="max-h-[260px] flex-1 resize-none self-center bg-transparent py-1.5 text-[15px] leading-relaxed outline-none placeholder:text-zinc-400 disabled:cursor-not-allowed dark:placeholder:text-zinc-600"
           />
 
-          {running ? (
-            <button onClick={onStop} title="Stop"
+          {running || submitting ? (
+            <button onClick={onStop} disabled={submitting && !running} title="Stop"
               className="focus-ring mb-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-zinc-900 text-white transition-transform hover:scale-105 active:scale-95 dark:bg-zinc-100 dark:text-zinc-900">
               <Square size={12} fill="currentColor" />
             </button>

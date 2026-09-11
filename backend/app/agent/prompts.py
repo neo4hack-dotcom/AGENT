@@ -161,6 +161,18 @@ def system_prompt(model: str, catalog: str, memory_block: str, host: str = "this
     )
 
 
+def rewrite_instruction(question: str) -> str:
+    """The closing order when the answer rests on the conversation rather than on this
+    run's tools — a follow-up question about data fetched two turns ago, say."""
+    return (
+        "Write the final answer now. The user asked:\n\n"
+        f"\u00ab {question.strip()[:600]} \u00bb\n\n"
+        "Everything you need is already in this conversation — data fetched earlier counts "
+        "as available to you. Answer in the language they used. If something genuinely is "
+        "missing, name precisely what."
+    )
+
+
 def anchor(question: str) -> str:
     """The reminder appended after every batch of tool results.
 

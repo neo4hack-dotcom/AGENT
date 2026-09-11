@@ -253,7 +253,8 @@ class AgentRunner:
             # Kept briefly so a reconnecting client can still replay the tail.
             asyncio.create_task(self._expire(ctx.run_id))
 
-    async def _rescue(self, ctx: RunContext, question: str) -> None:
+    async def _rescue(self, ctx: RunContext, question: str,
+                      messages: list[dict] | None = None, system: str = "") -> None:
         """Salvage an answer from a run the model died in the middle of.
 
         A hosted endpoint returns the occasional 500, and when it lands mid-stream there is
@@ -264,7 +265,7 @@ class AgentRunner:
         if ctx.has_answer() or not any(b["type"] == "tool" and b.get("ok") for b in ctx.blocks):
             return
         try:
-            await self._final_answer(ctx, question)
+            await self._final_answer(ctx, question, messages, system)
         except Exception:  # noqa: BLE001 - the run already failed; this was a bonus
             pass
 
@@ -520,7 +521,7 @@ class AgentRunner:
 
         if not ctx.has_answer():
             # Every run ends with something readable, even a run that only failed.
-            await self._final_answer(ctx, text)
+            await self._final_answer(ctx, text, messages, system)
 
         ctx.emit({"type": "status", "phase": "done"})
         asyncio.create_task(self._maybe_title(ctx.conversation_id))
@@ -813,8 +814,9 @@ class AgentRunner:
         await self._invoke(ctx, call, block, tools)
 
     # ------------------------------------------------------------------ closing
-    async def _final_answer(self, ctx: RunContext, question: str) -> None:
-        """Compose the answer from the evidence, not from the conversation.
+    async def _final_answer(self, ctx: RunContext, question: str,
+                            messages: list[dict] | None = None, system: str = "") -> None:
+        """Compose the answer from this run's evidence — unless there isn't any.
 
         Replaying the whole interleaved transcript is what makes a small model answer the
         last page it read instead of the question it was asked — by the end of a research
@@ -826,6 +828,11 @@ class AgentRunner:
         """
         ctx.emit({"type": "status", "phase": "writing"})
         evidence = self._evidence_digest(ctx)
+        # A turn that called no tool is not a turn with nothing to say: the data it needs is
+        # usually sitting in the conversation, fetched two questions ago. Composing from an
+        # empty digest told one user "no data was provided" about a file they had just
+        # downloaded — so when this run gathered nothing, fall back to the conversation.
+        from_history = not evidence.strip() or evidence.startswith("(no tool")
         block = {"type": "text", "text": "", "index": len(ctx.blocks)}
         ctx.blocks.append(block)
         ctx.emit({"type": "block.open", "kind": "text", "index": block["index"]})
@@ -835,10 +842,14 @@ class AgentRunner:
             ctx.emit({"type": "text.delta", "index": block["index"], "text": piece})
 
         try:
+            payload = ((messages or []) + [{"role": "user", "content": prompts.note(
+                           prompts.rewrite_instruction(question))}]
+                       if from_history and messages else
+                       [{"role": "user", "content": prompts.synthesis_prompt(question, evidence)}])
             result = await self.c.llm.chat(
-                [{"role": "user", "content": prompts.synthesis_prompt(question, evidence)}],
-                system=prompts.SYNTHESIS_SYSTEM, temperature=0.3, think=False,
-                on_text=on_text)
+                payload,
+                system=system if (from_history and messages) else prompts.SYNTHESIS_SYSTEM,
+                temperature=0.3, think=False, on_text=on_text)
             ctx.usage["llm_calls"] += 1
             ctx.usage["tokens_in"] += result.tokens_in
             ctx.usage["tokens_out"] += result.tokens_out

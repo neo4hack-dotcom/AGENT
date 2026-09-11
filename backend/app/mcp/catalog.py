@@ -19,7 +19,15 @@ on its card rather than silently doing nothing.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
+
+# The one server that ships with this repository. It runs on the interpreter already
+# serving the API, so there is no launcher to install and nothing to fetch from a
+# registry — and the pandas it imports is the one pinned in requirements.txt.
+BUNDLED = Path(__file__).resolve().parents[3] / "mcp_servers"
+PYTHON = sys.executable
 
 
 def _p(key: str, label: str, *, required: bool = True, secret: bool = False,
@@ -76,6 +84,20 @@ CATALOG: list[dict[str, Any]] = [
                       placeholder="postgresql://user:pass@localhost:5432/db")],
         "tags": ["sql", "read"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/postgres",
+    },
+    {
+        "id": "pandas-frames", "name": "Pandas Frames", "vendor": "Bundled with this app",
+        "category": "Data", "accent": "emerald",
+        "description": "Load CSV, Excel and Parquet files into real pandas dataframes and let "
+                       "the agent query them — joins, group-bys, statistics — through a bounded, "
+                       "audited expression sandbox. Every operation runs in a killable worker "
+                       "with memory and CPU ceilings, and every call is logged with what it ran.",
+        "transport": "stdio", "command": PYTHON,
+        "args": [str(BUNDLED / "pandas_frames" / "server.py"), "--workspace", "{workspace}"],
+        "params": [_p("workspace", "Data directory", placeholder="/Users/you/data",
+                      help="The only directory the server may read files from or export into.")],
+        "tags": ["pandas", "data", "local", "bundled"],
+        "docs": "https://pandas.pydata.org/docs/",
     },
     # --------------------------------------------------------------------- web
     {
