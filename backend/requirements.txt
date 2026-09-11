@@ -1,0 +1,13 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+pydantic-settings>=2.6
+httpx>=0.27
+python-multipart>=0.0.9
+
+# Available to the agent's run_python tool. Not needed to boot: the tool reports which
+# of these it actually found, so a lighter install degrades honestly instead of failing
+# mid-task on an ImportError.
+numpy>=1.26
+pandas>=2.2
+openpyxl>=3.1

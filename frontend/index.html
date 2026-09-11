@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="fr" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Lumen</title>
+    <link rel="icon" href="/lumen.svg" type="image/svg+xml" />
+    <script>
+      // Applied before first paint: a theme that arrives one frame late is a white flash
+      // on every load, which is the single most noticeable flaw a dark UI can ship with.
+      (function () {
+        try {
+          var saved = localStorage.getItem('lumen.theme');
+          var dark = saved ? saved === 'dark'
+            : window.matchMedia('(prefers-color-scheme: dark)').matches;
+          document.documentElement.classList.toggle('dark', dark);
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="h-full">
+    <div id="root" class="h-full"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
