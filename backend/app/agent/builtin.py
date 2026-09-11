@@ -88,7 +88,8 @@ def normalize_plan(raw: Any) -> list[dict]:
     return steps
 
 
-def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, ToolSpec]:
+def build_registry(settings, memory, workspace: Path, on_plan,
+                   foreign_roots: Callable[[], str] | None = None) -> dict[str, ToolSpec]:
     """Assemble the built-in tools that are actually enabled right now.
 
     A tool switched off in Admin is *absent* from the catalog the model sees, not present
@@ -131,10 +132,23 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
                 "text": out or "(the code ran and printed nothing — print() what you need to see)",
                 "data": {"elapsed_ms": result["elapsed_ms"]}}
 
+    def elsewhere(result: dict) -> dict:
+        """Turn "not here" into "here is where it is".
+
+        The built-in file tools see one directory; a connected Filesystem server sees
+        another. A model that asks the wrong one gets a dead end unless the dead end
+        names the alternative — which costs one line and saved two of the ten cases from
+        spending four turns hunting for a file that was never in the workspace.
+        """
+        hint = foreign_roots() if foreign_roots else ""
+        if hint and not result.get("ok"):
+            result["error"] = f"{result.get('error', '')} {hint}".strip()
+        return result
+
     async def h_list_files(path: str = "", **_: Any) -> dict:
         result = file_tool.list_files(workspace, path)
         if not result.get("ok"):
-            return result
+            return elsewhere(result)
         lines = [f"{'📁' if e['type'] == 'dir' else '📄'} {e['name']}"
                  + (f"  ({e['size']} bytes)" if e["type"] == "file" else "")
                  for e in result["entries"]]
@@ -144,14 +158,14 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
     async def h_read_file(path: str = "", **_: Any) -> dict:
         result = file_tool.read_file(workspace, path)
         if not result.get("ok"):
-            return result
+            return elsewhere(result)
         return {"ok": True, "summary": f"{path} — {result['size']} bytes",
                 "text": result["text"]}
 
     async def h_write_file(path: str = "", content: str = "", **_: Any) -> dict:
         result = file_tool.write_file(workspace, path, content)
         if not result.get("ok"):
-            return result
+            return elsewhere(result)
         # The result echoes what actually landed on disk. A model that elided its own
         # content — "# Fibonacci ..." where twelve numbers were meant — sees the elision
         # in the very next turn instead of narrating the file it intended to write.
@@ -240,15 +254,17 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
             _obj({"code": {"type": "string", "description": "The Python source to run."}}, ["code"]),
             h_run_python, write=True, group="Compute"))
     specs += [
-        ToolSpec("list_files", "List what is in the Agent workspace directory.",
+        ToolSpec("workspace_list", "List what is in this app's own workspace directory — NOT a directory exposed by a "
+                 "connected MCP server, which has its own tools.",
                  _obj({"path": {"type": "string",
                                 "description": "Sub-path inside the workspace. Empty for the root."}}),
                  h_list_files, group="Workspace"),
-        ToolSpec("read_file", "Read a text file from the Agent workspace.",
+        ToolSpec("workspace_read", "Read a text file from this app's own workspace directory. For a path under a "
+                 "connected MCP server's root, use that server's own read tool instead.",
                  _obj({"path": {"type": "string"}}, ["path"]), h_read_file, group="Workspace"),
-        ToolSpec("write_file",
-                 "Write a text file into the Agent workspace, creating folders as needed. "
-                 "Use it to save anything the user should keep.",
+        ToolSpec("workspace_write",
+                 "Write a text file into this app's own workspace, creating folders as needed. "
+                 "For a path under a connected MCP server's root, use that server's write tool.",
                  _obj({"path": {"type": "string"}, "content": {"type": "string"}},
                       ["path", "content"]),
                  h_write_file, write=True, group="Workspace"),
@@ -275,7 +291,8 @@ _PLAN_DESC = (
 )
 
 
-def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict]) -> str:
+def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
+                 scopes: list[dict] | None = None) -> str:
     """A compact index of the live tool surface for the system prompt.
 
     Names only, grouped. The full descriptions and JSON schemas already travel in the
@@ -285,6 +302,7 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict]) -> str:
     a tool belongs to, so the model can reason about capability in groups.
     """
     lines = [f"Built-in: {', '.join(tools)}"]
+    scope_by_server = {s["server"]: s for s in (scopes or [])}
     if mcp_tools:
         by_server: dict[str, list[str]] = {}
         for tool in mcp_tools:
@@ -292,7 +310,16 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict]) -> str:
         for server, names in by_server.items():
             shown = ", ".join(names[:40])
             more = f" (+{len(names) - 40} more)" if len(names) > 40 else ""
-            lines.append(f"{server}: {shown}{more}")
+            scope = scope_by_server.get(server)
+            where = ""
+            if scope:
+                target = ", ".join(scope["paths"]) or scope["url"]
+                # A fact, and only a fact. The failure this removes is the model passing
+                # "." or a guessed root to a server that was configured with a real one.
+                # How each server wants its paths spelled is its own schema's business,
+                # and an instruction here overrides that to everyone's cost.
+                where = f"\n    ↳ this server is configured for: {target}"
+            lines.append(f"{server}: {shown}{more}{where}")
     return "\n".join(lines)
 
 

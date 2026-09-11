@@ -2,7 +2,7 @@
 // Edited in the same commit as the backend model it mirrors — that is the whole contract.
 
 export type BlockType = 'text' | 'thinking' | 'tool';
-export type ToolStatus = 'running' | 'done' | 'error' | 'denied' | 'awaiting_approval';
+export type ToolStatus = 'running' | 'done' | 'error' | 'denied' | 'expired' | 'awaiting_approval';
 
 export interface Block {
   type: BlockType;
@@ -250,7 +250,8 @@ export type StreamEvent =
   | { type: 'tool.end'; index: number; id: string; ok: boolean; status: ToolStatus;
       summary: string; ms: number; preview?: string; cached?: boolean }
   | { type: 'approval.request'; call_id: string; index: number; name: string;
-      args: Record<string, unknown>; server: string; kind: string; reason: string }
+      args: Record<string, unknown>; server: string; kind: string; reason: string;
+      expires_in_s: number }
   | { type: 'approval.resolved'; call_id: string; approved: boolean; reason?: string }
   | { type: 'critic'; tool: string; status: string; reason: string; advice: string }
   | { type: 'usage'; llm_calls: number; tokens_in: number; tokens_out: number; tool_calls: number }

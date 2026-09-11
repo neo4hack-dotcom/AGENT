@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -34,7 +35,30 @@ from app.errors import NotConfigured, RunCancelled
 from app.llm.provider import ToolCall
 from app.store import new_id, now
 
-APPROVAL_TIMEOUT_S = 600
+# A model abbreviating its own output is a habit from writing prose, and it does not stop
+# at the boundary of a tool argument. What it produces is unmistakable: a run of spaces —
+# often non-breaking — and then an ellipsis, at the end of a value or alone on a line.
+# Written to a file it becomes "# Fibonacci\u00a0\u00a0\u00a0...", a file the model will then
+# describe as containing the twelve numbers it meant to write. Telling it not to, in the
+# prompt, does not work; this does. Two spaces before the dots is the discriminator —
+# ordinary prose that trails off writes "wait for it..." with none, or one.
+_ELISION_TAIL = re.compile(r"[\s\u00a0]{2,}(?:\.{3,}|…)[\s\u00a0]*$")
+_ELISION_LINE = re.compile(r"^[\s\u00a0]*(?:\.{3,}|…)[\s\u00a0]*$", re.M)
+
+
+def elided_argument(arguments: dict | None) -> str:
+    """The name of the first argument that looks abbreviated, or ""."""
+    for key, value in (arguments or {}).items():
+        if isinstance(value, str) and (_ELISION_TAIL.search(value) or _ELISION_LINE.search(value)):
+            return key
+        if isinstance(value, (dict, list)):
+            nested = elided_argument(value if isinstance(value, dict)
+                                     else {str(i): v for i, v in enumerate(value)})
+            if nested:
+                return f"{key}.{nested}"
+    return ""
+
+
 
 
 class RunContext:
@@ -92,17 +116,27 @@ class RunContext:
             raise RunCancelled("Stopped.")
 
     # --- human-in-the-loop ----------------------------------------------------
-    async def request_approval(self, call_id: str, payload: dict) -> bool:
+    async def request_approval(self, call_id: str, payload: dict,
+                               timeout_s: float) -> str:
+        """Block until a human answers. Returns "approved", "denied" or "expired".
+
+        Three outcomes, not two, because the agent must be told which: a refusal means
+        "do not do this", while an expiry means "nobody was there" — and an agent told it
+        was refused when nobody answered will report a decision the user never made.
+        """
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._approvals[call_id] = future
-        self.emit({"type": "approval.request", "call_id": call_id, **payload})
+        self.emit({"type": "approval.request", "call_id": call_id,
+                   "expires_in_s": int(timeout_s), **payload})
+        self.guard.pause()
         try:
-            return await asyncio.wait_for(future, timeout=APPROVAL_TIMEOUT_S)
+            return "approved" if await asyncio.wait_for(future, timeout=timeout_s) else "denied"
         except asyncio.TimeoutError:
             self.emit({"type": "approval.resolved", "call_id": call_id, "approved": False,
-                       "reason": "timed out"})
-            return False
+                       "reason": "expired"})
+            return "expired"
         finally:
+            self.guard.resume()
             self._approvals.pop(call_id, None)
 
     def resolve_approval(self, call_id: str, approved: bool) -> bool:
@@ -205,10 +239,12 @@ class AgentRunner:
             ctx.status = "failed"
             ctx.error = str(exc)
             ctx.emit({"type": "error", "message": str(exc), "kind": "not_configured"})
+            await self._rescue(ctx, text)
         except Exception as exc:  # noqa: BLE001 - the run must always end with a verdict
             ctx.status = "failed"
             ctx.error = f"{type(exc).__name__}: {exc}"
             ctx.emit({"type": "error", "message": ctx.error, "kind": "internal"})
+            await self._rescue(ctx, text)
         finally:
             await self._persist(ctx)
             ctx.emit({"type": "done", "status": ctx.status, "usage": ctx.usage,
@@ -216,6 +252,21 @@ class AgentRunner:
             ctx.finish()
             # Kept briefly so a reconnecting client can still replay the tail.
             asyncio.create_task(self._expire(ctx.run_id))
+
+    async def _rescue(self, ctx: RunContext, question: str) -> None:
+        """Salvage an answer from a run the model died in the middle of.
+
+        A hosted endpoint returns the occasional 500, and when it lands mid-stream there is
+        no resuming — but by then the tools have usually done the work, and throwing that
+        away leaves the user with an error where an answer was already earned. One attempt,
+        swallowed if it fails too, so a rescue can never replace the original error.
+        """
+        if ctx.has_answer() or not any(b["type"] == "tool" and b.get("ok") for b in ctx.blocks):
+            return
+        try:
+            await self._final_answer(ctx, question)
+        except Exception:  # noqa: BLE001 - the run already failed; this was a bonus
+            pass
 
     async def _expire(self, run_id: str, delay: float = 900) -> None:
         await asyncio.sleep(delay)
@@ -247,7 +298,17 @@ class AgentRunner:
             ctx.emit({"type": "plan", "steps": steps})
 
         workspace = Path(self.c.settings.workspace_dir).expanduser().resolve()
-        tools = builtin.build_registry(self.c.settings, self.c.memory, workspace, on_plan)
+
+        def foreign_roots() -> str:
+            covered = [f"{s['server']} covers {p} (use {s['slug']}__… for paths there)"
+                       for s in self.c.mcp.scopes() for p in s["paths"]]
+            if not covered:
+                return f"The built-in file tools only ever see {workspace}."
+            return (f"The built-in file tools only ever see {workspace}. "
+                    + "; ".join(covered) + ".")
+
+        tools = builtin.build_registry(self.c.settings, self.c.memory, workspace, on_plan,
+                                       foreign_roots)
         mcp_tools = self.c.mcp.tools()
         functions = [spec.as_function() for spec in tools.values()] + self.c.mcp.ollama_tools()
         return tools, mcp_tools, functions
@@ -295,7 +356,7 @@ class AgentRunner:
         await self.c.mcp.wait_ready(timeout=min(8.0, settings.mcp_startup_timeout_s))
 
         tools, mcp_tools, functions = self._tool_surface(ctx)
-        catalog = builtin.catalog_text(tools, mcp_tools)
+        catalog = builtin.catalog_text(tools, mcp_tools, self.c.mcp.scopes())
         memory_block = self.c.memory.prompt_block(text)
         system = prompts.system_prompt(getattr(self.c.llm, "model", ""), catalog, memory_block)
 
@@ -496,6 +557,15 @@ class AgentRunner:
                     f"There is no tool called '{call.name}'. Available: {', '.join(known)}.")))
                 continue
 
+            elided = elided_argument(call.arguments)
+            if elided:
+                immediate.append((call, self._fail(ctx, block,
+                    f"The `{elided}` argument is abbreviated — it ends in an ellipsis. Tool "
+                    f"arguments are taken literally: that placeholder would be written, sent "
+                    f"or queried exactly as it stands. Send the complete value, or build it "
+                    f"with run_python and pass the result.")))
+                continue
+
             if ctx.guard.is_stagnant(call.name, call.arguments):
                 immediate.append((call, self._fail(ctx, block,
                     f"'{call.name}' already failed twice with these exact arguments. Change the "
@@ -509,14 +579,19 @@ class AgentRunner:
 
             if self._needs_approval(spec, mcp_tool):
                 block["status"] = "awaiting_approval"
-                approved = await ctx.request_approval(block["id"], {
+                verdict = await ctx.request_approval(block["id"], {
                     "index": block["index"], "name": call.name, "args": call.arguments,
                     "server": block["server"], "kind": block["kind"],
-                    "reason": "This tool can change something outside the workspace."})
-                if not approved:
+                    "reason": "This tool can change something outside the workspace."},
+                    timeout_s=settings.approval_timeout_s)
+                if verdict != "approved":
                     immediate.append((call, self._fail(ctx, block,
-                        "The user declined this call. Do not retry it; continue without it or "
-                        "explain what cannot be done.", status="denied")))
+                        ("The user declined this call. Do not retry it; continue without it "
+                         "or explain what cannot be done." if verdict == "denied" else
+                         f"Nobody answered the approval request within "
+                         f"{settings.approval_timeout_s}s, so this call did not run. Say that "
+                         f"it is still waiting on a decision — do not report it as refused."),
+                        status="denied" if verdict == "denied" else "expired")))
                     continue
                 block["status"] = "running"
 
@@ -586,6 +661,8 @@ class AgentRunner:
 
         elapsed = int((time.time() - started) * 1000)
         ok = bool(result.get("ok"))
+        if not ok and spec is None:
+            result = self._enrich_error(call, result)
         text = result.get("text") or result.get("error") or ""
         summary = result.get("summary") or (result.get("error") or "")[:200]
         block.update({"status": "done" if ok else "error", "ok": ok, "summary": summary,
@@ -599,6 +676,41 @@ class AgentRunner:
             ctx.tool_cache[key] = {"summary": summary, "text": text[:40000]}
         model_text = text if ok else f"ERROR: {result.get('error', 'failed')}"
         return {"ok": ok, "error": result.get("error", ""), "model_text": model_text}
+
+    # Servers reject a malformed call with a message about the field that was wrong, one
+    # field at a time. A model then fixes that field and gets the next complaint — five
+    # turns to discover a three-field shape it was never shown. The schema is right there
+    # in the registry; handing it over turns the whole sequence into one correction.
+    _VALIDATION_HINTS = ("validation", "invalid arguments", "invalid input", "-32602",
+                         "required property", "expected string", "expected array")
+    # A model handed a server's root will build paths inside it rather than look — and a
+    # guessed path that misses produces another guess. Naming the recovery at the point of
+    # failure is what turns three wrong guesses into one listing.
+    _MISSING_HINTS = ("enoent", "no such file", "not found", "does not exist",
+                      "cannot find", "outside allowed", "access denied")
+
+    def _enrich_error(self, call: ToolCall, result: dict) -> dict:
+        """Attach to a failure the one thing that makes the next attempt succeed."""
+        error = (result.get("error") or "").lower()
+        tool = self.c.mcp.resolve(call.name)
+        if any(hint in error for hint in self._VALIDATION_HINTS):
+            if tool is None or not tool.get("input_schema"):
+                return result
+            schema = json.dumps(tool["input_schema"], ensure_ascii=False)[:1500]
+            return {**result, "error": f"{result.get('error', '')}\n\n"
+                                       f"The exact schema `{call.name}` accepts:\n{schema}\n"
+                                       f"Send arguments matching it exactly — do not guess field "
+                                       f"names, and do not retry the shape that just failed."}
+        if any(hint in error for hint in self._MISSING_HINTS):
+            listers = sorted({t["qualified_name"] for t in self.c.mcp.tools()
+                              if t["server_id"] == (tool or {}).get("server_id")
+                              and any(w in t["name"] for w in ("list", "directory", "tree"))})
+            how = (f"List it with {listers[0]} and read the real name from the result."
+                   if listers else "List the parent directory before trying another path.")
+            return {**result, "error": f"{result.get('error', '')}\n\n"
+                                       f"That path does not exist. Do NOT guess a different "
+                                       f"one — a second guess fails the same way. {how}"}
+        return result
 
     # ------------------------------------------------------------------ critic
     async def _critique(self, ctx: RunContext, call: ToolCall, outcome: dict) -> dict:

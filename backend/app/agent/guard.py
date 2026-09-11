@@ -53,6 +53,7 @@ class LoopGuard:
         self.timeout_s = timeout_s
         self.stagnation_limit = max(1, stagnation_limit)
         self.started_at = time.time()
+        self._paused_at: float | None = None
         self.total_attempts = 0
         self._fail_streak: dict[str, int] = {}
         self._seen: dict[str, int] = {}
@@ -74,16 +75,35 @@ class LoopGuard:
         """
         return self._seen.get(signature(name, arguments), 0)
 
+    def pause(self) -> None:
+        """Stop the clock while a human decides.
+
+        The wall-clock budget exists to bound the *agent*, not the person approving a
+        step. Without this, a run that waits three minutes for a yes has three minutes
+        less to do the work it was approved for — and can time out having done nothing
+        but wait.
+        """
+        if self._paused_at is None:
+            self._paused_at = time.time()
+
+    def resume(self) -> None:
+        if self._paused_at is not None:
+            self.started_at += time.time() - self._paused_at
+            self._paused_at = None
+
+    def elapsed_s(self) -> float:
+        reference = self._paused_at if self._paused_at is not None else time.time()
+        return reference - self.started_at
+
     def over_step_budget(self) -> bool:
         return self.max_total_steps > 0 and self.total_attempts >= self.max_total_steps
 
     def over_time_budget(self) -> bool:
-        return self.timeout_s > 0 and (time.time() - self.started_at) >= self.timeout_s
+        return self.timeout_s > 0 and self.elapsed_s() >= self.timeout_s
 
     def remaining_s(self) -> float:
-        return max(0.0, self.timeout_s - (time.time() - self.started_at))
+        return max(0.0, self.timeout_s - self.elapsed_s())
 
     def snapshot(self) -> dict:
         return {"steps_used": self.total_attempts, "max_steps": self.max_total_steps,
-                "elapsed_s": round(time.time() - self.started_at, 1),
-                "timeout_s": self.timeout_s}
+                "elapsed_s": round(self.elapsed_s(), 1), "timeout_s": self.timeout_s}

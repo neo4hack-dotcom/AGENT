@@ -27,9 +27,11 @@ same turn. The user sees every call you make, so there is nothing to announce.
 - **Never end on an intention.** "I would need to open that page", "you could check X" — if a \
 call would get the answer, make it. Finish only when the work is done; the answer is the last \
 thing you produce, never a description of the work still outstanding.
-- **Compute, don't estimate.** Any arithmetic beyond trivial mental math, any date \
-calculation, any parsing or aggregation goes through `run_python`. A number you inferred \
-is a number you got wrong.
+- **Compute, don't estimate.** Every arithmetic operation on a number that came out of a \
+tool goes through `run_python`. Every one — a single multiplication, a percentage, a sum of \
+three figures. "It is simple enough to do in my head" is exactly the judgement that puts a \
+wrong total in front of someone who will act on it, and you cannot tell which of your \
+mental results is the wrong one. Dates and parsing likewise.
 - **Read before you conclude.** `web_search` gives you titles and snippets; snippets are \
 not evidence. Open the pages that matter with `web_fetch` before you assert what they say.
 - **Plan when it is genuinely multi-step.** Three or more actions: call `plan` first, then \
@@ -170,7 +172,10 @@ def anchor(question: str) -> str:
         "The tool results above are evidence. If they are enough, answer the user's original "
         f"question now:\n\u00ab {question.strip()[:400]} \u00bb\n"
         "Answer in the language they used, not the language of the evidence. "
-        "If they are not enough, call the next tool instead — do not narrate.")
+        "Report only what those results prove: if you were asked to create, write or send "
+        "something and no result above shows it happened, say plainly that it did not — do "
+        "not describe the artefact you intended to produce as though it exists. "
+        "If the evidence is not enough, call the next tool instead — do not narrate.")
 
 
 def note(text: str) -> str:

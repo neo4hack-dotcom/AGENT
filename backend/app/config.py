@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     stagnation_limit: int = 2     # identical structural failures before the guard fires
     run_timeout_s: int = 1200     # wall clock for one answer
     tool_timeout_s: int = 180
+    # How long a sensitive step waits for a human. The run's own clock is paused
+    # meanwhile, so this is patience, not budget.
+    approval_timeout_s: int = 300
     parallel_max_fanout: int = 4  # concurrent tool calls in one turn
     history_turns: int = 20       # conversation turns replayed into the prompt
     critic_min_tools: int = 1     # tool calls before the pre-answer reflection runs

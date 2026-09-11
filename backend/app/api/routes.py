@@ -137,7 +137,7 @@ async def chat(body: ChatBody) -> dict:
             notes.append(f"[image attached: {record['name']}]")
         else:
             notes.append(f"[file attached: {record['rel_path']} — it is in your workspace; "
-                         f"read it with read_file or run_python]")
+                         f"read it with workspace_read or run_python]")
     if notes:
         text = (text + "\n\n" + "\n".join(notes)).strip()
 

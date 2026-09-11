@@ -62,9 +62,19 @@ need a different model (`qwen3.5:4b` and `gemma4:e4b` both see).
 | `current_time` | the machine's date and time |
 
 Every connected **MCP** server adds its tools to the same index, namespaced by server
-(`filesystem__read_file`). The library ships fifteen ready recipes — filesystem, Git,
-SQLite, Postgres, Playwright, GitHub, Slack, Notion, Context7 — and any other server is one
-"custom server" form away, over stdio or HTTP.
+(`filesystem__read_file`), and the built-in file tools are named `workspace_*` so it is
+never ambiguous which directory a call is about.
+
+**The library is local-only by selection.** Every one of its ten recipes runs as a process
+on your machine and needs no third-party account: filesystem, Git, SQLite, Postgres,
+Web Fetch, Playwright, knowledge-graph memory, sequential thinking, time, and the protocol's
+own reference server. Two of them reach the network *at your instruction* — Web Fetch opens
+the URL you name, Playwright drives a browser to the page you name — and neither holds a
+credential.
+
+A server that talks to a hosted API is still one "custom server" form away, over stdio or
+HTTP. It is simply a decision you make deliberately rather than one the shelf makes look
+routine.
 
 ---
 
@@ -199,6 +209,14 @@ than an opaque import error.
   local-first app.
 
 ---
+
+## How well it actually works
+
+[`EVALS.md`](EVALS.md) records a ten-case campaign where every task needs two or three MCP
+servers at once, run against a real SQLite database, a git repository and a document folder,
+each with a ground truth checkable to the cent. It lists what broke, why, and what changed:
+86 tool calls became 54, fourteen failures became five, and every artefact the agent claims
+to have written now exists with the right content.
 
 ## Limits, said plainly
 

@@ -1,12 +1,20 @@
 """The MCP library: a curated shelf of servers connectable in two clicks.
 
-Each entry is a *recipe*, not a connection — it names a published package or endpoint and
-the parameters it needs. Nothing is bundled or vendored: the command runs against
-whatever `npx`/`uvx` resolves on this machine at connect time, and a package that cannot
-be fetched fails visibly on its card rather than silently doing nothing.
+**Everything on this shelf runs as a process on this machine and needs no third-party
+account.** That is the selection rule, and it is the point: the shelf is what you can
+connect without deciding to trust anyone, so browsing it never presents a signup as a
+capability. A server that talks to a hosted API — GitHub, Slack, Notion, a search
+provider — is still one "Custom server" form away, over stdio or HTTP. It is simply a
+decision you make deliberately rather than one the shelf makes look routine.
 
-Adding an entry is data, not code. Anything not on this shelf is one "Custom server" form
-away — the shelf is a convenience, never a restriction.
+Two entries here do reach the network *at your instruction* rather than on their own:
+Web Fetch opens the URL you name, and Playwright drives a browser to the page you name.
+Both run locally and hold no credentials.
+
+Each entry is a *recipe*, not a connection — it names a published package and the
+parameters it needs. Nothing is bundled or vendored: the command runs against whatever
+`npx`/`uvx` resolves at connect time, and a package that cannot be fetched fails visibly
+on its card rather than silently doing nothing.
 """
 
 from __future__ import annotations
@@ -49,8 +57,11 @@ CATALOG: list[dict[str, Any]] = [
         "id": "sqlite", "name": "SQLite", "vendor": "Model Context Protocol",
         "category": "Data", "accent": "emerald",
         "description": "Query and explore a local SQLite database, schema included.",
+        # The published server calls `Server.list_resources`, removed in mcp 1.10 — it
+        # crashes on import against a current SDK. Pinning here is the difference between
+        # a recipe that works and one that fails with an upstream traceback on its card.
         "transport": "stdio", "command": "uvx",
-        "args": ["mcp-server-sqlite", "--db-path", "{db_path}"],
+        "args": ["--with", "mcp<1.10", "mcp-server-sqlite", "--db-path", "{db_path}"],
         "params": [_p("db_path", "Database file", placeholder="/Users/you/data/app.db")],
         "tags": ["sql", "read", "local"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
@@ -89,29 +100,6 @@ CATALOG: list[dict[str, Any]] = [
         "tags": ["browser", "write", "automation"],
         "docs": "https://github.com/microsoft/playwright-mcp",
     },
-    {
-        "id": "context7", "name": "Context7 Docs", "vendor": "Upstash",
-        "category": "Web", "accent": "sky",
-        "description": "Up-to-date documentation and code examples for thousands of libraries, pulled on "
-                       "demand instead of recalled from training data.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@upstash/context7-mcp"],
-        "params": [],
-        "tags": ["read", "docs"],
-        "docs": "https://github.com/upstash/context7",
-    },
-    {
-        "id": "brave-search", "name": "Brave Search", "vendor": "Brave",
-        "category": "Web", "accent": "sky",
-        "description": "Web and local search through the Brave Search API. Needs a free API key.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
-        "env": {"BRAVE_API_KEY": "{api_key}"},
-        "params": [_p("api_key", "Brave API key", secret=True,
-                      help="Free tier at brave.com/search/api")],
-        "tags": ["search", "read"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search",
-    },
     # ----------------------------------------------------------------- thinking
     {
         "id": "memory", "name": "Knowledge Graph Memory", "vendor": "Model Context Protocol",
@@ -146,43 +134,6 @@ CATALOG: list[dict[str, Any]] = [
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
     },
     # -------------------------------------------------------------------- work
-    {
-        "id": "github", "name": "GitHub", "vendor": "GitHub",
-        "category": "Work", "accent": "rose",
-        "description": "Issues, pull requests, code search and repository files on GitHub, through "
-                       "GitHub's own hosted MCP endpoint.",
-        "transport": "http", "url": "https://api.githubcopilot.com/mcp/",
-        "headers": {"Authorization": "Bearer {token}"},
-        "params": [_p("token", "GitHub personal access token", secret=True,
-                      placeholder="ghp_…",
-                      help="github.com → Settings → Developer settings → Personal access tokens")],
-        "tags": ["read", "write", "vcs"],
-        "docs": "https://github.com/github/github-mcp-server",
-    },
-    {
-        "id": "slack", "name": "Slack", "vendor": "Model Context Protocol",
-        "category": "Work", "accent": "rose",
-        "description": "Read channels and post messages as a Slack bot user.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-slack"],
-        "env": {"SLACK_BOT_TOKEN": "{bot_token}", "SLACK_TEAM_ID": "{team_id}"},
-        "params": [_p("bot_token", "Bot user OAuth token", secret=True, placeholder="xoxb-…"),
-                   _p("team_id", "Team ID", placeholder="T01234567")],
-        "tags": ["read", "write", "chat"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/slack",
-    },
-    {
-        "id": "notion", "name": "Notion", "vendor": "Notion",
-        "category": "Work", "accent": "rose",
-        "description": "Search, read and write Notion pages and databases.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@notionhq/notion-mcp-server"],
-        "env": {"NOTION_TOKEN": "{token}"},
-        "params": [_p("token", "Notion integration token", secret=True, placeholder="ntn_…",
-                      help="notion.so/my-integrations — then share the pages with it.")],
-        "tags": ["read", "write", "docs"],
-        "docs": "https://github.com/makenotion/notion-mcp-server",
-    },
     # ------------------------------------------------------------------ testing
     {
         "id": "everything", "name": "Everything (reference server)",
@@ -199,7 +150,7 @@ CATALOG: list[dict[str, Any]] = [
 
 CATALOG_BY_ID: dict[str, dict[str, Any]] = {entry["id"]: entry for entry in CATALOG}
 
-CATEGORIES = ["Files", "Data", "Web", "Reasoning", "Work", "Testing"]
+CATEGORIES = ["Files", "Data", "Web", "Reasoning", "Testing"]
 
 
 def instantiate(catalog_id: str, values: dict[str, str]) -> dict[str, Any]:

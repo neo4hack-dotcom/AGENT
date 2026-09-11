@@ -30,6 +30,7 @@ OVERRIDABLE = {
     "python_timeout_s", "python_memory_mb", "num_ctx", "critic_min_tools",
     "history_turns", "parallel_max_fanout", "stagnation_limit", "max_retries",
     "web_timeout_s", "mcp_call_timeout_s", "mcp_startup_timeout_s",
+    "approval_timeout_s",
 }
 
 # Values Admin may set that have no environment counterpart.

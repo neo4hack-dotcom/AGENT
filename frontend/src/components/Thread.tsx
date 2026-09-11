@@ -120,7 +120,7 @@ function ToolBlock({ block }: { block: Block }) {
   const Icon = toolIcon(block);
   const running = block.status === 'running' || block.status === 'awaiting_approval';
   const failed = block.ok === false;
-  const denied = block.status === 'denied';
+  const denied = block.status === 'denied' || block.status === 'expired';
 
   return (
     <div className="my-1.5">
@@ -181,11 +181,20 @@ export interface ApprovalRequest {
   args: Record<string, unknown>;
   server: string;
   reason: string;
+  expires_in_s: number;
 }
 
 export function ApprovalCard({
   request, onResolve, busy,
 }: { request: ApprovalRequest; onResolve: (approved: boolean) => void; busy?: boolean }) {
+  // The run's own clock is paused while this sits here, so the only thing counting down is
+  // this request. Saying so beats a card that silently stops mattering.
+  const [left, setLeft] = useState(request.expires_in_s ?? 0);
+  useEffect(() => {
+    setLeft(request.expires_in_s ?? 0);
+    const id = setInterval(() => setLeft((v) => Math.max(0, v - 1)), 1000);
+    return () => clearInterval(id);
+  }, [request.call_id, request.expires_in_s]);
   return (
     <div className="my-3 overflow-hidden rounded-xl border border-amber-300/70 bg-amber-50/70 dark:border-amber-500/25 dark:bg-amber-500/[0.07] animate-fade-up">
       <div className="flex items-start gap-2.5 px-3.5 py-3">
@@ -195,7 +204,10 @@ export function ApprovalCard({
             Allow <span className="font-mono">{request.name}</span>
             {request.server && <span className="font-normal opacity-70"> · {request.server}</span>} ?
           </p>
-          <p className="mt-0.5 text-2xs leading-relaxed text-amber-800/80 dark:text-amber-200/70">{request.reason}</p>
+          <p className="mt-0.5 text-2xs leading-relaxed text-amber-800/80 dark:text-amber-200/70">
+            {request.reason}
+            {left > 0 && <> · expires in {Math.floor(left / 60)}:{String(left % 60).padStart(2, '0')}</>}
+          </p>
           <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-white/70 p-2 font-mono text-[11px] leading-relaxed text-amber-900 dark:bg-black/25 dark:text-amber-100">
             {JSON.stringify(request.args ?? {}, null, 2)}
           </pre>

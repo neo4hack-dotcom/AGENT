@@ -342,6 +342,33 @@ class McpRegistry:
             })
         return out
 
+    def scopes(self) -> list[dict]:
+        """What each connected server was actually pointed at.
+
+        A server configured with a root — a filesystem directory, a git repository, a
+        database file — knows its scope; the model does not, because that scope lives in
+        the server's command line, not in any tool schema. So the model guesses: `git_log`
+        with `repo_path="."`, `read_file` on a path relative to nothing. Three of the ten
+        cross-server cases failed on exactly that, and every one of them is a guess this
+        one line of prompt removes.
+
+        Absolute paths are the signal: they are what a user types when they scope a server,
+        and nothing else in an argv looks like one.
+        """
+        out: list[dict] = []
+        for server in self.store.mcp_servers().values():
+            conn = self.connections.get(server["id"])
+            if conn is None or conn.status != "connected":
+                continue
+            paths = [a for a in (server.get("args") or [])
+                     if isinstance(a, str) and a.startswith("/") and len(a) > 1]
+            target = server.get("url") or ""
+            if paths or target:
+                out.append({"server": server["name"],
+                            "slug": server.get("slug") or "",
+                            "paths": paths, "url": target})
+        return out
+
     def search(self, query: str, limit: int = 20) -> list[dict]:
         terms = [t for t in (query or "").lower().replace(",", " ").split() if len(t) > 2]
         scored: list[tuple[int, dict]] = []
