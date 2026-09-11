@@ -58,6 +58,11 @@ export default function App() {
   const [approving, setApproving] = useState(false);
   const stopStream = useRef<(() => void) | null>(null);
   const liveRef = useRef<Live | null>(null);
+  // Set synchronously, before the request leaves. `running` cannot do this job: it derives
+  // from `live`, which is only set once the server has answered — and two Enter presses
+  // inside that round trip both pass the check, start two runs, and interleave two answers
+  // into one conversation. A ref changes on the same tick as the keystroke.
+  const sending = useRef(false);
   const finishRunRef = useRef<(() => Promise<void>) | null>(null);
 
   /* ------------------------------------------------------------ loading */
@@ -144,6 +149,9 @@ export default function App() {
     if (!runId) return;
     const last = [...restored.messages].reverse().find((m) => m.role === 'assistant');
     if (!last) return;
+    // StrictMode runs mount effects twice; without this the second attach opens a second
+    // EventSource on the same run and every delta lands in the state twice.
+    stopStream.current?.();
     setLive(emptyLive(runId, restored.id, last.id));
     stopStream.current = streamRun(runId, onEvent, () => { void finishRunRef.current?.(); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -154,6 +162,7 @@ export default function App() {
     // Read the run from a ref rather than from inside a state updater: under StrictMode an
     // updater runs twice, and reloading the conversation twice is a visible flicker.
     const running = liveRef.current;
+    liveRef.current = null;   // released here, not one commit later
     setLive(null);
     if (running) await reloadConversation(running.conversationId);
     void refreshConversations();
@@ -163,6 +172,8 @@ export default function App() {
 
   /* -------------------------------------------------------------- actions */
   const send = useCallback(async (text: string, attachments: string[]) => {
+    if (sending.current || liveRef.current) return;
+    sending.current = true;
     try {
       const started = await api.chat({
         conversation_id: conversation?.id ?? '', text, attachments,
@@ -185,7 +196,11 @@ export default function App() {
           updated_at: Date.now() / 1000, messages: [message, placeholder],
         };
       });
-      setLive(emptyLive(started.run_id, started.conversation_id, started.message_id));
+      const fresh = emptyLive(started.run_id, started.conversation_id, started.message_id);
+      setLive(fresh);
+      liveRef.current = fresh;   // in effect before React commits, so the guard above holds
+      // Never leave a stream behind: two EventSources on one run deliver every delta twice.
+      stopStream.current?.();
       stopStream.current = streamRun(started.run_id, onEvent, (reason) => {
         if (reason === 'error') {
           toast('The live stream dropped. Reload the conversation to see the saved answer.', 'error');
@@ -194,6 +209,8 @@ export default function App() {
       });
     } catch (e) {
       toast(String((e as Error).message), 'error');
+    } finally {
+      sending.current = false;
     }
   }, [conversation?.id, onEvent, toast, finishRun]);
 

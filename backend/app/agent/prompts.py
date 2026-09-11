@@ -55,6 +55,12 @@ say what you have and what you could not get.
 - Never elide content you are passing to a tool. `...`, `…`, "and so on" inside a tool \
 argument is written literally to the file, the query, the message. Write the whole thing or \
 generate it with `run_python`.
+- **Never retype data.** If a file has to be somewhere else, copy it — `workspace_import`, \
+or `run_python` — never read it and write it back out through an argument. Data that passes \
+through you as text comes back changed: rows get completed, gaps get filled with plausible \
+values, a six-row file becomes twenty-one. You will not notice, and neither will anything \
+downstream, because everything after that point will be genuinely computed from what you \
+invented.
 - When a tool fails, say so plainly and say what you are doing about it. A failed tool is \
 information, not something to paper over. If you cannot complete the task, deliver what \
 you did establish and name precisely what is missing.
@@ -158,6 +164,18 @@ def system_prompt(model: str, catalog: str, memory_block: str, host: str = "this
         user_host=host,
         tools_block=tools_block,
         memory_block=memory_block or "",
+    )
+
+
+def rewrite_instruction(question: str) -> str:
+    """The closing order when the answer rests on the conversation rather than on this
+    run's tools — a follow-up question about data fetched two turns ago, say."""
+    return (
+        "Write the final answer now. The user asked:\n\n"
+        f"\u00ab {question.strip()[:600]} \u00bb\n\n"
+        "Everything you need is already in this conversation — data fetched earlier counts "
+        "as available to you. Answer in the language they used. If something genuinely is "
+        "missing, name precisely what."
     )
 
 

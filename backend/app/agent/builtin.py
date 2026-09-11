@@ -89,7 +89,8 @@ def normalize_plan(raw: Any) -> list[dict]:
 
 
 def build_registry(settings, memory, workspace: Path, on_plan,
-                   foreign_roots: Callable[[], str] | None = None) -> dict[str, ToolSpec]:
+                   foreign_roots: Callable[[], str] | None = None,
+                   granted_roots: Callable[[], list[str]] | None = None) -> dict[str, ToolSpec]:
     """Assemble the built-in tools that are actually enabled right now.
 
     A tool switched off in Admin is *absent* from the catalog the model sees, not present
@@ -174,6 +175,16 @@ def build_registry(settings, memory, workspace: Path, on_plan,
         return {"ok": True, "summary": f"{result['action']} {path} ({result['bytes']} bytes)",
                 "text": f"{result['action']} {path} ({result['bytes']} bytes). "
                         f"Exactly this was written:\n---\n{excerpt}\n---"}
+
+    async def h_import(source_path: str = "", name: str = "", **_: Any) -> dict:
+        result = file_tool.import_file(workspace, source_path, name,
+                                       granted_roots() if granted_roots else [])
+        if not result.get("ok"):
+            return result
+        return {"ok": True,
+                "summary": f"imported {result['name']} ({result['bytes']} bytes)",
+                "text": f"Copied {result['source']} to {result['name']} in the workspace, "
+                        f"{result['bytes']} bytes, byte for byte."}
 
     async def h_remember(fact: str = "", **_: Any) -> dict:
         try:
@@ -268,6 +279,17 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                  _obj({"path": {"type": "string"}, "content": {"type": "string"}},
                       ["path", "content"]),
                  h_write_file, write=True, group="Workspace"),
+        ToolSpec("workspace_import",
+                 "Copy a file into this app's workspace without its contents passing through "
+                 "you. Use this — never read-then-write — whenever a file needs to be where "
+                 "another tool can open it: retyping data is how rows get invented. The "
+                 "source must be inside a directory a connected server was granted.",
+                 _obj({"source_path": {"type": "string",
+                                       "description": "Absolute path of the file to copy."},
+                       "name": {"type": "string",
+                                "description": "Name to save it under. Defaults to the "
+                                               "source's own filename."}}, ["source_path"]),
+                 h_import, write=True, group="Workspace"),
         ToolSpec("remember",
                  "Store one durable fact about the user or their work, so it is available in every "
                  "future conversation. Use it for stable preferences, names, and context worth "
@@ -292,7 +314,7 @@ _PLAN_DESC = (
 
 
 def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
-                 scopes: list[dict] | None = None) -> str:
+                 scopes: list[dict] | None = None, workspace: str = "") -> str:
     """A compact index of the live tool surface for the system prompt.
 
     Names only, grouped. The full descriptions and JSON schemas already travel in the
@@ -319,6 +341,14 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
                 # How each server wants its paths spelled is its own schema's business,
                 # and an instruction here overrides that to everyone's cost.
                 where = f"\n    ↳ this server is configured for: {target}"
+                # The single most useful fact about a server rooted where the built-in
+                # tools write: it means a file the agent saves is a file this server can
+                # open. Without it stated, the agent reads data it cannot load and reports
+                # the two directories as an impasse — which is how a perfectly possible
+                # analysis becomes "I could not load the CSV".
+                if workspace and workspace in scope["paths"]:
+                    where += (" — the same directory workspace_write writes to, so anything "
+                              "you save there is immediately loadable here")
             lines.append(f"{server}: {shown}{more}{where}")
     return "\n".join(lines)
 
