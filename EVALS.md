@@ -64,22 +64,48 @@ than all of the above:
 
 ## Result
 
+Both columns are a full ten-case run, the first on the original code and the second on the
+code as it stands:
+
 | | Before | After |
 |---|---|---|
-| Tool calls across the ten cases | 86 | 54 |
-| Failed calls | 14 | 5 |
-| Cases with no failure at all | 3 | 6 |
-| Input tokens | 637 k | 410 k |
+| Tool calls across the ten cases | 86 | 56 |
+| Failed calls | 14 | 8 |
+| Cases with no failure at all | 3 | 4 |
+| Input tokens | 637 k | 380 k |
+| Wall clock | 300 s | 274 s |
 | Artefacts written correctly | 3 of 5 | 5 of 5 |
-| Answers matching ground truth | 9/10 | 10/10 |
+| Answers matching ground truth | 9/10 | 9/10 |
 
-The two numbers worth more than the rest: every artefact is now real, and no answer claims
-work that was not done. Across every run, including the ones where the agent could not find
-a file, it said so — it never once invented the VAT rates it certainly knows by heart.
+The score did not move, and that is the honest reading: the agent was already getting the
+right answer most of the time. What changed is how much it had to spend to get there — a
+third fewer calls, 40 % fewer input tokens — and, far more importantly, **what it says about
+work it did not do.**
+
+Before, one run wrote a file containing `# ` and an ellipsis and then displayed the full
+table as though it had written it; another titled its answer with the name of a file no tool
+had created. Neither happens now. In the final run every artefact exists with the right
+content, and the single case that misses its ground truth (C07) misses it by saying *"the
+repository contains no CSV to compare against"* — which is true. Across every run, including
+the ones where it could not find a file, the agent said so. It never once invented the VAT
+rates it certainly knows by heart.
+
+## What the remaining failures are
+
+Almost all of them are one thing: the Filesystem server is rooted at `/tmp/agent-testbed`
+and the Git server at `/tmp/agent-testbed/repo`, so a task that says "write it to
+`docs/CHANGELOG.md`" is **genuinely ambiguous** — both roots could have a `docs/`. The agent
+picks one, says which, and is right about what it did. That ambiguity is in the task as much
+as in the agent, and it is worth knowing that overlapping server roots produce it.
+
+The rest are a memory server whose schema is strict enough to cost one corrected call, and
+one `fetch` call rejected for asking for more bytes than the server allows — both surfaced
+with the server's own message, both recovered from on the next turn.
 
 ## Reproducing
 
-`/tmp/agent-testbed` is built by the fixture script in the campaign notes; the harness runs
-each case in a fresh conversation and records the full event stream. Results vary run to
-run — the model is sampled, not deterministic — so the mechanics (calls, failures, artefacts)
-are the signal, not any single score.
+`/tmp/agent-testbed` holds the SQLite database, the git repository and the documents; the
+harness runs each case in a fresh conversation and records the full event stream. Results
+vary run to run — the model is sampled, not deterministic — so the mechanics (calls, failed
+calls, artefacts, fabrications) are the signal, not any single score. Numbers here are from
+one full run of each, not a best-of.
