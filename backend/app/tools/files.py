@@ -72,6 +72,54 @@ def read_file(workspace: Path, path: str, max_bytes: int = 400_000) -> dict:
             "text": text + ("\n[truncated]" if truncated else "")}
 
 
+def import_file(workspace: Path, source: str, name: str, granted: list[str],
+                max_bytes: int = 200_000_000) -> dict:
+    """Copy a file into the workspace byte for byte.
+
+    This exists because of one observed failure, and it is worth stating plainly: asked to
+    move a six-row CSV into a directory a pandas server could read, the agent read it,
+    retyped it through a `content` argument — and filled in fifteen years of data that were
+    never in the file, in perfectly regular increments. It then ran genuine pandas on the
+    invented file and reported the results as fact. Every guard downstream was satisfied,
+    because everything downstream *was* real.
+
+    Data that passes through a language model as text can be completed, abbreviated or
+    tidied. So here it does not pass through at all: the model names a source and a
+    destination, and the bytes are copied by this function.
+
+    The source must sit inside a directory the user has explicitly granted to a connected
+    server. That is the user's own grant, honoured — not a new privilege.
+    """
+    origin = Path(source or "").expanduser()
+    if not origin.is_absolute():
+        return {"ok": False, "error": f"'{source}' must be an absolute path."}
+    try:
+        origin = origin.resolve()
+    except OSError as exc:
+        return {"ok": False, "error": f"Cannot resolve '{source}': {exc}"}
+    allowed = [Path(root).expanduser().resolve() for root in granted if root]
+    if not any(origin == root or root in origin.parents for root in allowed):
+        where = ", ".join(str(root) for root in allowed) or "no directory"
+        return {"ok": False,
+                "error": f"'{source}' is outside every directory this agent has been granted. "
+                         f"Granted: {where}. Connect a server rooted where the file lives, or "
+                         f"copy it there yourself."}
+    if not origin.is_file():
+        return {"ok": False, "error": f"'{source}' is not a file."}
+    size = origin.stat().st_size
+    if size > max_bytes:
+        return {"ok": False,
+                "error": f"'{source}' is {size / 1e6:.0f} MB; the import ceiling is "
+                         f"{max_bytes / 1e6:.0f} MB."}
+    try:
+        target = resolve(workspace, name.strip() or origin.name)
+    except OutsideWorkspace as exc:
+        return {"ok": False, "error": str(exc)}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(origin.read_bytes())
+    return {"ok": True, "name": target.name, "bytes": size, "source": str(origin)}
+
+
 def write_file(workspace: Path, path: str, content: str) -> dict:
     try:
         target = resolve(workspace, path)

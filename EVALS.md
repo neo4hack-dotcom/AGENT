@@ -90,6 +90,31 @@ repository contains no CSV to compare against"* — which is true. Across every 
 the ones where it could not find a file, the agent said so. It never once invented the VAT
 rates it certainly knows by heart.
 
+## The one that mattered most, found later
+
+Adding a bundled pandas server created a directory boundary — the server can only open
+files inside its own workspace — and with it a step that had not existed before: getting a
+file *across*. Asked to analyse a six-row CSV that lived elsewhere, the agent read it,
+retyped it through a `content` argument, and **filled in fifteen years of data that were
+never in the file**, in perfectly regular increments of 50 000. It then ran genuine pandas
+on the invented file, reported the results as fact, and cited the expressions it had run.
+
+Every guard held. The pandas run was real, the audit log was clean, the numbers were
+internally consistent — because everything after the copy *was* real. The fabrication
+happened at the one step nothing was watching: data passing back out through a tool
+argument, where a language model can complete it, tidy it, or extend the trend.
+
+The fix is not a better check. It is removing the step: `workspace_import` copies bytes,
+so the model names a source and a destination and the contents never pass through it at
+all. The source must sit inside a directory the user has already granted to a connected
+server — the user's own grant honoured, not a new privilege. The same task now runs in
+seven calls instead of thirteen, and the imported file is byte-for-byte identical to the
+original.
+
+The general rule this leaves behind: **anywhere data leaves a tool and re-enters one
+through the model, treat it as lost.** Copy it, or regenerate it with code — never retype
+it.
+
 ## What the remaining failures are
 
 Almost all of them are one thing: the Filesystem server is rooted at `/tmp/agent-testbed`

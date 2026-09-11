@@ -308,8 +308,11 @@ class AgentRunner:
             return (f"The built-in file tools only ever see {workspace}. "
                     + "; ".join(covered) + ".")
 
+        def granted_roots() -> list[str]:
+            return [p for scope in self.c.mcp.scopes() for p in scope["paths"]]
+
         tools = builtin.build_registry(self.c.settings, self.c.memory, workspace, on_plan,
-                                       foreign_roots)
+                                       foreign_roots, granted_roots)
         mcp_tools = self.c.mcp.tools()
         functions = [spec.as_function() for spec in tools.values()] + self.c.mcp.ollama_tools()
         return tools, mcp_tools, functions
@@ -357,7 +360,9 @@ class AgentRunner:
         await self.c.mcp.wait_ready(timeout=min(8.0, settings.mcp_startup_timeout_s))
 
         tools, mcp_tools, functions = self._tool_surface(ctx)
-        catalog = builtin.catalog_text(tools, mcp_tools, self.c.mcp.scopes())
+        catalog = builtin.catalog_text(tools, mcp_tools, self.c.mcp.scopes(),
+                                       str(Path(self.c.settings.workspace_dir)
+                                           .expanduser().resolve()))
         memory_block = self.c.memory.prompt_block(text)
         system = prompts.system_prompt(getattr(self.c.llm, "model", ""), catalog, memory_block)
 
@@ -567,11 +572,27 @@ class AgentRunner:
                     f"with run_python and pass the result.")))
                 continue
 
+            if ctx.guard.tool_is_down(call.name):
+                immediate.append((call, self._fail(ctx, block,
+                    f"`{call.name}` has failed {ctx.guard.tool_failures(call.name)} times in a "
+                    f"row on different arguments — the tool itself is unavailable right now, "
+                    f"not the way you are calling it. Stop calling it. Use another source, or "
+                    f"answer with what you have and say plainly what could not be obtained.")))
+                continue
+
             if ctx.guard.is_stagnant(call.name, call.arguments):
                 immediate.append((call, self._fail(ctx, block,
                     f"'{call.name}' already failed twice with these exact arguments. Change the "
                     f"arguments or the approach — repeating it will fail again.")))
                 continue
+            target = ctx.guard.subject_repeats(call.name, call.arguments)
+            if target >= 3:
+                immediate.append((call, self._fail(ctx, block,
+                    f"You have already called `{call.name}` on this same target {target} times, "
+                    f"only varying how much of it to return. The content is above in this "
+                    f"conversation. Use it.")))
+                continue
+
             if ctx.guard.repeat_count(call.name, call.arguments) >= 2:
                 immediate.append((call, self._fail(ctx, block,
                     f"You already ran '{call.name}' with these exact arguments twice; the result "
@@ -683,7 +704,8 @@ class AgentRunner:
     # turns to discover a three-field shape it was never shown. The schema is right there
     # in the registry; handing it over turns the whole sequence into one correction.
     _VALIDATION_HINTS = ("validation", "invalid arguments", "invalid input", "-32602",
-                         "required property", "expected string", "expected array")
+                         "required property", "expected string", "expected array",
+                         "bad arguments", "unexpected keyword", "missing a required")
     # A model handed a server's root will build paths inside it rather than look — and a
     # guessed path that misses produces another guess. Naming the recovery at the point of
     # failure is what turns three wrong guesses into one listing.
@@ -703,15 +725,54 @@ class AgentRunner:
                                        f"Send arguments matching it exactly — do not guess field "
                                        f"names, and do not retry the shape that just failed."}
         if any(hint in error for hint in self._MISSING_HINTS):
-            listers = sorted({t["qualified_name"] for t in self.c.mcp.tools()
-                              if t["server_id"] == (tool or {}).get("server_id")
-                              and any(w in t["name"] for w in ("list", "directory", "tree"))})
-            how = (f"List it with {listers[0]} and read the real name from the result."
-                   if listers else "List the parent directory before trying another path.")
             return {**result, "error": f"{result.get('error', '')}\n\n"
                                        f"That path does not exist. Do NOT guess a different "
-                                       f"one — a second guess fails the same way. {how}"}
+                                       f"one — a second guess fails the same way. "
+                                       f"{self._bridge(tool) or self._how_to_list(tool)}"}
         return result
+
+    def _bridge(self, tool: dict | None) -> str:
+        """How to get a file *into* a server that can only see its own directory.
+
+        A server scoped to one directory cannot open a file that lives in another, and the
+        agent — holding the file's contents, having just read them — reports the two
+        directories as an impasse. When that server's directory happens to be the app's own
+        workspace, the bridge is two calls it already has, and naming them here is the
+        difference between an analysis and an apology.
+        """
+        if tool is None:
+            return ""
+        scope = next((s for s in self.c.mcp.scopes() if s["slug"] == tool.get("server_slug")), None)
+        if not scope:
+            return ""
+        workspace = str(Path(self.c.settings.workspace_dir).expanduser().resolve())
+        if workspace not in scope["paths"]:
+            return ""
+        return (f"`{tool['server_name']}` can only open files inside {workspace}, which is "
+                f"this app's own workspace. Copy the file there with "
+                f"`workspace_import(source_path=...)` — it copies bytes, so nothing is "
+                f"retyped — then load it by its name. Do NOT read the file and write it back "
+                f"out: data that passes through you as text comes out changed.")
+
+    # A *directory* lister, not merely a tool with "list" in its name. That distinction is
+    # not pedantic: matching on "list" alone sent a caller to `list_frames`, which reports
+    # loaded dataframes and has nothing to say about a file that is missing from a disk.
+    _DIR_LISTER_HINTS = ("directory", "dir_", "_dir", "tree", "files", "ls_", "browse")
+
+    def _how_to_list(self, tool: dict | None) -> str:
+        candidates = [t for t in self.c.mcp.tools()
+                      if any(w in t["name"].lower() for w in self._DIR_LISTER_HINTS)]
+        same_server = [t["qualified_name"] for t in candidates
+                       if t["server_id"] == (tool or {}).get("server_id")]
+        if same_server:
+            return f"List it with {sorted(same_server)[0]} and read the real name from the result."
+        elsewhere = sorted({t["qualified_name"] for t in candidates})
+        if elsewhere:
+            return (f"This server cannot list its own directory. Use "
+                    f"{elsewhere[0]} — or workspace_list for this app's own workspace — to "
+                    f"find the real name, and if the file was never written, write it first.")
+        return ("Nothing connected here can list that directory. If the data you need is not "
+                "a file yet, write it to disk before trying to load it.")
 
     # ------------------------------------------------------------------ critic
     async def _critique(self, ctx: RunContext, call: ToolCall, outcome: dict) -> dict:

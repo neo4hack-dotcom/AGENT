@@ -144,7 +144,8 @@ class InstallBody(BaseModel):
 async def add_server(body: InstallBody) -> dict:
     if body.catalog_id:
         try:
-            cfg = instantiate(body.catalog_id, body.values)
+            cfg = instantiate(body.catalog_id, body.values,
+                              {"workspace": str(c.workspace())})
         except (KeyError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
     else:

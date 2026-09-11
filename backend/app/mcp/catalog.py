@@ -31,9 +31,12 @@ PYTHON = sys.executable
 
 
 def _p(key: str, label: str, *, required: bool = True, secret: bool = False,
-       placeholder: str = "", help: str = "") -> dict[str, Any]:
+       placeholder: str = "", help: str = "", default_from: str = "") -> dict[str, Any]:
+    """`default_from` names a value the app supplies when the field is left blank —
+    the agent's own workspace, say — so a server can have a useful default without the
+    catalog importing the app's configuration."""
     return {"key": key, "label": label, "required": required, "secret": secret,
-            "placeholder": placeholder, "help": help}
+            "placeholder": placeholder, "help": help, "default_from": default_from}
 
 
 CATALOG: list[dict[str, Any]] = [
@@ -94,8 +97,12 @@ CATALOG: list[dict[str, Any]] = [
                        "with memory and CPU ceilings, and every call is logged with what it ran.",
         "transport": "stdio", "command": PYTHON,
         "args": [str(BUNDLED / "pandas_frames" / "server.py"), "--workspace", "{workspace}"],
-        "params": [_p("workspace", "Data directory", placeholder="/Users/you/data",
-                      help="The only directory the server may read files from or export into.")],
+        "params": [_p("workspace", "Data directory", required=False, default_from="workspace",
+                      placeholder="leave blank to use this app's own workspace",
+                      help="The only directory the server may read from or export into. Left "
+                           "blank it uses the app's workspace — the same directory "
+                           "workspace_write writes to, so data the agent fetches and saves is "
+                           "immediately loadable here.")],
         "tags": ["pandas", "data", "local", "bundled"],
         "docs": "https://pandas.pydata.org/docs/",
     },
@@ -175,24 +182,33 @@ CATALOG_BY_ID: dict[str, dict[str, Any]] = {entry["id"]: entry for entry in CATA
 CATEGORIES = ["Files", "Data", "Web", "Reasoning", "Testing"]
 
 
-def instantiate(catalog_id: str, values: dict[str, str]) -> dict[str, Any]:
+def instantiate(catalog_id: str, values: dict[str, str],
+                context: dict[str, str] | None = None) -> dict[str, Any]:
     """Turn a recipe plus the user's answers into a concrete server config.
 
-    A required parameter left blank raises instead of being substituted with its
+    A *required* parameter left blank raises instead of being substituted with its
     placeholder: a server silently pointed at an example path is worse than one that
-    refuses to be created.
+    refuses to be created. An optional one may fall back to a value the app supplies
+    through `context` — which is a real default, not a guess dressed up as one.
     """
     entry = CATALOG_BY_ID.get(catalog_id)
     if entry is None:
         raise KeyError(f"Unknown catalog entry '{catalog_id}'")
+    context = context or {}
+    resolved: dict[str, str] = {}
+    for param in entry.get("params", []):
+        given = (values.get(param["key"]) or "").strip()
+        if not given and param.get("default_from"):
+            given = (context.get(param["default_from"]) or "").strip()
+        resolved[param["key"]] = given
     missing = [p["label"] for p in entry.get("params", [])
-               if p.get("required") and not (values.get(p["key"]) or "").strip()]
+               if p.get("required") and not resolved.get(p["key"])]
     if missing:
         raise ValueError(f"Missing required value(s): {', '.join(missing)}")
 
     def fill(text: str) -> str:
         for param in entry.get("params", []):
-            text = text.replace("{" + param["key"] + "}", (values.get(param["key"]) or "").strip())
+            text = text.replace("{" + param["key"] + "}", resolved.get(param["key"], ""))
         return text
 
     return {

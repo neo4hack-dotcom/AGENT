@@ -71,7 +71,13 @@ class McpServer:
         try:
             result = handler(**(params.get("arguments") or {}))
         except TypeError as exc:
-            return _error(f"Bad arguments for '{name}': {exc}")
+            # Say what would have worked. "unexpected keyword argument 'limit'" tells a
+            # caller what was wrong and nothing about what is right, so it guesses again.
+            schema = (self._tools.get(name) or {}).get("inputSchema") or {}
+            accepted = ", ".join((schema.get("properties") or {})) or "no arguments"
+            required = ", ".join(schema.get("required") or []) or "none"
+            return _error(f"Bad arguments for '{name}': {exc}. "
+                          f"Accepted: {accepted}. Required: {required}.")
         except Exception as exc:
             log(traceback.format_exc())
             return _error(f"{type(exc).__name__}: {exc}")

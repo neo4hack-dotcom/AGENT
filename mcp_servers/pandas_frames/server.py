@@ -471,7 +471,21 @@ def in_workspace(relative: str, must_exist: bool = True) -> Path:
     if target != CONFIG.workspace and CONFIG.workspace not in target.parents:
         raise ValueError("Refusing to touch anything outside the workspace directory.")
     if must_exist and not target.is_file():
-        raise ValueError(f"'{relative}' does not exist in the workspace.")
+        # Name what is there. A caller told only "does not exist" retries variations of
+        # the same invented name until its budget is gone; a caller shown the actual
+        # contents either finds its file or learns it was never written.
+        try:
+            present = sorted(child.name for child in CONFIG.workspace.iterdir()
+                             if child.is_file() and not child.name.startswith("."))
+        except OSError:
+            present = []
+        listing = (", ".join(present[:40]) + (f" (+{len(present) - 40} more)"
+                                              if len(present) > 40 else "")
+                   if present else "it is empty")
+        raise ValueError(
+            f"'{relative}' does not exist in the workspace ({CONFIG.workspace}). "
+            f"The workspace currently holds: {listing}. "
+            f"If the data you want is not a file yet, write it to this directory first.")
     return target
 
 
