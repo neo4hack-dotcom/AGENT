@@ -51,7 +51,15 @@ function prettyUrl(url: string): string {
   } catch { return url; }
 }
 
+// React renders whatever it is given as an href, `javascript:` included. The model's
+// output is not hostile, but a page it fetched can be — and a link the model repeats from a
+// scraped page is attacker-authored text arriving in the DOM. Only these schemes navigate.
+const SAFE_SCHEME = /^(https?:|mailto:|#|\/)/i;
+
 function Link({ href, children }: { href: string; children: ReactNode }) {
+  if (!SAFE_SCHEME.test(href.trim())) {
+    return <span className="dim" title={`Lien ignoré : ${href.slice(0, 80)}`}>{children}</span>;
+  }
   return (
     <a href={href} target="_blank" rel="noreferrer noopener"
        className="text-brand-700 underline decoration-brand-500/35 underline-offset-2 transition-colors hover:decoration-brand-500 dark:text-brand-300">
