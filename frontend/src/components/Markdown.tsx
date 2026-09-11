@@ -14,21 +14,35 @@ import { CopyButton, cls } from './ui';
 
 /* ------------------------------------------------------------ inline spans */
 
-const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|\[[^\]]*\]\([^)\s]+\)|https?:\/\/[^\s<>()]+)/g;
+// The 【…】 alternative is not decoration: some models (gpt-oss among them) cite sources
+// with CJK lenticular brackets around a bare URL. Left alone they render as literal
+// punctuation wrapped around a link, which looks like a rendering bug in every answer.
+const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|\[[^\]]*\]\([^)\s]+\)|【[^】]+】|https?:\/\/[^\s<>()]+)/g;
+
+/** Plain text, with soft line breaks turned into real ones. */
+function withBreaks(text: string, key: string): ReactNode[] {
+  const lines = text.split('\n');
+  return lines.flatMap((line, i) =>
+    i === 0 ? [line] : [<br key={`${key}-br${i}`} />, line]);
+}
 
 function renderInline(text: string, key: string): ReactNode[] {
   return text.split(INLINE).filter((p) => p !== '' && p !== undefined).map((part, i) => {
     const k = `${key}-${i}`;
     if ((part.startsWith('**') && part.endsWith('**') && part.length > 4)
       || (part.startsWith('__') && part.endsWith('__') && part.length > 4)) {
-      return <strong key={k} className="font-semibold text-zinc-900 dark:text-white">{part.slice(2, -2)}</strong>;
+      return (
+        <strong key={k} className="font-semibold text-zinc-900 dark:text-white">
+          {withBreaks(part.slice(2, -2), k)}
+        </strong>
+      );
     }
     if (part.startsWith('~~') && part.endsWith('~~')) {
       return <s key={k} className="dim">{part.slice(2, -2)}</s>;
     }
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
       return (
-        <code key={k} className="rounded-[5px] bg-zinc-100 px-1.5 py-0.5 font-mono text-[0.86em] text-brand-700 dark:bg-white/[0.08] dark:text-brand-300">
+        <code key={k} className="rounded-[5px] bg-zinc-100 px-1.5 py-0.5 font-mono text-[0.86em] text-brand-800 dark:bg-white/[0.08] dark:text-brand-300">
           {part.slice(1, -1)}
         </code>
       );
@@ -38,8 +52,11 @@ function renderInline(text: string, key: string): ReactNode[] {
     }
     const link = /^\[([^\]]*)\]\(([^)\s]+)\)$/.exec(part);
     if (link) return <Link key={k} href={link[2]}>{link[1] || link[2]}</Link>;
+    const bracketed = /^【\s*(https?:\/\/[^\s】]+)\s*】$/.exec(part);
+    if (bracketed) return <Link key={k} href={bracketed[1]}>{prettyUrl(bracketed[1])}</Link>;
+    if (part.startsWith('【')) return <span key={k}>{part.slice(1, -1)}</span>;
     if (/^https?:\/\//.test(part)) return <Link key={k} href={part}>{prettyUrl(part)}</Link>;
-    return <span key={k}>{part}</span>;
+    return <span key={k}>{withBreaks(part, k)}</span>;
   });
 }
 
@@ -62,7 +79,7 @@ function Link({ href, children }: { href: string; children: ReactNode }) {
   }
   return (
     <a href={href} target="_blank" rel="noreferrer noopener"
-       className="text-brand-700 underline decoration-brand-500/35 underline-offset-2 transition-colors hover:decoration-brand-500 dark:text-brand-300">
+       className="text-brand-800 underline decoration-brand-500/40 underline-offset-2 transition-colors hover:decoration-brand-500 dark:text-brand-300">
       {children}
     </a>
   );
@@ -100,7 +117,7 @@ function highlight(code: string): ReactNode[] {
     } else if (/^\d/.test(token)) {
       out.push(<span key={key} className="text-amber-600 dark:text-amber-400">{token}</span>);
     } else if (KEYWORDS.has(token)) {
-      out.push(<span key={key} className="text-brand-600 dark:text-brand-300">{token}</span>);
+      out.push(<span key={key} className="text-brand-800 dark:text-brand-300">{token}</span>);
     } else {
       out.push(token);
     }
@@ -144,6 +161,7 @@ export function Markdown({ text, className }: { text: string; className?: string
   let code: { lang: string; lines: string[] } | null = null;
   let table: string[][] | null = null;
   let quote: string[] | null = null;
+  let para: string[] | null = null;
 
   const flushList = () => {
     if (!list) return;
@@ -159,7 +177,7 @@ export function Markdown({ text, className }: { text: string; className?: string
             return (
               <li key={i} className="list-none -ml-5 flex items-start gap-2">
                 <span className={cls('mt-[3px] grid h-3.5 w-3.5 shrink-0 place-items-center rounded border text-[9px] hairline',
-                  task[1] !== ' ' && 'border-brand-500 bg-brand-500 text-white')}>
+                  task[1] !== ' ' && 'border-brand-500 bg-brand-500 text-zinc-950')}>
                   {task[1] !== ' ' ? '✓' : ''}
                 </span>
                 <span>{renderInline(task[2], `tk${i}`)}</span>
@@ -211,7 +229,26 @@ export function Markdown({ text, className }: { text: string; className?: string
     quote = null;
   };
 
-  const flushAll = () => { flushList(); flushTable(); flushQuote(); };
+  /** Consecutive non-blank lines are ONE paragraph.
+   *
+   * Rendering each line as its own <p> is not just a spacing problem: it is why a bold
+   * span the model opened on one line and closed three lines later — perfectly ordinary
+   * markdown, and exactly how models write short lists — came out as literal asterisks.
+   * Soft breaks inside the paragraph are kept, because a model that wrote a newline meant
+   * a newline.
+   */
+  const flushPara = () => {
+    if (!para || para.length === 0) return;
+    const text = para.join('\n');
+    blocks.push(
+      <p key={`p${blocks.length}`} className="my-2.5 text-[14px] leading-[1.72] first:mt-0 last:mb-0">
+        {renderInline(text, `pp${blocks.length}`)}
+      </p>,
+    );
+    para = null;
+  };
+
+  const flushAll = () => { flushPara(); flushList(); flushTable(); flushQuote(); };
 
   lines.forEach((raw, index) => {
     const line = raw.replace(/\s+$/, '');
@@ -229,7 +266,7 @@ export function Markdown({ text, className }: { text: string; className?: string
     if (fence) { flushAll(); code = { lang: fence[1] ?? '', lines: [] }; return; }
 
     if (/^\s*\|.*\|\s*$/.test(line)) {
-      flushList(); flushQuote();
+      flushPara(); flushList(); flushQuote();
       const cells = splitRow(line);
       // The |---|---| separator carries no data; it only confirms the row above is a header.
       if (cells.every((c) => /^:?-{2,}:?$/.test(c))) return;
@@ -239,7 +276,7 @@ export function Markdown({ text, className }: { text: string; className?: string
     flushTable();
 
     if (/^\s*>\s?/.test(line)) {
-      flushList();
+      flushPara(); flushList();
       (quote ??= []).push(line.replace(/^\s*>\s?/, ''));
       return;
     }
@@ -247,7 +284,7 @@ export function Markdown({ text, className }: { text: string; className?: string
 
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
-      flushList();
+      flushPara(); flushList();
       const level = Math.min(heading[1].length, 4);
       const Tag = (`h${Math.min(level + 1, 6)}`) as 'h2';
       blocks.push(<Tag key={`h${index}`} className={HEADING[level - 1]}>{renderInline(heading[2], `hh${index}`)}</Tag>);
@@ -255,7 +292,7 @@ export function Markdown({ text, className }: { text: string; className?: string
     }
 
     if (/^\s*([-*_])\s*\1\s*\1[\s*_-]*$/.test(line)) {
-      flushList();
+      flushPara(); flushList();
       blocks.push(<hr key={`r${index}`} className="my-5 border-t hairline" />);
       return;
     }
@@ -263,6 +300,7 @@ export function Markdown({ text, className }: { text: string; className?: string
     const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
     const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
     if (bullet || numbered) {
+      flushPara();
       const ordered = !!numbered;
       if (!list || list.ordered !== ordered) { flushList(); list = { ordered, items: [] }; }
       list.items.push((bullet ?? numbered)![1]);
@@ -270,12 +308,10 @@ export function Markdown({ text, className }: { text: string; className?: string
     }
     flushList();
 
-    if (!line.trim()) return;
-    blocks.push(
-      <p key={`p${index}`} className="my-2.5 text-[14px] leading-[1.72] first:mt-0 last:mb-0">
-        {renderInline(line, `pp${index}`)}
-      </p>,
-    );
+    if (!line.trim()) { flushPara(); return; }
+    // Markdown's hard-break marker: two trailing spaces. Already handled by keeping the
+    // newline, so the spaces themselves are noise.
+    (para ??= []).push(line.replace(/\s+$/, ''));
   });
 
   // Streaming leaves the document open mid-block; close whatever is still accumulating so

@@ -1,7 +1,7 @@
 """Web reach: search and page fetching, with no API key and no third-party SDK.
 
 Both tools are deliberately honest about their limits — a search that returns nothing
-says so, and a page Lumen could not parse returns the reason rather than an empty string
+says so, and a page Agent could not parse returns the reason rather than an empty string
 the model would then narrate as "the page was empty".
 """
 
@@ -140,7 +140,7 @@ async def web_search(query: str, *, max_results: int = 6, timeout_s: int = 30) -
     """Search the web through DuckDuckGo's keyless HTML endpoint.
 
     No API key to manage and nothing to sign up for, which is what makes a freshly
-    installed Lumen able to look something up. If the endpoint changes shape or blocks
+    installed Agent able to look something up. If the endpoint changes shape or blocks
     the request, this reports that plainly instead of returning an empty result set the
     model would read as "nothing exists about this".
     """

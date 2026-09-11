@@ -21,12 +21,12 @@ import {
 type Tab = 'model' | 'mcp' | 'tools' | 'guardrails' | 'memory' | 'diagnostics';
 
 const TABS: { id: Tab; label: string; icon: typeof Cpu }[] = [
-  { id: 'model', label: 'Modèle', icon: Cpu },
-  { id: 'mcp', label: 'Serveurs MCP', icon: Plug },
-  { id: 'tools', label: 'Outils', icon: Wrench },
-  { id: 'guardrails', label: 'Garde-fous', icon: ShieldCheck },
-  { id: 'memory', label: 'Mémoire', icon: Brain },
-  { id: 'diagnostics', label: 'Diagnostic', icon: Activity },
+  { id: 'model', label: 'Model', icon: Cpu },
+  { id: 'mcp', label: 'MCP servers', icon: Plug },
+  { id: 'tools', label: 'Tools', icon: Wrench },
+  { id: 'guardrails', label: 'Guardrails', icon: ShieldCheck },
+  { id: 'memory', label: 'Memory', icon: Brain },
+  { id: 'diagnostics', label: 'Diagnostics', icon: Activity },
 ];
 
 export function Admin({
@@ -45,11 +45,11 @@ export function Admin({
     <div className="fixed inset-0 z-40 flex flex-col bg-white dark:bg-[#0b0b0f] animate-fade-in">
       <header className="flex shrink-0 items-center gap-3 border-b px-5 py-3 hairline">
         <Settings2 size={15} className="text-brand-500" />
-        <h1 className="text-sm font-semibold">Administration</h1>
+        <h1 className="text-sm font-semibold tracking-tight">Admin</h1>
         <Badge tone={state.mode === 'password' ? 'good' : 'neutral'}>
-          {state.mode === 'password' ? 'protégé par mot de passe' : 'accès local uniquement'}
+          {state.mode === 'password' ? 'password protected' : 'local access only'}
         </Badge>
-        <IconButton icon={X} label="Fermer" className="ml-auto" onClick={onClose} />
+        <IconButton icon={X} label="Close" className="ml-auto" onClick={onClose} />
       </header>
 
       {!authenticated ? (
@@ -61,7 +61,7 @@ export function Admin({
               <button key={id} onClick={() => setTab(id)}
                 className={cls('focus-ring flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors',
                   tab === id
-                    ? 'bg-brand-50 text-brand-700 dark:bg-brand-500/12 dark:text-brand-300'
+                    ? 'bg-brand-100 text-brand-800 dark:bg-brand-500/12 dark:text-brand-300'
                     : 'dim hover:bg-zinc-100 dark:hover:bg-white/[0.06]')}>
                 <Icon size={14} strokeWidth={1.9} /> {label}
               </button>
@@ -95,12 +95,12 @@ function LoginGate({ mode, onDone }: { mode: string; onDone: () => void }) {
       <div className="flex flex-1 items-center justify-center p-8">
         <div className="max-w-md text-center">
           <ShieldCheck size={22} className="mx-auto mb-3 dimmer" />
-          <p className="text-sm font-medium">Administration réservée à cette machine</p>
+          <p className="text-sm font-medium">Admin is limited to this machine</p>
           <p className="mt-2 text-xs leading-relaxed dim">
-            Aucun mot de passe n’est défini, donc l’administration n’est accessible que depuis
-            l’ordinateur qui exécute Lumen. Pour y accéder à distance, définissez
-            <code className="mx-1 rounded bg-zinc-100 px-1 py-0.5 font-mono dark:bg-white/[0.07]">LUMEN_ADMIN_PASSWORD</code>
-            puis redémarrez.
+            No password is set, so admin is reachable only from the computer running this app.
+            To administer it from elsewhere, set
+            <code className="mx-1 rounded bg-zinc-100 px-1 py-0.5 font-mono dark:bg-white/[0.07]">AGENT_ADMIN_PASSWORD</code>
+            and restart.
           </p>
         </div>
       </div>
@@ -123,13 +123,13 @@ function LoginGate({ mode, onDone }: { mode: string; onDone: () => void }) {
       <div className="w-full max-w-xs space-y-4">
         <div className="text-center">
           <KeyRound size={20} className="mx-auto mb-2 dimmer" />
-          <p className="text-sm font-medium">Mot de passe administrateur</p>
+          <p className="text-sm font-medium">Admin password</p>
         </div>
         <Input type="password" autoFocus value={password} placeholder="••••••••"
           onChange={(e) => setPassword(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') void submit(); }} />
         {error && <p className="text-center text-xs text-red-600 dark:text-red-400">{error}</p>}
-        <Button className="w-full" size="md" busy={busy} onClick={() => void submit()}>Entrer</Button>
+        <Button className="w-full" size="md" busy={busy} onClick={() => void submit()}>Enter</Button>
       </div>
     </div>
   );
@@ -157,7 +157,7 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
       await api.setPrefs({ [which]: name });
       await load();
       onChanged();
-      toast(which === 'model' ? `Modèle actif : ${name}` : `Modèle rapide : ${name}`);
+      toast(which === 'model' ? `Active model: ${name}` : `Fast model: ${name}`);
     } finally { setSaving(''); }
   };
 
@@ -166,17 +166,18 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
   return (
     <div className="space-y-6">
       <section>
-        <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Serveur Ollama</h3>
+        <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Ollama server</h3>
         <p className="mb-3 text-2xs leading-relaxed dimmer">
-          Lumen ne parle qu’à un modèle local. Rien de ce que vous écrivez ne quitte cette machine.
+          Every model runs through this endpoint. A model tagged <b>remote</b> is hosted by
+          Ollama rather than by this machine — the status badge in the header always says which.
         </p>
         <div className="flex gap-2">
           <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)}
             placeholder="http://localhost:11434" className="font-mono !text-xs" />
           <Button variant="outline" onClick={async () => {
             await api.setPrefs({ ollama_base_url: baseUrl });
-            await load(); onChanged(); toast('Adresse enregistrée');
-          }}>Enregistrer</Button>
+            await load(); onChanged(); toast('Endpoint saved');
+          }}>Save</Button>
         </div>
         {data.error && (
           <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700 dark:bg-red-500/10 dark:text-red-300">
@@ -186,10 +187,10 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
       </section>
 
       <section>
-        <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Modèle de raisonnement</h3>
+        <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Reasoning model</h3>
         <p className="mb-3 text-2xs leading-relaxed dimmer">
-          Les capacités viennent du serveur, pas du nom du modèle. Sans <b>outils</b>, l’agent ne peut
-          rien appeler — il répond seulement de mémoire.
+          Capabilities come from the server, never guessed from the model's name. Without
+          <b> tools</b>, the agent cannot call anything — it only answers from memory.
         </p>
         <div className="space-y-1.5">
           {data.models.map((model) => {
@@ -198,17 +199,17 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
             return (
               <div key={model.name}
                 className={cls('flex items-center gap-3 rounded-xl border px-3 py-2.5 transition-colors',
-                  active ? 'border-brand-400 bg-brand-50/60 dark:border-brand-500/40 dark:bg-brand-500/[0.08]' : 'hairline')}>
+                  active ? 'border-brand-500 bg-brand-50 dark:border-brand-500/40 dark:bg-brand-500/[0.08]' : 'hairline')}>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="font-mono text-xs font-medium">{model.name}</span>
-                    {!model.local && <Badge tone="warn">distant</Badge>}
+                    {!model.local && <Badge tone="warn">remote</Badge>}
                     {model.parameters && <span className="text-2xs dimmer">{model.parameters}</span>}
-                    {model.size_gb > 0 && <span className="text-2xs dimmer">· {model.size_gb} Go</span>}
+                    {model.size_gb > 0 && <span className="text-2xs dimmer">· {model.size_gb} GB</span>}
                   </div>
                   <div className="mt-1 flex flex-wrap gap-1">
-                    <CapabilityBadge on={model.capabilities.tools} icon={Wrench} label="outils" />
-                    <CapabilityBadge on={model.capabilities.thinking} icon={Brain} label="raisonnement" />
+                    <CapabilityBadge on={model.capabilities.tools} icon={Wrench} label="tools" />
+                    <CapabilityBadge on={model.capabilities.thinking} icon={Brain} label="thinking" />
                     <CapabilityBadge on={model.capabilities.vision} icon={Eye} label="vision" />
                     {model.capabilities.context_length > 0 && (
                       <Badge>{Math.round(model.capabilities.context_length / 1024)}k ctx</Badge>
@@ -219,26 +220,26 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
                   <Button size="xs" variant={active ? 'subtle' : 'outline'} disabled={active}
                     busy={saving === model.name + 'model'}
                     onClick={() => void choose(model.name, 'model')}>
-                    {active ? <><Check size={11} /> actif</> : usable ? 'Utiliser' : 'Utiliser quand même'}
+                    {active ? <><Check size={11} /> active</> : usable ? 'Use' : 'Use anyway'}
                   </Button>
                   <button
                     onClick={() => void choose(model.name, 'fast_model')}
                     className={cls('focus-ring rounded px-1 text-2xs transition-colors',
-                      model.name === data.fast_selected ? 'text-brand-600 dark:text-brand-300' : 'dimmer hover:text-zinc-600')}>
-                    {model.name === data.fast_selected ? '★ modèle rapide' : 'définir comme rapide'}
+                      model.name === data.fast_selected ? 'text-brand-800 dark:text-brand-300' : 'dimmer hover:text-zinc-600')}>
+                    {model.name === data.fast_selected ? '★ fast model' : 'set as fast model'}
                   </button>
                 </div>
               </div>
             );
           })}
           {data.models.length === 0 && (
-            <Empty icon={Cpu} title="Aucun modèle disponible"
-              hint={<>Téléchargez-en un&nbsp;: <code className="font-mono">ollama pull qwen3.5:4b</code></>} />
+            <Empty icon={Cpu} title="No model available"
+              hint={<>Pull one: <code className="font-mono">ollama pull qwen3.5:4b</code></>} />
           )}
         </div>
         <p className="mt-3 text-2xs leading-relaxed dimmer">
-          Le <b>modèle rapide</b> sert au critique, à la vérification finale et aux titres — pas à la
-          réponse. Un modèle plus petit y fait gagner du temps sans rien coûter en qualité.
+          The <b>fast model</b> handles the critic, the final gap check and conversation titles —
+          never the answer. A smaller one there saves real time at no cost in quality.
         </p>
       </section>
     </div>
@@ -267,9 +268,9 @@ function ToolsPanel() {
   return (
     <div className="space-y-5">
       <p className="text-xs leading-relaxed dim">
-        Tout ce que l’agent peut appeler en ce moment — {tools.length} outil(s). Les outils marqués
-        <Zap size={10} className="mx-1 inline text-amber-500" /> peuvent modifier quelque chose hors de
-        Lumen et passent par une approbation selon le réglage des garde-fous.
+        Everything the agent can call right now — {tools.length} tool(s). Tools marked
+        <Zap size={10} className="mx-1 inline text-amber-500" /> can change something outside this
+        app, and go through approval depending on the guardrail setting.
       </p>
       {Object.entries(groups).map(([group, list]) => (
         <section key={group}>
@@ -277,7 +278,7 @@ function ToolsPanel() {
           <div className="space-y-1">
             {list.map((tool) => (
               <div key={tool.name} className="flex items-start gap-2.5 rounded-lg border px-3 py-2 hairline">
-                <span className="mt-0.5 shrink-0 font-mono text-2xs font-medium text-brand-700 dark:text-brand-300">
+                <span className="mt-0.5 shrink-0 font-mono text-2xs font-medium text-brand-800 dark:text-brand-300">
                   {tool.name}
                 </span>
                 {tool.write && <Zap size={11} className="mt-0.5 shrink-0 text-amber-500" />}
@@ -294,24 +295,24 @@ function ToolsPanel() {
 /* ------------------------------------------------------------- guardrails */
 
 const APPROVAL_MODES = [
-  { value: 'never', label: 'Jamais', hint: 'L’agent agit seul, y compris pour les écritures MCP.' },
-  { value: 'writes', label: 'Pour les écritures', hint: 'Recommandé : un outil MCP qui modifie quelque chose demande votre accord.' },
-  { value: 'always', label: 'Toujours', hint: 'Chaque outil est soumis à approbation, y compris l’exécution Python locale.' },
+  { value: 'never', label: 'Never', hint: 'The agent acts alone, MCP writes included.' },
+  { value: 'writes', label: 'For writes', hint: 'Recommended: an MCP tool that changes something asks you first.' },
+  { value: 'always', label: 'Always', hint: 'Every tool needs approval, local Python execution included.' },
 ];
 
 const NUMERIC: { key: string; label: string; hint: string; min: number; max: number }[] = [
-  { key: 'max_iterations', label: 'Tours d’outils maximum', min: 1, max: 60,
-    hint: 'Plafond du nombre d’allers-retours modèle → outils pour une seule réponse.' },
-  { key: 'run_timeout_s', label: 'Durée maximale (s)', min: 30, max: 7200,
-    hint: 'Au-delà, l’agent répond avec ce qu’il a réuni plutôt que de continuer.' },
-  { key: 'tool_timeout_s', label: 'Délai par outil (s)', min: 5, max: 900, hint: '' },
-  { key: 'parallel_max_fanout', label: 'Appels parallèles', min: 1, max: 12,
-    hint: 'Outils indépendants lancés simultanément dans un même tour.' },
-  { key: 'stagnation_limit', label: 'Seuil de stagnation', min: 1, max: 6,
-    hint: 'Échecs identiques avant que la garde n’interdise de réessayer.' },
-  { key: 'python_timeout_s', label: 'Délai d’exécution Python (s)', min: 5, max: 600, hint: '' },
-  { key: 'num_ctx', label: 'Fenêtre de contexte (tokens)', min: 0, max: 262144,
-    hint: '0 = déduite du modèle, plafonnée à 16k. Plus large garde plus de preuves en mémoire ; trop large chasse le modèle du GPU et divise la vitesse.' },
+  { key: 'max_iterations', label: 'Max tool turns', min: 1, max: 60,
+    hint: 'Ceiling on model → tools round trips within a single answer.' },
+  { key: 'run_timeout_s', label: 'Max duration (s)', min: 30, max: 7200,
+    hint: 'Past this, the agent answers with what it gathered instead of continuing.' },
+  { key: 'tool_timeout_s', label: 'Per-tool timeout (s)', min: 5, max: 900, hint: '' },
+  { key: 'parallel_max_fanout', label: 'Parallel calls', min: 1, max: 12,
+    hint: 'Independent tools fired at once within one turn.' },
+  { key: 'stagnation_limit', label: 'Stagnation limit', min: 1, max: 6,
+    hint: 'Identical failures before the guard refuses another attempt.' },
+  { key: 'python_timeout_s', label: 'Python timeout (s)', min: 5, max: 600, hint: '' },
+  { key: 'num_ctx', label: 'Context window (tokens)', min: 0, max: 262144,
+    hint: '0 = taken from the model, capped at 16k. Wider keeps more evidence in mind; too wide pushes the model off the GPU and cuts speed several-fold.' },
 ];
 
 function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
@@ -338,21 +339,21 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
   return (
     <div className="space-y-7">
       <section>
-        <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Approbation</h3>
+        <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Approval</h3>
         <p className="mb-3 text-2xs leading-relaxed dimmer">
-          Les outils natifs n’écrivent que dans l’espace de travail de Lumen ; ils ne sont soumis à
-          approbation qu’en mode « toujours ». Les serveurs MCP peuvent avoir des effets réels.
+          Built-in tools only ever write inside the workspace, so they are gated in “always” mode
+          alone. MCP servers can have real-world effects.
         </p>
         <div className="space-y-1.5">
           {APPROVAL_MODES.map((mode) => (
             <button key={mode.value} onClick={() => void update({ approval_mode: mode.value })}
               className={cls('focus-ring flex w-full items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors',
                 prefs.approval_mode === mode.value
-                  ? 'border-brand-400 bg-brand-50/60 dark:border-brand-500/40 dark:bg-brand-500/[0.08]'
+                  ? 'border-brand-500 bg-brand-50 dark:border-brand-500/40 dark:bg-brand-500/[0.08]'
                   : 'hairline hover:bg-zinc-50 dark:hover:bg-white/[0.04]')}>
               <span className={cls('mt-0.5 grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border',
                 prefs.approval_mode === mode.value ? 'border-brand-500 bg-brand-500' : 'hairline')}>
-                {prefs.approval_mode === mode.value && <Check size={9} className="text-white" strokeWidth={3.5} />}
+                {prefs.approval_mode === mode.value && <Check size={9} className="text-zinc-950" strokeWidth={3.5} />}
               </span>
               <span>
                 <span className="block text-xs font-medium">{mode.label}</span>
@@ -364,12 +365,12 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
       </section>
 
       <section className="space-y-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wider dim">Capacités</h3>
-        <Switch checked={!!prefs.enable_web_tools} label="Accès web"
-          hint="web_search et web_fetch. Les seuls outils natifs qui sortent de cette machine."
+        <h3 className="text-xs font-semibold uppercase tracking-wider dim">Capabilities</h3>
+        <Switch checked={!!prefs.enable_web_tools} label="Web access"
+          hint="web_search and web_fetch — the only built-in tools that leave this machine."
           onChange={(v) => void update({ enable_web_tools: v })} />
-        <Switch checked={!!prefs.enable_python_tool} label="Exécution de code Python"
-          hint="Processus séparé, répertoire de travail limité, tué au-delà du délai. Ce n’est pas un bac à sable de sécurité : le code s’exécute avec les droits de Lumen."
+        <Switch checked={!!prefs.enable_python_tool} label="Python execution"
+          hint="Separate process, working directory bounded to the workspace, killed past the timeout. This is not a security sandbox: the code runs with this app's own rights."
           onChange={(v) => void update({ enable_python_tool: v })} />
       </section>
 
@@ -385,8 +386,8 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
                   onBlur={(e) => void update({ [setting.key]: Number(e.target.value) })}
                   className="font-mono !text-xs" />
                 {overridden.includes(setting.key) && (
-                  <button title="Revenir à la valeur d’environnement"
-                    onClick={() => void update({ [setting.key]: null }).then(() => toast('Valeur réinitialisée'))}
+                  <button title="Fall back to the environment value"
+                    onClick={() => void update({ [setting.key]: null }).then(() => toast('Reset to environment'))}
                     className="focus-ring shrink-0 rounded p-1 dimmer hover:text-zinc-700">
                     <Trash2 size={12} />
                   </button>
@@ -396,8 +397,8 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
           ))}
         </div>
         <p className="mt-3 text-2xs leading-relaxed dimmer">
-          Une valeur modifiée ici remplace celle du fichier <code className="font-mono">.env</code>.
-          L’icône corbeille rend la main à l’environnement.
+          A value set here overrides the one in <code className="font-mono">.env</code>.
+          The bin icon hands it back to the environment.
         </p>
       </section>
     </div>
@@ -416,30 +417,30 @@ function MemoryPanel() {
   return (
     <div className="space-y-4">
       <p className="text-xs leading-relaxed dim">
-        Ce que Lumen a retenu de vous, d’une conversation à l’autre. L’agent écrit ici lui-même
-        quand il juge un fait durable ; vous pouvez ajouter et retirer librement.
+        What the agent has kept about you, from one conversation to the next. It writes here
+        itself when it judges a fact durable; you can add and remove freely.
       </p>
       <div className="flex gap-2">
         <Input value={draft} onChange={(e) => setDraft(e.target.value)}
-          placeholder="Un fait à retenir, en une phrase…"
+          placeholder="One fact worth keeping, in a sentence…"
           onKeyDown={async (e) => {
             if (e.key === 'Enter' && draft.trim()) { await api.addMemory(draft.trim()); setDraft(''); await load(); }
           }} />
         <Button variant="outline" disabled={!draft.trim()}
           onClick={async () => { await api.addMemory(draft.trim()); setDraft(''); await load(); }}>
-          Ajouter
+          Add
         </Button>
       </div>
       {entries.length === 0 ? (
-        <Empty icon={Brain} title="Rien en mémoire pour l’instant" />
+        <Empty icon={Brain} title="Nothing remembered yet" />
       ) : (
         <div className="space-y-1.5">
           {entries.map((entry) => (
             <div key={entry.id} className="group flex items-start gap-2.5 rounded-xl border px-3 py-2.5 hairline">
               <span className="min-w-0 flex-1 text-xs leading-relaxed">{entry.text}</span>
-              <Badge>{entry.source === 'user' ? 'vous' : 'agent'}</Badge>
+              <Badge>{entry.source === 'user' ? 'you' : 'agent'}</Badge>
               <button onClick={async () => {
-                if (await confirm({ title: 'Oublier ce fait ?', danger: true, confirmLabel: 'Oublier' })) {
+                if (await confirm({ title: 'Forget this?', danger: true, confirmLabel: 'Forget' })) {
                   await api.forgetMemory(entry.id); await load();
                 }
               }} className="focus-ring rounded p-1 dimmer opacity-0 transition-opacity hover:text-red-600 group-hover:opacity-100">
@@ -470,25 +471,25 @@ function DiagnosticsPanel() {
           ))}
         </section>
       )}
-      <Row label="Modèle actif" value={data.model.model || '—'}
+      <Row label="Active model" value={data.model.model || '—'}
         tone={data.model.ok ? 'good' : 'bad'} extra={data.model.capabilities.source} />
-      <Row label="Serveurs MCP"
-        value={`${data.mcp.servers_connected}/${data.mcp.servers_total} connectés · ${data.mcp.tools_available} outils`}
+      <Row label="MCP servers"
+        value={`${data.mcp.servers_connected}/${data.mcp.servers_total} connected · ${data.mcp.tools_available} tools`}
         tone={data.mcp.servers_error ? 'warn' : 'good'} />
       {Object.values(data.runtimes).map((runtime) => (
         <Row key={runtime.name} label={runtime.label} tone={runtime.available ? 'good' : 'warn'}
-          value={runtime.available ? runtime.path : 'absent du PATH'}
+          value={runtime.available ? runtime.path : 'not on PATH'}
           extra={runtime.available ? runtime.why : `${runtime.why} — ${runtime.install}`} />
       ))}
-      <Row label="Exécution du modèle"
+      <Row label="Model execution"
         tone={!data.runtime?.loaded ? 'warn' : (data.runtime.gpu_percent ?? 0) >= 95 ? 'good' : 'warn'}
         value={data.runtime?.loaded
-          ? `${data.runtime.gpu_percent}% sur GPU — ${data.runtime.vram_gb} Go sur ${data.runtime.size_gb} Go`
-          : 'pas chargé en ce moment'}
-        extra={`Fenêtre de contexte demandée : ${data.context_window} tokens`} />
-      <Row label="Modules Python disponibles" value={data.python_modules.join(', ') || 'bibliothèque standard seulement'} tone="good" />
-      <Row label="Espace de travail" value={data.workspace} tone="good" />
-      <Row label="Stockage" value={data.store} tone="good" />
+          ? `${data.runtime.gpu_percent}% on GPU — ${data.runtime.vram_gb} GB of ${data.runtime.size_gb} GB`
+          : 'not loaded right now'}
+        extra={`Context window requested: ${data.context_window} tokens`} />
+      <Row label="Python modules available" value={data.python_modules.join(', ') || 'standard library only'} tone="good" />
+      <Row label="Workspace" value={data.workspace} tone="good" />
+      <Row label="Store" value={data.store} tone="good" />
     </div>
   );
 }
@@ -520,7 +521,7 @@ function PanelSkeleton() {
 
 export function AdminDoor({ onOpen, warn }: { onOpen: () => void; warn: boolean }) {
   return (
-    <IconButton icon={Settings2} label="Administration (⌘,)" onClick={onOpen}
+    <IconButton icon={Settings2} label="Admin (⌘,)" onClick={onOpen}
       className={cls(warn && 'text-amber-500 hover:text-amber-600')} />
   );
 }

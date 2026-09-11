@@ -16,17 +16,17 @@ import sys
 RUNTIMES: dict[str, dict[str, str]] = {
     "npx": {
         "label": "Node.js",
-        "why": "exécute les serveurs MCP publiés sur npm",
+        "why": "runs the npm-published MCP servers",
         # Homebrew is the path of least resistance on macOS; the site covers everyone else.
         "install_macos": "brew install node",
-        "install_other": "Installez Node.js 18 ou plus récent",
+        "install_other": "Install Node.js 18 or newer",
         "url": "https://nodejs.org",
     },
     "uvx": {
         "label": "uv",
         # The trap worth naming explicitly: the missing command is uvx, the thing you
         # install is uv. Telling someone to "install uvx" sends them nowhere.
-        "why": "exécute les serveurs MCP publiés en Python (uvx est fourni avec uv)",
+        "why": "runs the Python-published MCP servers (uvx ships with uv)",
         "install_macos": "brew install uv",
         "install_other": "curl -LsSf https://astral.sh/uv/install.sh | sh",
         "url": "https://docs.astral.sh/uv/",

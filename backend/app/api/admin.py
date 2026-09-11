@@ -236,10 +236,10 @@ async def diagnostics() -> dict:
     warnings: list[str] = []
     if runtime.get("loaded") and runtime.get("gpu_percent", 100) < 95:
         warnings.append(
-            f"{runtime['gpu_percent']} % du modèle seulement tient sur le GPU "
-            f"({runtime['vram_gb']} Go sur {runtime['size_gb']} Go) : le reste tourne sur le "
-            f"processeur, plusieurs fois plus lentement. Réduisez la fenêtre de contexte "
-            f"(actuellement {window}) dans Garde-fous, ou choisissez un modèle plus petit.")
+            f"Only {runtime['gpu_percent']}% of the model fits on the GPU "
+            f"({runtime['vram_gb']} GB of {runtime['size_gb']} GB) — the rest runs on the CPU, "
+            f"several times slower. Lower the context window (currently {window}) in "
+            f"Guardrails, or pick a smaller model.")
     if not llm.get("ok"):
         warnings.append(llm.get("error") or "No model selected.")
     elif not caps.get("tools"):

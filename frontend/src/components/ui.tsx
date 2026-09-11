@@ -1,5 +1,5 @@
 // A hand-rolled mini design system: one file, read top to bottom, fully owned.
-// Everything visual in Lumen is built from these, which is what keeps the app looking
+// Everything visual in Agent is built from these, which is what keeps the app looking
 // like one thing rather than several screens that each invented their own buttons.
 
 import { AlertTriangle, Check, Copy, Loader2, X, type LucideIcon } from 'lucide-react';
@@ -17,7 +17,7 @@ type Variant = 'primary' | 'outline' | 'ghost' | 'danger' | 'subtle';
 type Size = 'xs' | 'sm' | 'md';
 
 const BTN_VARIANTS: Record<Variant, string> = {
-  primary: 'bg-brand-600 text-white shadow-sm hover:bg-brand-500 disabled:bg-brand-600/50',
+  primary: 'bg-brand-500 text-zinc-950 shadow-sm hover:bg-brand-400 disabled:bg-brand-500/50',
   outline: 'border hairline text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-white/[0.06]',
   ghost: 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-white/[0.06] dark:hover:text-zinc-100',
   danger: 'bg-red-600 text-white hover:bg-red-500 disabled:bg-red-600/50',
@@ -66,7 +66,7 @@ export function IconButton({
       className={cls(
         'focus-ring inline-grid h-8 w-8 place-items-center rounded-lg transition-colors',
         active
-          ? 'bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300'
+          ? 'bg-brand-50 text-brand-800 dark:bg-brand-500/15 dark:text-brand-300'
           : 'text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-100',
         className)}
       {...rest}
@@ -83,7 +83,7 @@ export function Badge({
 }: { children: ReactNode; tone?: 'neutral' | 'brand' | 'good' | 'warn' | 'bad'; className?: string }) {
   const tones = {
     neutral: 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.07] dark:text-zinc-300',
-    brand: 'bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300',
+    brand: 'bg-brand-50 text-brand-800 dark:bg-brand-500/15 dark:text-brand-300',
     good: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/12 dark:text-emerald-300',
     warn: 'bg-amber-50 text-amber-700 dark:bg-amber-500/12 dark:text-amber-300',
     bad: 'bg-red-50 text-red-700 dark:bg-red-500/12 dark:text-red-300',
@@ -125,7 +125,7 @@ export function CopyButton({ text, className }: { text: string; className?: stri
           setTimeout(() => setCopied(false), 1400);
         }).catch(() => { /* clipboard denied: the button simply does nothing visible */ });
       }}
-      title={copied ? 'Copié' : 'Copier'}
+      title={copied ? 'Copied' : 'Copy'}
       className={cls('focus-ring rounded-md p-1 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-100', className)}
     >
       {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
@@ -171,7 +171,7 @@ export function Switch({
       className="focus-ring flex w-full items-start gap-3 rounded-xl p-1 text-left disabled:opacity-50"
     >
       <span className={cls('mt-0.5 flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors',
-        checked ? 'bg-brand-600' : 'bg-zinc-300 dark:bg-white/15')}>
+        checked ? 'bg-brand-500' : 'bg-zinc-300 dark:bg-white/15')}>
         <span className={cls('h-4 w-4 rounded-full bg-white shadow transition-transform',
           checked && 'translate-x-4')} />
       </span>
@@ -202,7 +202,7 @@ export function Modal({
         wide ? 'max-w-3xl' : 'max-w-lg')}>
         <header className="flex items-center justify-between gap-3 border-b px-5 py-3.5 hairline">
           <h2 className="text-sm font-semibold">{title}</h2>
-          <IconButton icon={X} label="Fermer" onClick={onClose} />
+          <IconButton icon={X} label="Close" onClick={onClose} />
         </header>
         <div className="max-h-[75vh] overflow-y-auto">{children}</div>
       </div>
@@ -267,9 +267,9 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
         <div className="space-y-4 p-5">
           {request?.body && <div className="text-xs leading-relaxed dim">{request.body}</div>}
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => close(false)}>Annuler</Button>
+            <Button variant="outline" onClick={() => close(false)}>Cancel</Button>
             <Button variant={request?.danger ? 'danger' : 'primary'} onClick={() => close(true)}>
-              {request?.confirmLabel ?? 'Confirmer'}
+              {request?.confirmLabel ?? 'Confirm'}
             </Button>
           </div>
         </div>
@@ -286,7 +286,7 @@ export function useTheme(): [boolean, () => void] {
     setDark((previous) => {
       const next = !previous;
       document.documentElement.classList.toggle('dark', next);
-      try { localStorage.setItem('lumen.theme', next ? 'dark' : 'light'); } catch { /* ignore */ }
+      try { localStorage.setItem('agent.theme', next ? 'dark' : 'light'); } catch { /* ignore */ }
       return next;
     });
   }, []);

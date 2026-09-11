@@ -26,10 +26,10 @@ const ACCENTS: Record<string, string> = {
 };
 
 const STATUS: Record<string, { tone: 'good' | 'warn' | 'bad' | 'idle'; label: string }> = {
-  connected: { tone: 'good', label: 'connecté' },
-  connecting: { tone: 'warn', label: 'connexion…' },
-  error: { tone: 'bad', label: 'erreur' },
-  disconnected: { tone: 'idle', label: 'déconnecté' },
+  connected: { tone: 'good', label: 'connected' },
+  connecting: { tone: 'warn', label: 'connecting…' },
+  error: { tone: 'bad', label: 'error' },
+  disconnected: { tone: 'idle', label: 'disconnected' },
 };
 
 export function McpLibrary({ onChanged }: { onChanged: () => void }) {
@@ -66,15 +66,15 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
 
   const remove = async (server: McpServer) => {
     const ok = await confirm({
-      title: `Supprimer « ${server.name} » ?`,
-      body: 'Le serveur est déconnecté et sa configuration effacée. Les identifiants saisis sont perdus.',
-      confirmLabel: 'Supprimer', danger: true,
+      title: `Remove “${server.name}”?`,
+      body: 'The server is disconnected and its configuration erased. Any credentials you entered are lost.',
+      confirmLabel: 'Remove', danger: true,
     });
     if (!ok) return;
     await api.deleteServer(server.id);
     await load();
     onChanged();
-    toast('Serveur supprimé');
+    toast('Server removed');
   };
 
   const installed = useMemo(() => new Set(servers.map((s) => s.catalog_id).filter(Boolean)), [servers]);
@@ -95,7 +95,7 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
           <div className="min-w-0 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
             {missingRuntimes.map((runtime) => (
               <p key={runtime.name}>
-                <b>{runtime.label}</b> n’est pas sur le PATH — il {runtime.why}. Installez-le&nbsp;:{' '}
+                <b>{runtime.label}</b> is not on the PATH — it {runtime.why}. Install it:{' '}
                 <code className="rounded bg-white/60 px-1 py-0.5 font-mono dark:bg-black/25">{runtime.install}</code>
               </p>
             ))}
@@ -107,15 +107,15 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
       <section>
         <header className="mb-3 flex items-center justify-between gap-3">
           <h3 className="text-xs font-semibold uppercase tracking-wider dim">
-            Serveurs connectés <span className="dimmer">({servers.length})</span>
+            Connected servers <span className="dimmer">({servers.length})</span>
           </h3>
           <Button size="xs" variant="outline" icon={Plus} onClick={() => setCustom(true)}>
-            Serveur personnalisé
+            Custom server
           </Button>
         </header>
         {servers.length === 0 ? (
-          <Empty icon={Plug} title="Aucun serveur MCP"
-            hint="Choisissez-en un dans la bibliothèque ci-dessous — ou décrivez le vôtre. L’agent garde ses outils natifs dans tous les cas." />
+          <Empty icon={Plug} title="No MCP server connected"
+            hint="Pick one from the library below — or describe your own. The agent keeps its built-in tools either way." />
         ) : (
           <div className="space-y-2">
             {servers.map((server) => {
@@ -132,7 +132,7 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
                         <span className="text-sm font-medium">{server.name}</span>
                         <span className="flex items-center gap-1.5 text-2xs dim"><Dot tone={status.tone} />{status.label}</span>
                         {server.status === 'connected' && (
-                          <Badge tone="brand">{server.tool_count} outil{server.tool_count > 1 ? 's' : ''}</Badge>
+                          <Badge tone="brand">{server.tool_count} tool{server.tool_count > 1 ? 's' : ''}</Badge>
                         )}
                         <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-2xs dimmer dark:bg-white/[0.06]">
                           {server.slug}__
@@ -146,7 +146,7 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
                       )}
                       {server.diagnostics.length > 0 && server.status === 'error' && (
                         <details className="mt-1.5">
-                          <summary className="cursor-pointer text-2xs dimmer">Sortie du serveur</summary>
+                          <summary className="cursor-pointer text-2xs dimmer">Server output</summary>
                           <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-zinc-50 p-2 font-mono text-[10.5px] dim dark:bg-black/25">
                             {server.diagnostics.join('\n')}
                           </pre>
@@ -156,13 +156,13 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
                         {server.status === 'connected' ? (
                           <>
                             <Button size="xs" variant="outline" icon={Terminal}
-                              onClick={() => setBench({ server })}>Outils</Button>
+                              onClick={() => setBench({ server })}>Tools</Button>
                             <Button size="xs" variant="ghost" busy={busy === server.id}
-                              onClick={() => void act(server.id, 'disconnect')}>Déconnecter</Button>
+                              onClick={() => void act(server.id, 'disconnect')}>Disconnect</Button>
                           </>
                         ) : (
                           <Button size="xs" icon={PlugZap} busy={busy === server.id}
-                            onClick={() => void act(server.id, 'connect')}>Connecter</Button>
+                            onClick={() => void act(server.id, 'connect')}>Connect</Button>
                         )}
                         <label className="ml-1 flex cursor-pointer items-center gap-1.5 text-2xs dim">
                           <input type="checkbox" checked={server.auto_approve}
@@ -171,9 +171,9 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
                               await load();
                             }}
                             className="h-3 w-3 accent-brand-600" />
-                          approuver automatiquement ses écritures
+                          auto-approve its writes
                         </label>
-                        <IconButton icon={Trash2} label="Supprimer" className="ml-auto"
+                        <IconButton icon={Trash2} label="Remove" className="ml-auto"
                           onClick={() => void remove(server)} />
                       </div>
                     </div>
@@ -188,10 +188,10 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
       {/* --------------------------------------------------------- catalog */}
       <section>
         <header className="mb-3 flex items-center gap-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wider dim">Bibliothèque</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wider dim">Library</h3>
           <div className="relative ml-auto w-56">
             <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 dimmer" />
-            <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher…"
+            <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…"
               className="!py-1.5 !pl-7 !text-xs" />
           </div>
         </header>
@@ -206,7 +206,7 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-[13px] font-medium">{entry.name}</span>
-                  {installed.has(entry.id) && <Badge tone="good"><Check size={9} /> installé</Badge>}
+                  {installed.has(entry.id) && <Badge tone="good"><Check size={9} /> installed</Badge>}
                 </div>
                 <p className="mt-0.5 line-clamp-2 text-2xs leading-relaxed dim">{entry.description}</p>
                 <div className="mt-1.5 flex flex-wrap items-center gap-1">
@@ -249,12 +249,12 @@ function InstallDialog({
     try {
       const server = await api.addServer({ catalog_id: entry.id, values, connect: true });
       if (server.status === 'connected') {
-        toast(`${entry.name} connecté — ${server.tool_count} outil(s)`);
+        toast(`${entry.name} connected — ${server.tool_count} tool(s)`);
         onDone();
       } else {
         // The server was saved; it just could not start. Keeping the dialog open with the
         // real error beats a toast that vanishes before it can be read.
-        setResult({ ok: false, message: server.error ?? 'Connexion impossible.' });
+        setResult({ ok: false, message: server.error ?? 'Could not connect.' });
       }
     } catch (e) {
       setResult({ ok: false, message: String((e as Error).message) });
@@ -262,7 +262,7 @@ function InstallDialog({
   };
 
   return (
-    <Modal open onClose={onClose} title={`Connecter ${entry.name}`}>
+    <Modal open onClose={onClose} title={`Connect ${entry.name}`}>
       <div className="space-y-4 p-5">
         <p className="text-xs leading-relaxed dim">{entry.description}</p>
         {entry.params.map((param) => (
@@ -278,7 +278,7 @@ function InstallDialog({
         ))}
         {entry.params.length === 0 && (
           <p className="rounded-lg bg-zinc-50 px-3 py-2 text-2xs dim dark:bg-white/[0.04]">
-            Rien à configurer. Le serveur est récupéré et lancé à la connexion.
+            Nothing to configure. The server is fetched and started on connect.
           </p>
         )}
         {result && !result.ok && (
@@ -290,8 +290,8 @@ function InstallDialog({
           <a href={entry.docs} target="_blank" rel="noreferrer noopener"
              className="text-2xs dimmer underline underline-offset-2 hover:text-zinc-600">Documentation</a>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={onClose}>Annuler</Button>
-            <Button busy={busy} onClick={() => void submit()} icon={PlugZap}>Connecter</Button>
+            <Button variant="outline" onClick={onClose}>Cancel</Button>
+            <Button busy={busy} onClick={() => void submit()} icon={PlugZap}>Connect</Button>
           </div>
         </div>
       </div>
@@ -329,37 +329,37 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
         url: transport === 'http' ? url : '',
         env: parseEnv(env), connect: true,
       });
-      if (server.status === 'connected') { toast(`${name} connecté`); onDone(); }
-      else setError(server.error ?? 'Connexion impossible.');
+      if (server.status === 'connected') { toast(`${name} connected`); onDone(); }
+      else setError(server.error ?? 'Could not connect.');
     } catch (e) {
       setError(String((e as Error).message));
     } finally { setBusy(false); }
   };
 
   return (
-    <Modal open onClose={onClose} title="Serveur MCP personnalisé">
+    <Modal open onClose={onClose} title="Custom MCP server">
       <div className="space-y-4 p-5">
         <div className="flex gap-1.5">
           {(['stdio', 'http'] as const).map((t) => (
             <button key={t} onClick={() => setTransport(t)}
               className={cls('focus-ring flex-1 rounded-lg border px-3 py-2 text-xs font-medium transition-colors',
-                transport === t ? 'border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-500/12 dark:text-brand-300' : 'hairline dim')}>
-              {t === 'stdio' ? 'Processus local (stdio)' : 'Endpoint HTTP'}
+                transport === t ? 'border-brand-500 bg-brand-100 text-brand-800 dark:bg-brand-500/12 dark:text-brand-300' : 'hairline dim')}>
+              {t === 'stdio' ? 'Local process (stdio)' : 'HTTP endpoint'}
             </button>
           ))}
         </div>
-        <Field label="Nom"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Mon serveur" /></Field>
+        <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My server" /></Field>
         {transport === 'stdio' ? (
           <>
-            <Field label="Commande"><Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx" /></Field>
-            <Field label="Arguments" hint="Séparés par des espaces ; utilisez des guillemets pour un chemin qui en contient.">
-              <Input value={args} onChange={(e) => setArgs(e.target.value)} placeholder="-y mon-serveur-mcp --flag valeur" />
+            <Field label="Command"><Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx" /></Field>
+            <Field label="Arguments" hint="Whitespace-separated; quote a path that contains spaces.">
+              <Input value={args} onChange={(e) => setArgs(e.target.value)} placeholder="-y my-mcp-server --flag value" />
             </Field>
           </>
         ) : (
           <Field label="URL"><Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://exemple.com/mcp" /></Field>
         )}
-        <Field label="Variables d’environnement" hint="Une par ligne, au format CLE=valeur.">
+        <Field label="Environment variables" hint="One per line, as KEY=value.">
           <textarea value={env} onChange={(e) => setEnv(e.target.value)} rows={3}
             placeholder="API_KEY=…"
             className="focus-ring w-full rounded-xl border bg-white px-3 py-2 font-mono text-xs hairline dark:bg-white/[0.04]" />
@@ -368,8 +368,8 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
           <p className="rounded-lg bg-red-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-red-700 dark:bg-red-500/10 dark:text-red-300">{error}</p>
         )}
         <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={onClose}>Annuler</Button>
-          <Button busy={busy} disabled={!name.trim()} onClick={() => void submit()} icon={PlugZap}>Connecter</Button>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button busy={busy} disabled={!name.trim()} onClick={() => void submit()} icon={PlugZap}>Connect</Button>
         </div>
       </div>
     </Modal>
@@ -434,14 +434,14 @@ function ToolBench({ server, onClose }: { server: McpServer; onClose: () => void
 
   return (
     <Modal open onClose={onClose} wide title={<span className="flex items-center gap-2">{server.name}
-      <Badge tone="brand">{tools.length} outils</Badge></span>}>
+      <Badge tone="brand">{tools.length} tools</Badge></span>}>
       <div className="grid gap-0 sm:grid-cols-[13rem_1fr]">
         <div className="max-h-[60vh] overflow-y-auto border-b hairline sm:border-b-0 sm:border-r">
           {tools.map((tool) => (
             <button key={tool.qualified_name} onClick={() => select(tool)}
               className={cls('flex w-full items-center gap-1.5 border-b px-3 py-2 text-left text-2xs hairline transition-colors',
                 selected?.qualified_name === tool.qualified_name
-                  ? 'bg-brand-50 text-brand-700 dark:bg-brand-500/12 dark:text-brand-300'
+                  ? 'bg-brand-100 text-brand-800 dark:bg-brand-500/12 dark:text-brand-300'
                   : 'hover:bg-zinc-50 dark:hover:bg-white/[0.04]')}>
               <span className="min-w-0 flex-1 truncate font-mono">{tool.name}</span>
               {tool.write && <Zap size={10} className="shrink-0 text-amber-500" />}
@@ -451,12 +451,12 @@ function ToolBench({ server, onClose }: { server: McpServer; onClose: () => void
         <div className="min-w-0 space-y-3 p-4">
           {selected && (
             <>
-              <p className="text-xs leading-relaxed dim">{selected.description || 'Aucune description fournie.'}</p>
+              <p className="text-xs leading-relaxed dim">{selected.description || 'No description provided.'}</p>
               <Field label="Arguments (JSON)">
                 <textarea value={payload} onChange={(e) => setPayload(e.target.value)} rows={6}
                   className="focus-ring w-full rounded-xl border bg-white px-3 py-2 font-mono text-[11.5px] hairline dark:bg-black/25" />
               </Field>
-              <Button size="sm" icon={Play} busy={busy} onClick={() => void run()}>Appeler</Button>
+              <Button size="sm" icon={Play} busy={busy} onClick={() => void run()}>Call</Button>
               {result && (
                 <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl border p-3 font-mono text-[11px] leading-relaxed hairline bg-zinc-50 dark:bg-black/25">
                   {result}
@@ -465,7 +465,7 @@ function ToolBench({ server, onClose }: { server: McpServer; onClose: () => void
             </>
           )}
           {!selected && tools.length === 0 && (
-            <Empty icon={X} title="Ce serveur n’expose aucun outil" />
+            <Empty icon={X} title="This server exposes no tools" />
           )}
         </div>
       </div>
@@ -474,5 +474,5 @@ function ToolBench({ server, onClose }: { server: McpServer; onClose: () => void
 }
 
 export function RefreshButton({ onClick }: { onClick: () => void }) {
-  return <IconButton icon={RefreshCw} label="Rafraîchir" onClick={onClick} />;
+  return <IconButton icon={RefreshCw} label="Refresh" onClick={onClick} />;
 }

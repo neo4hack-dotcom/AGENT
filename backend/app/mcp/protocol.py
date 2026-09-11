@@ -1,6 +1,6 @@
 """A self-contained MCP client: JSON-RPC 2.0 over stdio or streamable HTTP.
 
-Written directly against the protocol rather than wrapped around an SDK so that Lumen can
+Written directly against the protocol rather than wrapped around an SDK so that Agent can
 speak to any MCP server — a local npx/uvx process, a remote HTTP endpoint — with one code
 path, and so that connection failures surface as readable diagnostics (including the
 server's own stderr) instead of an opaque import-time error.
@@ -20,7 +20,7 @@ import httpx
 from app.errors import McpError
 from app.mcp.runtimes import install_hint
 
-CLIENT_INFO = {"name": "lumen", "title": "Lumen Super-Agent", "version": "1.0.0"}
+CLIENT_INFO = {"name": "lumen", "title": "Agent Super-Agent", "version": "1.0.0"}
 CLIENT_CAPABILITIES: dict[str, Any] = {"roots": {"listChanged": False}}
 
 

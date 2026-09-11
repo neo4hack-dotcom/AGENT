@@ -7,7 +7,7 @@ import type {
   MemoryEntry, McpServer, ModelOption, RuntimeInfo, StreamEvent, UploadResult,
 } from './types';
 
-const TOKEN_KEY = 'lumen.admin.token';
+const TOKEN_KEY = 'agent.admin.token';
 
 export function adminToken(): string {
   try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }

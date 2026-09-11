@@ -116,7 +116,7 @@ class McpRegistry:
         server = {
             "id": server_id,
             "slug": self._unique_slug(cfg.get("catalog_id") or cfg.get("name") or "server"),
-            "name": cfg.get("name") or "Serveur sans nom",
+            "name": cfg.get("name") or "Unnamed server",
             "catalog_id": cfg.get("catalog_id") or "",
             "transport": cfg.get("transport") or "stdio",
             "command": cfg.get("command") or "",
@@ -127,7 +127,7 @@ class McpRegistry:
             "headers": cfg.get("headers") or {},
             "description": cfg.get("description") or "",
             "accent": cfg.get("accent") or "sky",
-            "category": cfg.get("category") or "Personnalisé",
+            "category": cfg.get("category") or "Custom",
             "docs": cfg.get("docs") or "",
             "enabled": bool(cfg.get("enabled", True)),
             "auto_approve": bool(cfg.get("auto_approve", False)),
@@ -236,7 +236,7 @@ class McpRegistry:
 
     async def connect_enabled(self) -> None:
         """Best-effort reconnect of everything marked enabled, at startup. One broken
-        server records its error on its own card and never stops Lumen from booting."""
+        server records its error on its own card and never stops Agent from booting."""
         try:
             servers = [s for s in self.store.mcp_servers().values() if s.get("enabled")]
             if servers:

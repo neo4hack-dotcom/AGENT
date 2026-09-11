@@ -1,11 +1,11 @@
-// Lumen — one screen, one input.
+// Agent — one screen, one input.
 //
 // Two states, one layout: the composer is centred on an empty canvas and docked once a
 // conversation exists. Everything else (history, admin, status) stays at the edges until
 // it is asked for.
 
 import {
-  AlertTriangle, Moon, PanelLeft, Plus, Sun,
+  AlertTriangle, Cloud, MonitorSmartphone, Moon, PanelLeft, Plus, Sparkles, Sun,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, streamRun } from './api';
@@ -31,7 +31,7 @@ interface Live {
   error: string | null;
 }
 
-const LAST_CONVERSATION = 'lumen.conversation';
+const LAST_CONVERSATION = 'agent.conversation';
 
 function rememberConversation(id: string | null): void {
   try {
@@ -188,7 +188,7 @@ export default function App() {
       setLive(emptyLive(started.run_id, started.conversation_id, started.message_id));
       stopStream.current = streamRun(started.run_id, onEvent, (reason) => {
         if (reason === 'error') {
-          toast('Le flux a été interrompu. Rechargez la conversation pour voir la réponse enregistrée.', 'error');
+          toast('The live stream dropped. Reload the conversation to see the saved answer.', 'error');
           void finishRun();
         }
       });
@@ -283,23 +283,30 @@ export default function App() {
           <PanelLeft size={16} strokeWidth={1.9} />
         </button>
         {!empty && (
-          <button onClick={newConversation} title="Nouvelle conversation (⌘⇧O)"
+          <button onClick={newConversation} title="New chat (⌘⇧O)"
             className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
             <Plus size={16} strokeWidth={1.9} />
           </button>
         )}
 
         <div className="ml-auto flex items-center gap-1">
-          <button onClick={() => canSeeAdmin || boot?.admin.local ? setAdmin(true) : undefined}
-            title={boot?.model.error ?? boot?.model.capabilities.source ?? ''}
+          <button onClick={() => (canSeeAdmin || boot?.admin.local ? setAdmin(true) : undefined)}
+            title={boot?.model.error
+              ?? (boot?.model.local === false
+                ? `${boot.model.model} is hosted by Ollama, not by this machine — prompts leave it.`
+                : boot?.model.capabilities.source ?? '')}
             className="focus-ring flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-2xs dim transition-colors hover:bg-zinc-100 dark:hover:bg-white/[0.06]">
             <Dot tone={!modelOk ? 'bad' : toolsCapable ? 'good' : 'warn'} />
-            <span className="font-mono">{boot?.model.model || 'aucun modèle'}</span>
+            <span className="font-mono">{boot?.model.model || 'no model'}</span>
+            {/* Where the model actually runs is the one fact this app must never blur. */}
+            {boot?.model.ok && (boot.model.local
+              ? <MonitorSmartphone size={11} className="shrink-0 opacity-60" />
+              : <Cloud size={11} className="shrink-0 text-amber-500" />)}
             {boot && boot.mcp.servers_connected > 0 && (
-              <Badge tone="brand">{boot.mcp.tools_available} outils</Badge>
+              <Badge tone="brand">{boot.mcp.tools_available} tools</Badge>
             )}
           </button>
-          <button onClick={toggleTheme} title="Thème"
+          <button onClick={toggleTheme} title="Theme"
             className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
             {dark ? <Sun size={15} strokeWidth={1.9} /> : <Moon size={15} strokeWidth={1.9} />}
           </button>
@@ -346,7 +353,7 @@ export default function App() {
                 onUpload={api.upload}
                 running={!!live}
                 disabled={!modelOk}
-                disabledReason={boot?.model.error ?? 'Aucun modèle sélectionné'}
+                disabledReason={boot?.model.error ?? 'No model selected'}
                 centred={false}
                 vision={boot?.model.capabilities.vision ?? false}
               />
@@ -369,47 +376,66 @@ function EmptyState({
   boot, onSend, onStop, running,
 }: { boot: Bootstrap | null; onSend: (t: string, a: string[]) => void; onStop: () => void; running: boolean }) {
   const suggestions = useMemo(() => buildSuggestions(boot), [boot]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const ready = boot?.model.ok ?? false;
 
   return (
-    <main className="flex min-h-0 flex-1 flex-col items-center justify-center px-5 pb-20">
-      <div className="mb-7 flex flex-col items-center animate-fade-up">
-        <Mark />
-        <h1 className="mt-4 text-[27px] font-semibold tracking-[-0.03em] text-zinc-900 dark:text-white">Lumen</h1>
-        <p className="mt-1.5 max-w-md text-center text-[13px] leading-relaxed dim">
-          {boot?.model.ok
-            ? <>Agent autonome, entièrement local. <span className="font-mono text-zinc-600 dark:text-zinc-400">{boot.model.model}</span> raisonne, appelle ses outils et vous répond — rien ne sort de cette machine.</>
-            : <>Aucun modèle local n’est sélectionné. Ouvrez l’administration pour en choisir un.</>}
-        </p>
-      </div>
+    <main className="flex min-h-0 flex-1 flex-col items-center justify-center px-5 pb-24">
+      {/* The whole identity, in five letters. No mark, no tagline: on a screen whose only
+          job is to be typed into, everything else is something to read first. */}
+      {/* The gradient runs dark-to-deep on light and bright-to-mint on dark, because the
+          accent at its own luminance is 1.9:1 on white — a wordmark nobody can read is not
+          a brand. Same hue family either way; only the end of the scale changes. */}
+      <h1 className="wordmark mb-9 select-none bg-gradient-to-br from-brand-700 via-brand-800 to-brand-950 bg-clip-text text-[30px] text-transparent animate-fade-up dark:from-brand-200 dark:via-brand-400 dark:to-brand-600 sm:text-[34px]">
+        Agent
+      </h1>
 
       <Composer
         onSend={onSend}
         onStop={onStop}
         onUpload={api.upload}
         running={running}
-        disabled={!(boot?.model.ok ?? false)}
-        disabledReason={boot?.model.error ?? 'Aucun modèle sélectionné'}
+        disabled={!ready}
+        disabledReason={boot?.model.error ?? 'No model selected'}
         centred
         vision={boot?.model.capabilities.vision ?? false}
-        placeholder="Demandez n’importe quoi…"
       />
 
-      {!boot?.model.capabilities.tools && boot?.model.ok && (
-        <p className="mt-4 flex max-w-md items-start gap-1.5 text-center text-2xs leading-relaxed text-amber-600 dark:text-amber-400">
+      {/* Examples stay behind one click. They are useful once — on the first run — and
+          clutter on every run after it. */}
+      <div className="mt-4 flex flex-col items-center">
+        <button
+          onClick={() => setShowSuggestions((v) => !v)}
+          aria-expanded={showSuggestions}
+          className={cls('focus-ring flex items-center gap-1.5 rounded-full px-2.5 py-1 text-2xs transition-all',
+            showSuggestions
+              ? 'text-brand-800 dark:text-brand-300'
+              : 'dimmer hover:text-zinc-600 dark:hover:text-zinc-300')}
+        >
+          <Sparkles size={12} strokeWidth={1.8} />
+          {showSuggestions ? 'Hide examples' : 'Examples'}
+        </button>
+
+        {showSuggestions && (
+          <div className="mt-3 flex max-w-2xl flex-wrap justify-center gap-1.5 animate-fade-up">
+            {suggestions.map((suggestion) => (
+              <button key={suggestion.text} onClick={() => onSend(suggestion.text, [])} disabled={!ready}
+                className="focus-ring rounded-full border px-3 py-1.5 text-2xs hairline dim transition-all hover:-translate-y-px hover:border-brand-300 hover:text-zinc-800 disabled:opacity-40 dark:hover:border-brand-500/40 dark:hover:text-zinc-100">
+                {suggestion.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* The one piece of text that earns its place: it only appears when the chosen model
+          cannot do the thing this app exists to do. */}
+      {ready && !boot?.model.capabilities.tools && (
+        <p className="mt-6 flex max-w-sm items-start gap-1.5 text-center text-2xs leading-relaxed text-amber-600 dark:text-amber-400">
           <AlertTriangle size={12} className="mt-px shrink-0" />
-          <span>{boot.model.model} ne sait pas appeler d’outils : il répondra uniquement de mémoire. Choisissez un modèle qui déclare « tools » dans l’administration.</span>
+          <span>{boot?.model.model} cannot call tools — it will answer from memory alone. Pick a model that reports “tools” in Admin.</span>
         </p>
       )}
-
-      <div className="mt-7 flex max-w-2xl flex-wrap justify-center gap-1.5 animate-fade-in">
-        {suggestions.map((suggestion) => (
-          <button key={suggestion.text} onClick={() => onSend(suggestion.text, [])}
-            disabled={!(boot?.model.ok ?? false)}
-            className="focus-ring rounded-full border px-3 py-1.5 text-2xs hairline dim transition-all hover:-translate-y-px hover:border-brand-300 hover:text-zinc-800 disabled:opacity-40 dark:hover:border-brand-500/40 dark:hover:text-zinc-100">
-            {suggestion.label}
-          </button>
-        ))}
-      </div>
     </main>
   );
 }
@@ -417,55 +443,34 @@ function EmptyState({
 /**
  * Suggestions built from what is actually connected right now.
  *
- * A fixed list would advertise capabilities this install may not have — the web chip on a
- * machine with web access switched off is a promise the agent then has to break.
+ * A fixed list would advertise capabilities this install may not have — a web example on
+ * a machine with web access switched off is a promise the agent then has to break.
  */
 function buildSuggestions(boot: Bootstrap | null): { label: string; text: string }[] {
   if (!boot) return [];
   const names = new Set(boot.tools.map((t) => t.name));
   const out: { label: string; text: string }[] = [];
   if (names.has('web_search')) {
-    out.push({ label: 'Faire une veille sourcée',
-      text: 'Fais une veille sur les sorties récentes autour du Model Context Protocol : cherche, ouvre les pages qui comptent, et donne-moi une synthèse sourcée.' });
+    out.push({ label: 'Research something',
+      text: 'Research what has shipped recently around the Model Context Protocol: search, open the pages that matter, and give me a sourced summary.' });
   }
   if (names.has('run_python')) {
-    out.push({ label: 'Calculer quelque chose de vrai',
-      text: 'Calcule, en exécutant réellement le code, le nombre de jours ouvrés restants cette année et la part de l’année déjà écoulée.' });
+    out.push({ label: 'Compute something real',
+      text: 'Actually run the code to work out how many working days are left this year, and what share of the year has already passed.' });
   }
   if (names.has('write_file')) {
-    out.push({ label: 'Produire un fichier',
-      text: 'Génère un CSV de synthèse dans l’espace de travail avec les modules Python disponibles sur cette machine et leur version.' });
+    out.push({ label: 'Produce a file',
+      text: 'Write a CSV into the workspace listing the Python modules available on this machine with their versions.' });
   }
   const mcp = boot.tools.filter((t) => t.kind === 'mcp');
   if (mcp.length) {
     const server = mcp[0].group;
-    out.push({ label: `Utiliser ${server}`, text: `Montre-moi ce que tu peux faire avec ${server}, en appelant réellement un de ses outils.` });
+    out.push({ label: `Use ${server}`, text: `Show me what you can do with ${server}, by actually calling one of its tools.` });
   } else {
-    out.push({ label: 'Ce que tu sais faire',
-      text: 'Liste précisément les outils dont tu disposes en ce moment et ce que chacun te permet de faire concrètement.' });
+    out.push({ label: 'What can you do?',
+      text: 'List exactly which tools you have right now and what each one lets you actually do.' });
   }
   return out.slice(0, 4);
-}
-
-function Mark() {
-  return (
-    <div className="relative grid h-14 w-14 place-items-center">
-      <div aria-hidden className="absolute inset-0 rounded-full bg-brand-500/25 blur-xl animate-breathe" />
-      <svg viewBox="0 0 32 32" className="relative h-12 w-12">
-        <defs>
-          <radialGradient id="lumen-mark" cx="50%" cy="45%" r="55%">
-            <stop offset="0%" stopColor="#c7bfff" />
-            <stop offset="55%" stopColor="#6d5efc" />
-            <stop offset="100%" stopColor="#3f2fa8" />
-          </radialGradient>
-        </defs>
-        <circle cx="16" cy="16" r="13" fill="url(#lumen-mark)" />
-        <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" strokeOpacity=".18" strokeWidth="1.5"
-          className="text-zinc-900 dark:text-white" />
-        <circle cx="12" cy="12" r="3.2" fill="#fff" fillOpacity=".5" />
-      </svg>
-    </div>
-  );
 }
 
 /* ------------------------------------------------------------ event reducer */

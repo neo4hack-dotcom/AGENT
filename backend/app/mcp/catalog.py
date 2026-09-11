@@ -23,45 +23,45 @@ def _p(key: str, label: str, *, required: bool = True, secret: bool = False,
 CATALOG: list[dict[str, Any]] = [
     # ------------------------------------------------------------- files & local
     {
-        "id": "filesystem", "name": "Système de fichiers", "vendor": "Model Context Protocol",
-        "category": "Fichiers", "accent": "amber",
-        "description": "Lire, écrire et chercher des fichiers dans un seul dossier que vous choisissez. "
-                       "Tout ce qui est en dehors reste invisible pour l'agent.",
+        "id": "filesystem", "name": "Filesystem", "vendor": "Model Context Protocol",
+        "category": "Files", "accent": "amber",
+        "description": "Read, write and search files inside one directory you choose. Everything outside "
+                       "that path stays invisible to the agent.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-filesystem", "{root_path}"],
-        "params": [_p("root_path", "Dossier à exposer", placeholder="/Users/vous/Documents",
-                      help="Le seul dossier que ce serveur peut voir.")],
+        "params": [_p("root_path", "Directory to expose", placeholder="/Users/you/Documents",
+                      help="The only folder this server can see.")],
         "tags": ["read", "write", "local"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
     },
     {
         "id": "git", "name": "Git", "vendor": "Model Context Protocol",
-        "category": "Fichiers", "accent": "amber",
-        "description": "Inspecter un dépôt local : statut, diffs, journal, branches, commits.",
+        "category": "Files", "accent": "amber",
+        "description": "Inspect a local repository: status, diffs, log, branches, commits.",
         "transport": "stdio", "command": "uvx",
         "args": ["mcp-server-git", "--repository", "{repo_path}"],
-        "params": [_p("repo_path", "Chemin du dépôt", placeholder="/Users/vous/code/projet")],
+        "params": [_p("repo_path", "Repository path", placeholder="/Users/you/code/project")],
         "tags": ["read", "local", "vcs"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
     },
     # -------------------------------------------------------------------- data
     {
         "id": "sqlite", "name": "SQLite", "vendor": "Model Context Protocol",
-        "category": "Données", "accent": "emerald",
-        "description": "Interroger et explorer une base SQLite locale, schéma compris.",
+        "category": "Data", "accent": "emerald",
+        "description": "Query and explore a local SQLite database, schema included.",
         "transport": "stdio", "command": "uvx",
         "args": ["mcp-server-sqlite", "--db-path", "{db_path}"],
-        "params": [_p("db_path", "Fichier de base", placeholder="/Users/vous/data/app.db")],
+        "params": [_p("db_path", "Database file", placeholder="/Users/you/data/app.db")],
         "tags": ["sql", "read", "local"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
     },
     {
         "id": "postgres", "name": "PostgreSQL", "vendor": "Model Context Protocol",
-        "category": "Données", "accent": "emerald",
-        "description": "Accès SQL en lecture seule à une base Postgres, avec introspection du schéma.",
+        "category": "Data", "accent": "emerald",
+        "description": "Read-only SQL access to a Postgres database, with schema introspection.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-postgres", "{connection_string}"],
-        "params": [_p("connection_string", "Chaîne de connexion", secret=True,
+        "params": [_p("connection_string", "Connection string", secret=True,
                       placeholder="postgresql://user:pass@localhost:5432/db")],
         "tags": ["sql", "read"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/postgres",
@@ -70,8 +70,8 @@ CATALOG: list[dict[str, Any]] = [
     {
         "id": "fetch", "name": "Web Fetch", "vendor": "Model Context Protocol",
         "category": "Web", "accent": "sky",
-        "description": "Récupérer une URL et la convertir en markdown propre. Lumen a déjà un outil natif ; "
-                       "celui-ci ajoute le respect de robots.txt et la lecture par morceaux.",
+        "description": "Fetch any URL and convert the page to clean markdown. Agent has a built-in fetcher "
+                       "too — this one adds robots.txt handling and chunked reads.",
         "transport": "stdio", "command": "uvx",
         "args": ["mcp-server-fetch"],
         "params": [],
@@ -79,10 +79,10 @@ CATALOG: list[dict[str, Any]] = [
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
     },
     {
-        "id": "playwright", "name": "Navigateur Playwright", "vendor": "Microsoft",
+        "id": "playwright", "name": "Playwright Browser", "vendor": "Microsoft",
         "category": "Web", "accent": "sky",
-        "description": "Piloter un vrai navigateur : naviguer, cliquer, remplir des formulaires, lire l'arbre "
-                       "d'accessibilité, capturer l'écran. Pour les pages qu'un simple fetch ne rend pas.",
+        "description": "Drive a real browser: navigate, click, fill forms, read the accessibility tree, "
+                       "screenshot. For pages a plain fetch cannot render.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@playwright/mcp@latest", "--headless"],
         "params": [],
@@ -90,10 +90,10 @@ CATALOG: list[dict[str, Any]] = [
         "docs": "https://github.com/microsoft/playwright-mcp",
     },
     {
-        "id": "context7", "name": "Documentation Context7", "vendor": "Upstash",
+        "id": "context7", "name": "Context7 Docs", "vendor": "Upstash",
         "category": "Web", "accent": "sky",
-        "description": "Documentation et exemples à jour pour des milliers de bibliothèques, récupérés à la "
-                       "demande plutôt que restitués de mémoire.",
+        "description": "Up-to-date documentation and code examples for thousands of libraries, pulled on "
+                       "demand instead of recalled from training data.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@upstash/context7-mcp"],
         "params": [],
@@ -103,21 +103,21 @@ CATALOG: list[dict[str, Any]] = [
     {
         "id": "brave-search", "name": "Brave Search", "vendor": "Brave",
         "category": "Web", "accent": "sky",
-        "description": "Recherche web et locale via l'API Brave Search. Nécessite une clé gratuite.",
+        "description": "Web and local search through the Brave Search API. Needs a free API key.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-brave-search"],
         "env": {"BRAVE_API_KEY": "{api_key}"},
-        "params": [_p("api_key", "Clé d'API Brave", secret=True,
-                      help="Offre gratuite sur brave.com/search/api")],
+        "params": [_p("api_key", "Brave API key", secret=True,
+                      help="Free tier at brave.com/search/api")],
         "tags": ["search", "read"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search",
     },
     # ----------------------------------------------------------------- thinking
     {
-        "id": "memory", "name": "Mémoire en graphe", "vendor": "Model Context Protocol",
-        "category": "Raisonnement", "accent": "violet",
-        "description": "Un graphe de connaissances persistant : entités et relations que l'agent construit et "
-                       "interroge d'une conversation à l'autre.",
+        "id": "memory", "name": "Knowledge Graph Memory", "vendor": "Model Context Protocol",
+        "category": "Reasoning", "accent": "violet",
+        "description": "A persistent knowledge graph of entities and relations the agent builds and queries "
+                       "across conversations.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
         "params": [],
@@ -125,10 +125,10 @@ CATALOG: list[dict[str, Any]] = [
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
     },
     {
-        "id": "sequential-thinking", "name": "Raisonnement séquentiel",
-        "vendor": "Model Context Protocol", "category": "Raisonnement", "accent": "violet",
-        "description": "Un brouillon structuré pour les longues chaînes de raisonnement, capables de bifurquer "
-                       "et de se corriger.",
+        "id": "sequential-thinking", "name": "Sequential Thinking",
+        "vendor": "Model Context Protocol", "category": "Reasoning", "accent": "violet",
+        "description": "A structured scratchpad for long chains of reasoning that can branch and revise "
+                       "themselves.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
         "params": [],
@@ -136,9 +136,9 @@ CATALOG: list[dict[str, Any]] = [
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
     },
     {
-        "id": "time", "name": "Heure & fuseaux", "vendor": "Model Context Protocol",
-        "category": "Raisonnement", "accent": "violet",
-        "description": "Heure courante partout dans le monde et conversions entre fuseaux.",
+        "id": "time", "name": "Time & Timezones", "vendor": "Model Context Protocol",
+        "category": "Reasoning", "accent": "violet",
+        "description": "Current time anywhere, and conversions between timezones.",
         "transport": "stdio", "command": "uvx",
         "args": ["mcp-server-time"],
         "params": [],
@@ -148,12 +148,12 @@ CATALOG: list[dict[str, Any]] = [
     # -------------------------------------------------------------------- work
     {
         "id": "github", "name": "GitHub", "vendor": "GitHub",
-        "category": "Travail", "accent": "rose",
-        "description": "Issues, pull requests, recherche de code et fichiers de dépôt sur GitHub, via "
-                       "l'endpoint MCP hébergé par GitHub.",
+        "category": "Work", "accent": "rose",
+        "description": "Issues, pull requests, code search and repository files on GitHub, through "
+                       "GitHub's own hosted MCP endpoint.",
         "transport": "http", "url": "https://api.githubcopilot.com/mcp/",
         "headers": {"Authorization": "Bearer {token}"},
-        "params": [_p("token", "Jeton d'accès personnel GitHub", secret=True,
+        "params": [_p("token", "GitHub personal access token", secret=True,
                       placeholder="ghp_…",
                       help="github.com → Settings → Developer settings → Personal access tokens")],
         "tags": ["read", "write", "vcs"],
@@ -161,34 +161,34 @@ CATALOG: list[dict[str, Any]] = [
     },
     {
         "id": "slack", "name": "Slack", "vendor": "Model Context Protocol",
-        "category": "Travail", "accent": "rose",
-        "description": "Lire les canaux et publier des messages en tant que bot Slack.",
+        "category": "Work", "accent": "rose",
+        "description": "Read channels and post messages as a Slack bot user.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-slack"],
         "env": {"SLACK_BOT_TOKEN": "{bot_token}", "SLACK_TEAM_ID": "{team_id}"},
-        "params": [_p("bot_token", "Jeton OAuth du bot", secret=True, placeholder="xoxb-…"),
-                   _p("team_id", "Identifiant d'équipe", placeholder="T01234567")],
+        "params": [_p("bot_token", "Bot user OAuth token", secret=True, placeholder="xoxb-…"),
+                   _p("team_id", "Team ID", placeholder="T01234567")],
         "tags": ["read", "write", "chat"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/slack",
     },
     {
         "id": "notion", "name": "Notion", "vendor": "Notion",
-        "category": "Travail", "accent": "rose",
-        "description": "Chercher, lire et écrire des pages et bases Notion.",
+        "category": "Work", "accent": "rose",
+        "description": "Search, read and write Notion pages and databases.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@notionhq/notion-mcp-server"],
         "env": {"NOTION_TOKEN": "{token}"},
-        "params": [_p("token", "Jeton d'intégration Notion", secret=True, placeholder="ntn_…",
-                      help="notion.so/my-integrations — puis partagez-lui les pages.")],
+        "params": [_p("token", "Notion integration token", secret=True, placeholder="ntn_…",
+                      help="notion.so/my-integrations — then share the pages with it.")],
         "tags": ["read", "write", "docs"],
         "docs": "https://github.com/makenotion/notion-mcp-server",
     },
     # ------------------------------------------------------------------ testing
     {
-        "id": "everything", "name": "Everything (serveur de référence)",
-        "vendor": "Model Context Protocol", "category": "Test", "accent": "zinc",
-        "description": "Le serveur de référence du protocole : tous les types d'outils, ressources et prompts "
-                       "au même endroit. Utile pour vérifier la plomberie MCP de Lumen de bout en bout.",
+        "id": "everything", "name": "Everything (reference server)",
+        "vendor": "Model Context Protocol", "category": "Testing", "accent": "zinc",
+        "description": "The protocol's own reference server: every tool, resource and prompt type in one "
+                       "place. Useful to verify the MCP plumbing end to end.",
         "transport": "stdio", "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-everything"],
         "params": [],
@@ -199,7 +199,7 @@ CATALOG: list[dict[str, Any]] = [
 
 CATALOG_BY_ID: dict[str, dict[str, Any]] = {entry["id"]: entry for entry in CATALOG}
 
-CATEGORIES = ["Fichiers", "Données", "Web", "Raisonnement", "Travail", "Test"]
+CATEGORIES = ["Files", "Data", "Web", "Reasoning", "Work", "Testing"]
 
 
 def instantiate(catalog_id: str, values: dict[str, str]) -> dict[str, Any]:

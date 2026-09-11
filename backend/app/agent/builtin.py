@@ -1,6 +1,6 @@
-"""The tools Lumen has before you connect anything.
+"""The tools Agent has before you connect anything.
 
-A freshly installed Lumen with zero MCP servers can already search, read a page, compute,
+A freshly installed Agent with zero MCP servers can already search, read a page, compute,
 keep files and remember things. That matters for the same reason the rest of the app
 starts clean: the empty state has to be genuinely useful, not a demo of what it would do
 once configured.
@@ -12,6 +12,7 @@ so the agent loop, the critic and the UI need no special case for any one of the
 from __future__ import annotations
 
 import platform
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,7 @@ from app.tools import web as web_tool
 class ToolSpec:
     def __init__(self, name: str, description: str, parameters: dict,
                  handler: Callable[..., Any], *, write: bool = False,
-                 group: str = "Intégré") -> None:
+                 group: str = "Built-in") -> None:
         self.name = name
         self.description = description
         self.parameters = parameters
@@ -68,6 +69,19 @@ def normalize_plan(raw: Any) -> list[dict]:
             continue
         if not title:
             continue
+        # Models routinely write progress into the title — "Write the file (done)", "✓ Write
+        # the file" — instead of the status field. Reading it there is not inventing
+        # progress: the model said so, just in the wrong place. Leaving it unread is what
+        # makes every plan sit at 0/N while the work is visibly finished.
+        lead = re.match(r"^\s*(?:✓|✔|\[[xX]\])\s*", title)
+        if lead:
+            status, title = "done", title[lead.end():].strip()
+        marker = re.search(r"[\s(\[]*(?:✓|✔|\bdone\b|\bcompleted\b|\bskipped\b)[\s)\]]*$",
+                           title, re.I)
+        if marker:
+            word = marker.group(0).strip(" ()[]✓✔").lower()
+            status = "skipped" if word.startswith("skip") else "done"
+            title = title[:marker.start()].strip(" -–—:") or title
         if status not in ("pending", "active", "done", "skipped"):
             status = "pending"
         steps.append({"index": index, "title": title[:200], "status": status})
@@ -89,7 +103,7 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
             return result
         lines = [f"{i + 1}. {r['title']}\n   {r['url']}\n   {r['snippet'][:240]}"
                  for i, r in enumerate(result["results"])]
-        return {"ok": True, "summary": f"{len(result['results'])} résultat(s) pour « {query} »",
+        return {"ok": True, "summary": f"{len(result['results'])} result(s) for “{query}”",
                 "text": "\n".join(lines), "data": result["results"]}
 
     async def h_web_fetch(url: str = "", **_: Any) -> dict:
@@ -99,7 +113,7 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
             return result
         text = result["text"]
         return {"ok": True,
-                "summary": f"{result['title'] or result['url']} — {len(text)} caractères",
+                "summary": f"{result['title'] or result['url']} — {len(text)} characters",
                 "text": text[:24000] + ("\n\n[truncated at 24k characters]" if len(text) > 24000 else ""),
                 "data": {"url": result["url"], "title": result["title"]}}
 
@@ -112,8 +126,8 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
                     "text": result.get("stdout", "")}
         out = result.get("stdout", "").strip()
         return {"ok": True,
-                "summary": (f"exécuté en {result['elapsed_ms']} ms — "
-                            + (f"{len(out.splitlines())} ligne(s)" if out else "aucune sortie")),
+                "summary": (f"ran in {result['elapsed_ms']} ms — "
+                            + (f"{len(out.splitlines())} line(s) of output" if out else "no output")),
                 "text": out or "(the code ran and printed nothing — print() what you need to see)",
                 "data": {"elapsed_ms": result["elapsed_ms"]}}
 
@@ -124,37 +138,42 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
         lines = [f"{'📁' if e['type'] == 'dir' else '📄'} {e['name']}"
                  + (f"  ({e['size']} bytes)" if e["type"] == "file" else "")
                  for e in result["entries"]]
-        return {"ok": True, "summary": f"{result['count']} élément(s) dans {result['path']}",
+        return {"ok": True, "summary": f"{result['count']} item(s) in {result['path']}",
                 "text": "\n".join(lines) or "(empty)", "data": result["entries"]}
 
     async def h_read_file(path: str = "", **_: Any) -> dict:
         result = file_tool.read_file(workspace, path)
         if not result.get("ok"):
             return result
-        return {"ok": True, "summary": f"{path} — {result['size']} octets",
+        return {"ok": True, "summary": f"{path} — {result['size']} bytes",
                 "text": result["text"]}
 
     async def h_write_file(path: str = "", content: str = "", **_: Any) -> dict:
         result = file_tool.write_file(workspace, path, content)
         if not result.get("ok"):
             return result
-        action = "créé" if result["action"] == "created" else "écrasé"
-        return {"ok": True, "summary": f"{path} {action} ({result['bytes']} octets)",
-                "text": f"{result['action']} {path}"}
+        # The result echoes what actually landed on disk. A model that elided its own
+        # content — "# Fibonacci ..." where twelve numbers were meant — sees the elision
+        # in the very next turn instead of narrating the file it intended to write.
+        written = content or ""
+        excerpt = written[:240] + ("\n… (truncated in this echo)" if len(written) > 240 else "")
+        return {"ok": True, "summary": f"{result['action']} {path} ({result['bytes']} bytes)",
+                "text": f"{result['action']} {path} ({result['bytes']} bytes). "
+                        f"Exactly this was written:\n---\n{excerpt}\n---"}
 
     async def h_remember(fact: str = "", **_: Any) -> dict:
         try:
             entry = memory.add(fact, source="agent")
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        return {"ok": True, "summary": "mémorisé", "text": entry["text"]}
+        return {"ok": True, "summary": "remembered", "text": entry["text"]}
 
     async def h_recall(query: str = "", **_: Any) -> dict:
         found = memory.recall(query, limit=6)
         if not found:
-            return {"ok": True, "summary": "rien de pertinent en mémoire",
+            return {"ok": True, "summary": "nothing relevant remembered",
                     "text": "No stored memory matches that."}
-        return {"ok": True, "summary": f"{len(found)} souvenir(s)",
+        return {"ok": True, "summary": f"{len(found)} memor(y/ies)",
                 "text": "\n".join(f"- {entry['text']}" for entry in found)}
 
     async def h_plan(steps: Any = None, **kwargs: Any) -> dict:
@@ -165,7 +184,7 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
                              "of {title, status} objects."}
         on_plan(normalized)
         done = sum(1 for s in normalized if s["status"] == "done")
-        return {"ok": True, "summary": f"plan : {done}/{len(normalized)} fait",
+        return {"ok": True, "summary": f"plan: {done}/{len(normalized)} done",
                 "text": "\n".join(
                     f"{'✓' if s['status'] == 'done' else '▸' if s['status'] == 'active' else '·'} "
                     f"{s['title']}" for s in normalized)}
@@ -187,7 +206,7 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
                                      "status": {"type": "string",
                                                 "enum": ["pending", "active", "done", "skipped"]}},
                                      "required": ["title"]}}}, ["steps"]),
-                 h_plan, group="Planification"),
+                 h_plan, group="Planning"),
         ToolSpec("current_time", "The current date and time on this machine.",
                  _obj({}), h_now),
     ]
@@ -216,32 +235,32 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
             f"documents. Never compute a number in your head when you can run it here. "
             f"print() everything you need to see — nothing else is returned. "
             f"Available beyond the standard library: {modules}. "
-            f"The working directory is the Lumen workspace, so relative paths are shared with the "
+            f"The working directory is the Agent workspace, so relative paths are shared with the "
             f"file tools. Killed after {settings.python_timeout_s}s.",
             _obj({"code": {"type": "string", "description": "The Python source to run."}}, ["code"]),
-            h_run_python, write=True, group="Calcul"))
+            h_run_python, write=True, group="Compute"))
     specs += [
-        ToolSpec("list_files", "List what is in the Lumen workspace directory.",
+        ToolSpec("list_files", "List what is in the Agent workspace directory.",
                  _obj({"path": {"type": "string",
                                 "description": "Sub-path inside the workspace. Empty for the root."}}),
-                 h_list_files, group="Espace de travail"),
-        ToolSpec("read_file", "Read a text file from the Lumen workspace.",
-                 _obj({"path": {"type": "string"}}, ["path"]), h_read_file, group="Espace de travail"),
+                 h_list_files, group="Workspace"),
+        ToolSpec("read_file", "Read a text file from the Agent workspace.",
+                 _obj({"path": {"type": "string"}}, ["path"]), h_read_file, group="Workspace"),
         ToolSpec("write_file",
-                 "Write a text file into the Lumen workspace, creating folders as needed. "
+                 "Write a text file into the Agent workspace, creating folders as needed. "
                  "Use it to save anything the user should keep.",
                  _obj({"path": {"type": "string"}, "content": {"type": "string"}},
                       ["path", "content"]),
-                 h_write_file, write=True, group="Espace de travail"),
+                 h_write_file, write=True, group="Workspace"),
         ToolSpec("remember",
                  "Store one durable fact about the user or their work, so it is available in every "
                  "future conversation. Use it for stable preferences, names, and context worth "
                  "keeping — never for something true only inside this conversation.",
                  _obj({"fact": {"type": "string",
                                 "description": "One self-contained sentence."}}, ["fact"]),
-                 h_remember, group="Mémoire"),
+                 h_remember, group="Memory"),
         ToolSpec("recall", "Search everything previously remembered about the user.",
-                 _obj({"query": {"type": "string"}}, ["query"]), h_recall, group="Mémoire"),
+                 _obj({"query": {"type": "string"}}, ["query"]), h_recall, group="Memory"),
     ]
     return {spec.name: spec for spec in specs}
 
@@ -249,9 +268,10 @@ def build_registry(settings, memory, workspace: Path, on_plan) -> dict[str, Tool
 _PLAN_DESC = (
     "Lay out your plan for a task that needs several steps, and keep it updated as you go. "
     "The user sees this list live, so it is how they follow what you are doing. "
-    "Call it once at the start of any multi-step task, then again after each step completes, "
-    "re-sending the whole list with updated statuses. Skip it entirely for anything you can "
-    "answer in one or two moves."
+    "Call it once at the start of any multi-step task, then AGAIN after each step completes, "
+    "re-sending the whole list with that step's status set to \"done\". A plan left at 0 done "
+    "tells the user nothing happened. Skip it entirely for anything you can answer in one or "
+    "two moves."
 )
 
 

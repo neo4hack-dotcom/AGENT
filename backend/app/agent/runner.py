@@ -306,9 +306,9 @@ class AgentRunner:
         caps = await self.c.llm.capabilities() if hasattr(self.c.llm, "capabilities") else {}
         if image_payload and not caps.get("vision"):
             ctx.emit({"type": "notice",
-                      "message": f"{getattr(self.c.llm, 'model', 'Ce modèle')} ne sait pas lire "
-                                 f"les images : la pièce jointe n’a pas été envoyée. Choisissez un "
-                                 f"modèle avec la capacité « vision » dans l’administration."})
+                      "message": f"{getattr(self.c.llm, 'model', 'This model')} cannot read "
+                                 f"images, so the attachment was not sent. Pick a model with the "
+                                 f"'vision' capability in Admin."})
             image_payload = []
 
         reflected = False
@@ -325,8 +325,8 @@ class AgentRunner:
             ctx.check_cancelled()
             if ctx.guard.over_time_budget():
                 ctx.emit({"type": "notice", "message":
-                          f"Budget de temps atteint ({settings.run_timeout_s} s) — réponse avec "
-                          f"ce qui a été réuni jusqu’ici."})
+                          f"Time budget reached ({settings.run_timeout_s}s) — answering with "
+                          f"what has been gathered so far."})
                 break
 
             if pending_hint:
@@ -387,9 +387,9 @@ class AgentRunner:
                     if truncated:
                         window = await self._context_window()
                         ctx.emit({"type": "notice", "message":
-                                  f"Le modèle a été coupé net : le prompt occupe {result.tokens_in} "
-                                  f"tokens sur une fenêtre de {window}. Réduisez le nombre de "
-                                  f"serveurs MCP connectés, ou augmentez la fenêtre de contexte."})
+                                  f"The model was cut off mid-turn: the prompt takes "
+                                  f"{result.tokens_in} tokens of a {window}-token window. Connect "
+                                  f"fewer MCP servers, or raise the context window in Admin."})
                     if truncated or empty_turns >= 2:
                         must_compose = True
                         break
@@ -454,8 +454,8 @@ class AgentRunner:
                     pending_hint = prompts.heal_hint(call.name, out.get("error", ""), verdict["advice"])
         else:
             ctx.emit({"type": "notice",
-                      "message": f"Plafond de {settings.max_iterations} tours d’outils atteint — "
-                                 f"réponse avec ce qui a été réuni."})
+                      "message": f"Ceiling of {settings.max_iterations} tool turns reached — "
+                                 f"answering with what has been gathered."})
 
         if not ctx.has_answer():
             # Every run ends with something readable, even a run that only failed.
@@ -512,7 +512,7 @@ class AgentRunner:
                 approved = await ctx.request_approval(block["id"], {
                     "index": block["index"], "name": call.name, "args": call.arguments,
                     "server": block["server"], "kind": block["kind"],
-                    "reason": "Cet outil peut modifier quelque chose en dehors de Lumen."})
+                    "reason": "This tool can change something outside the workspace."})
                 if not approved:
                     immediate.append((call, self._fail(ctx, block,
                         "The user declined this call. Do not retry it; continue without it or "
@@ -539,7 +539,7 @@ class AgentRunner:
             if mcp_tool.get("auto_approve"):
                 return False
             return mode == "always" or bool(mcp_tool.get("write"))
-        # Built-ins only ever touch Lumen's own workspace, so they are gated solely in
+        # Built-ins only ever touch Agent's own workspace, so they are gated solely in
         # the strictest mode — asking to approve every `run_python` would make the agent
         # unusable at exactly the moment it is being most useful.
         return mode == "always" and bool(spec and spec.write)
@@ -643,10 +643,14 @@ class AgentRunner:
         read-only tools only, so it cannot become a loop or take an action nobody approved.
         """
         ctx.emit({"type": "status", "phase": "checking"})
+        # Summaries alone cannot show that a written file contains a placeholder, or that a
+        # query came back empty. A short excerpt of what each tool actually returned is what
+        # lets this pass catch "it ran fine and produced nothing useful".
         evidence = "\n".join(
             f"- {b['name']}({json.dumps(b.get('args') or {}, ensure_ascii=False)[:160]}): "
-            f"{'ok' if b.get('ok') else 'FAILED'} — {b.get('summary', '')[:220]}"
-            for b in ctx.blocks if b["type"] == "tool")
+            f"{'ok' if b.get('ok') else 'FAILED'} — {b.get('summary', '')[:180]}\n"
+            f"    returned: {' '.join((b.get('text') or '').split())[:320]}"
+            for b in ctx.blocks if b["type"] == "tool" and b.get("name") != "plan")
         draft = "\n".join(b.get("text", "") for b in ctx.blocks
                           if b["type"] == "text" and not b.get("superseded"))[:2000]
         readable = [name for name, spec in tools.items() if not spec.write]

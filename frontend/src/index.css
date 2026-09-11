@@ -2,6 +2,30 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Self-hosted, not linked from a font CDN. A page that phones a third party on every load
+   to draw its own name is not a local-first app, and these two variable faces are 72 KB
+   together — less than one round trip to fetch them would have cost. */
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/space-grotesk-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
 @layer base {
   :root { color-scheme: light; }
   .dark { color-scheme: dark; }
@@ -10,7 +34,9 @@
 
   body {
     @apply bg-white text-zinc-900 antialiased dark:bg-[#0b0b0f] dark:text-zinc-100;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
+    /* Inter's alternates: a straight-legged l, a single-storey a in UI chrome, and the
+       disambiguated 1/I/l that any interface showing model names and tokens needs. */
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11', 'ss03';
     text-rendering: optimizeLegibility;
   }
 
@@ -24,7 +50,7 @@
   .dark ::-webkit-scrollbar-thumb { @apply bg-white/10; }
   .dark ::-webkit-scrollbar-thumb:hover { @apply bg-white/20; }
 
-  ::selection { @apply bg-brand-500/25; }
+  ::selection { @apply bg-brand-400/30; }
 }
 
 @layer components {
@@ -46,10 +72,18 @@
      to whether the agent is working — ornament that carries state stops being ornament. */
   .aurora {
     background:
-      radial-gradient(42% 52% at 50% 46%, rgba(109, 94, 252, 0.20), transparent 72%),
-      radial-gradient(34% 44% at 74% 58%, rgba(56, 189, 248, 0.16), transparent 70%),
-      radial-gradient(30% 40% at 26% 60%, rgba(217, 70, 239, 0.12), transparent 70%);
+      radial-gradient(42% 52% at 50% 46%, rgba(0, 212, 170, 0.24), transparent 72%),
+      radial-gradient(34% 44% at 74% 58%, rgba(70, 237, 198, 0.18), transparent 70%),
+      radial-gradient(30% 40% at 26% 60%, rgba(0, 143, 116, 0.16), transparent 70%);
     filter: blur(26px);
+  }
+
+  /* The wordmark. Wide tracking is what turns five letters into a mark rather than a
+     word — and Space Grotesk's flat terminals carry that better than a humanist face. */
+  .wordmark {
+    @apply font-display font-medium uppercase;
+    letter-spacing: 0.34em;
+    text-indent: 0.34em; /* optical: tracking adds space after the last letter too */
   }
 
   .streaming-caret::after {

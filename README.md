@@ -1,160 +1,149 @@
-# Lumen
+# AGENT
 
-Un **super-agent IA autonome, entièrement local**. Une seule barre de saisie sur un écran
-vide. Derrière : un modèle Ollama qui tourne sur votre machine, une boucle agentique
-bornée qui raisonne, appelle ses outils et se corrige, et une bibliothèque de serveurs MCP
-connectables en deux clics depuis une page d'administration discrète.
+An autonomous agent with a single input on an empty screen. Behind it: a bounded agentic
+loop, a set of tools that work with nothing configured, and a library of MCP servers you
+connect in two clicks from a discreet admin page.
 
-Rien de ce que vous écrivez ne quitte l'ordinateur, sauf si vous connectez explicitement un
-outil qui sort (la recherche web, un serveur MCP distant). Il n'y a aucune clé d'API à
-fournir pour démarrer, et aucune donnée de démonstration nulle part : ce que l'interface
-affiche est ce que les outils ont réellement renvoyé.
+Models run through **Ollama**. A model tagged `-cloud` is hosted by Ollama rather than by
+your machine, and the interface says which on every screen — the status badge in the header
+carries a monitor icon for a local model and a cloud icon for a hosted one. Nothing else
+about a conversation leaves the machine.
 
 ---
 
-## Démarrage
+## Getting started
 
-Prérequis : **Python 3.12+**, **Node 20+**, et **[Ollama](https://ollama.com)** avec au
-moins un modèle qui sait appeler des outils.
+Requires **Python 3.12+**, **Node 20+**, and **[Ollama](https://ollama.com)** with at least
+one model that can call tools.
 
 ```bash
-ollama pull qwen3.5:4b     # outils + raisonnement + vision, 3,4 Go
 make install
-```
-
-Puis, dans deux terminaux :
-
-```bash
 make api    # http://localhost:3041
 make web    # http://localhost:3040
 ```
 
-Ouvrez `http://localhost:3040`, puis **⌘,** → *Modèle* et choisissez-en un. C'est tout.
+Defaults to `gpt-oss:120b-cloud` for reasoning and `qwen3.5:4b` for the fast lane. Change
+both in **⌘,** → *Model*. To run entirely on your own hardware, pick a local model there —
+anything reporting `tools` works.
 
-En production, un seul processus suffit — le backend sert l'interface compilée sur la même
-origine, donc aucun CORS à configurer :
+Production is one process; the backend serves the built SPA from the same origin, so there
+is no CORS to configure:
 
 ```bash
-make serve   # construit le frontend puis sert tout sur :3041
+make serve
 ```
 
-### Choisir le modèle
+### Choosing a model
 
-L'administration liste les modèles de votre serveur Ollama avec **les capacités déclarées
-par le serveur**, jamais devinées d'après le nom :
+Admin lists what your Ollama server offers with **the capabilities the server declares**,
+never guessed from the name:
 
-| Capacité | Sans elle |
+| Capability | Without it |
 |---|---|
-| `tools` | l'agent ne peut appeler **aucun** outil ; il répond seulement de mémoire |
-| `thinking` | pas de trace de raisonnement affichée |
-| `vision` | les images jointes ne sont pas envoyées — et Lumen vous le dit |
+| `tools` | the agent cannot call **anything**; it only answers from memory |
+| `thinking` | no reasoning trace is shown |
+| `vision` | attached images are not sent — and the app tells you so |
 
-Testé sur une machine à 9 Go de RAM avec `qwen3.5:4b` (les quatre capacités, 262k de
-contexte). `gemma4:e4b` convient aussi. Un modèle sans `tools` reste sélectionnable — avec
-un avertissement explicite, pas un échec silencieux.
+`gpt-oss:120b-cloud` reports tools and thinking but **not vision**, so image attachments
+need a different model (`qwen3.5:4b` and `gemma4:e4b` both see).
 
 ---
 
-## Ce que l'agent sait faire sans rien configurer
+## What it can do with nothing configured
 
-| Outil | Ce qu'il fait réellement |
+| Tool | What it actually does |
 |---|---|
-| `web_search` | recherche DuckDuckGo, sans clé d'API |
-| `web_fetch` | récupère une URL et la lit (HTML → texte, JSON, CSV) |
-| `run_python` | exécute du Python dans un processus séparé, tué au-delà du délai |
-| `read_file` / `write_file` / `list_files` | l'espace de travail de Lumen, et rien d'autre |
-| `remember` / `recall` | mémoire durable d'une conversation à l'autre |
-| `plan` | le plan que vous voyez se cocher en direct |
-| `current_time` | date et heure de la machine |
+| `web_search` | DuckDuckGo search, no API key |
+| `web_fetch` | fetches a URL and reads it (HTML → text, JSON, CSV) |
+| `run_python` | runs Python in a separate process, killed past its timeout |
+| `read_file` / `write_file` / `list_files` | the workspace, and nothing else |
+| `remember` / `recall` | durable memory across conversations |
+| `plan` | the checklist you watch tick over |
+| `current_time` | the machine's date and time |
 
-Tout serveur **MCP** connecté ajoute ses outils au même index, préfixés par le nom du
-serveur (`filesystem__read_file`). La bibliothèque propose quinze recettes prêtes à
-l'emploi — système de fichiers, Git, SQLite, Postgres, Playwright, GitHub, Slack, Notion,
-Context7… — et n'importe quel autre serveur s'ajoute par le formulaire « serveur
-personnalisé », en stdio ou en HTTP.
+Every connected **MCP** server adds its tools to the same index, namespaced by server
+(`filesystem__read_file`). The library ships fifteen ready recipes — filesystem, Git,
+SQLite, Postgres, Playwright, GitHub, Slack, Notion, Context7 — and any other server is one
+"custom server" form away, over stdio or HTTP.
 
 ---
 
-## Comment fonctionne la boucle
+## How the loop works
 
 ```
-message ──► [ raisonner ──► appeler des outils ──► observer ]* ──► répondre
-                   ▲                    │
-                   └──── critique ──────┘
+message ──► [ think ──► call tools ──► observe ]* ──► answer
+                 ▲                  │
+                 └────── critic ────┘
 ```
 
-Une boucle ReAct bornée, pas une machine à états à neuf nœuds : neuf appels LLM avant le
-premier mot, sur un modèle local, c'est une minute de silence pour répondre « bonjour ».
-La rigueur est donc attachée là où elle paye sa latence :
+A bounded ReAct loop rather than a nine-node state machine: nine LLM calls before the first
+word is a minute of silence to answer "hello". Rigour is attached where it pays for its
+latency:
 
-- **La garde anti-boucle** tourne à chaque appel, gratuitement. Elle signe un appel par sa
-  *structure* (outil + arguments), jamais par sa formulation — un modèle à qui l'on dit
-  « essaie autre chose » repropose la même idée reformulée avec une fiabilité remarquable.
-  Les requêtes de recherche sont comparées par ensemble de mots, donc deux recherches aux
-  mêmes mots dans un autre ordre comptent comme une seule.
-- **Le critique** n'intervient que sur un appel **échoué**, où son conseil change la
-  tentative suivante. C'est un appel LLM distinct, qui ne voit que l'appel et son erreur :
-  le modèle qui vient d'échouer est le plus mal placé pour juger s'il a réussi.
-- **La vérification finale** tourne une fois, avant de répondre, et ne se contente pas de
-  suggérer : elle **nomme l'appel d'outil manquant, et c'est l'orchestrateur qui
-  l'exécute**. Un modèle à qui l'on suggère d'ouvrir une page répond « je devrais consulter
-  cette page » ; un orchestrateur qui l'ouvre ramène la donnée.
-- **La synthèse finale** est écrite à partir d'un digest des preuves — la question, puis ce
-  que chaque outil a réellement renvoyé — jamais à partir du transcript entier. Rejouer
-  quinze mille tokens de sortie d'outils fait répondre un petit modèle à la dernière page
-  lue plutôt qu'à la personne, souvent dans la langue de la page.
-- **Le plan est exclu des preuves.** Une étape planifiée n'est pas une étape faite : un
-  modèle à qui l'on montre son propre plan comme « preuve » rapporte chaque étape comme
-  accomplie, et c'est ainsi qu'une exécution qui n'a écrit aucun fichier finit par affirmer
-  l'avoir écrit *et vérifié*.
+- **The loop guard** runs on every call, free. It fingerprints a call by its *structure*
+  (tool + arguments), never its wording — a model told "try something different" reproposes
+  the same idea rephrased with remarkable reliability. Search queries compare as word sets,
+  so the same search in another order counts once.
+- **The critic** only runs on a **failed** call, where its advice changes the next attempt.
+  It is a separate LLM call that sees only the call and its error: the model that just
+  failed is the worst placed to judge whether it succeeded.
+- **The final gap check** runs once before answering, and does not merely suggest: it
+  **names the missing tool call, and the orchestrator executes it**. A model told to open a
+  page replies "I would need to open that page"; an orchestrator that opens it returns the
+  data.
+- **The final answer is composed from an evidence digest** — the question, then what each
+  tool actually returned — never from the whole transcript. Replaying fifteen thousand
+  tokens of tool output makes a small model answer the last page it read instead of the
+  person, often in the page's language.
+- **The plan is excluded from that evidence.** A planned step is not a completed step: a
+  model shown its own plan as "evidence" reports every step as done, which is how a run that
+  wrote no file ends up claiming it wrote *and verified* one.
 
-### Honnêteté avant complétude
+### Honesty before completeness
 
-Le principe qui prime sur tous les autres : **un échec doit rester visible**. Un outil qui
-tombe le dit, un serveur qui refuse de démarrer affiche sa propre sortie d'erreur sur sa
-carte, une capacité absente est annoncée avant d'être utilisée. Nulle part Lumen ne
-substitue une valeur plausible à un résultat qu'il n'a pas obtenu.
+The principle above all others: **a failure stays visible**. A tool that fails says so, a
+server that will not start shows its own stderr on its card, a missing capability is
+announced before it is needed. Nowhere does this app substitute a plausible value for a
+result it did not get.
 
 ---
 
-## Contrôle humain
+## Human control
 
-Trois niveaux, réglables dans *Garde-fous* :
+Three levels, in *Guardrails*:
 
-| Mode | Effet |
+| Mode | Effect |
 |---|---|
-| Jamais | l'agent agit seul |
-| **Pour les écritures** (défaut) | un outil MCP qui modifie quelque chose demande votre accord, dans le fil |
-| Toujours | chaque outil est soumis à approbation, exécution Python comprise |
+| Never | the agent acts alone |
+| **For writes** (default) | an MCP tool that changes something asks you first, inline |
+| Always | every tool needs approval, Python execution included |
 
-Les outils natifs n'écrivent que dans l'espace de travail de Lumen, donc ils ne sont
-soumis à approbation qu'en mode « toujours » : demander d'approuver chaque `run_python`
-rendrait l'agent inutilisable au moment précis où il sert le plus. Un serveur MCP de
-confiance peut recevoir une approbation automatique, serveur par serveur.
+Built-in tools only ever write inside the workspace, so they are gated in "always" mode
+alone: asking to approve every `run_python` would make the agent useless exactly when it is
+most useful. A trusted MCP server can be auto-approved, server by server.
 
-`run_python` mérite d'être nommé pour ce qu'il est : un garde-fou contre l'emballement et
-l'accident — processus séparé, répertoire de travail borné, surveillance qui tue le
-processus au-delà du délai — **pas un bac à sable de sécurité**. Le code s'exécute avec les
-droits de Lumen. L'interrupteur est dans *Garde-fous*.
+`run_python` deserves to be named for what it is: a guard against runaway and accident —
+separate process, bounded working directory, a watchdog that kills it past the timeout —
+**not a security sandbox**. Code runs with this app's own rights. The switch is in
+*Guardrails*.
 
 ---
 
-## Administration
+## Admin
 
-Discrète : **⌘,** ou la petite icône en haut à droite.
+Discreet: **⌘,** or the small icon top right.
 
-- **Sans mot de passe** (défaut) — accessible uniquement depuis la machine qui exécute
-  Lumen. C'est le bon réglage pour un agent personnel : rien à inventer avant de
-  configurer, et rien d'exposé si le port venait à être ouvert.
-- **Avec `LUMEN_ADMIN_PASSWORD`** — exigé partout, y compris en local, en échange d'un
-  jeton. Les tentatives échouées sont freinées.
+- **No password** (default) — reachable only from the machine running the app. The right
+  setting for a personal agent: nothing to invent before configuring anything, and nothing
+  exposed if the port is ever forwarded.
+- **With `AGENT_ADMIN_PASSWORD`** — required everywhere, loopback included, in exchange for
+  a token. Failed attempts back off.
 
-Les secrets saisis (jetons, chaînes de connexion) ne reviennent jamais en clair vers le
-navigateur : ils sont masqués, et renvoyer une valeur masquée ne l'écrase pas.
+Secrets you enter (tokens, connection strings) never come back to the browser in the clear:
+they are masked, and sending a masked value back does not overwrite it.
 
-Onglets : **Modèle** · **Serveurs MCP** (bibliothèque, serveurs connectés, banc d'essai
-pour appeler un outil à la main) · **Outils** · **Garde-fous** · **Mémoire** ·
-**Diagnostic**.
+Tabs: **Model** · **MCP servers** (library, connected servers, a bench to call one tool by
+hand) · **Tools** · **Guardrails** · **Memory** · **Diagnostics**.
 
 ---
 
@@ -162,68 +151,70 @@ pour appeler un outil à la main) · **Outils** · **Garde-fous** · **Mémoire*
 
 ```
 backend/app/
-├── main.py              FastAPI ; sert le SPA compilé en production
-├── config.py            un préfixe d'env, tout par défaut vide/désactivé
-├── deps.py              conteneur de dépendances ; `settings` est une vue *vivante*
-├── store.py             JSON plat, écritures sérialisées et différées
-├── security.py          accès local seul, ou mot de passe → jeton
-├── llm/provider.py      Ollama : streaming, raisonnement séparé, outils natifs
-├── mcp/                 client JSON-RPC écrit à la main (stdio + HTTP), registre, catalogue
+├── main.py              FastAPI; serves the built SPA in production
+├── config.py            one env prefix, everything defaulting empty/off
+├── deps.py              dependency container; `settings` is a *live* view
+├── store.py             flat JSON, serialised and debounced writes
+├── security.py          local-only, or password → token
+├── llm/provider.py      Ollama: streaming, reasoning split out, native tools
+├── mcp/                 hand-written JSON-RPC client (stdio + HTTP), registry, catalog
 ├── agent/
-│   ├── runner.py        la boucle, les approbations, le critique, la synthèse
-│   ├── guard.py         la garde anti-boucle
-│   ├── prompts.py       tout ce que le modèle sait de lui-même
-│   ├── builtin.py       les outils natifs
-│   └── memory.py        mémoire longue, rappel par recouvrement pondéré
-└── tools/               web, exécution de code, fichiers
+│   ├── runner.py        the loop, approvals, critic, synthesis
+│   ├── guard.py         the loop guard
+│   ├── prompts.py       everything the model knows about itself
+│   ├── builtin.py       the built-in tools
+│   └── memory.py        long-term memory, weighted-overlap recall
+└── tools/               web, code execution, files
 frontend/src/
-├── App.tsx              les deux états : toile vide, puis conversation
-├── api.ts               le client typé unique (+ flux SSE reconnectant)
+├── App.tsx              the two states: empty canvas, then conversation
+├── api.ts               the one typed client (+ a reconnecting SSE stream)
 └── components/          ui, Markdown, Composer, Thread, Sidebar, Admin, McpLibrary
 ```
 
-Le client MCP est **écrit directement contre le protocole** (JSON-RPC 2.0, version
-`2025-06-18`), sans SDK : un seul chemin de code pour un processus local ou un endpoint
-distant, et une panne de connexion qui remonte comme un diagnostic lisible — la sortie
-d'erreur du serveur comprise — plutôt qu'en erreur d'import opaque.
+The MCP client is written **directly against the protocol** (JSON-RPC 2.0, `2025-06-18`)
+with no SDK: one code path for a local process or a remote endpoint, and a connection
+failure that surfaces as a readable diagnostic — the server's own stderr included — rather
+than an opaque import error.
 
-### Détails qui comptent
+### Details that matter
 
-- **La fenêtre de contexte est dimensionnée à partir du modèle**, pas laissée au défaut
-  d'Ollama. Ce défaut est de 4096 tokens quel que soit le modèle ; le prompt d'un agent —
-  instructions plus schémas d'outils — en occupe l'essentiel, et le modèle se fait couper
-  au milieu d'une phrase, tour après tour, jusqu'à épuisement du budget. Lumen demande la
-  fenêtre déclarée par le modèle, **plafonnée à 16k** : au-delà, le cache d'attention
-  chasse le modèle du GPU et divise la vitesse par plusieurs sur une machine à faible
-  mémoire. Réglable dans *Garde-fous*.
-- **Une exécution survit à l'onglet.** Elle tourne côté serveur ; le flux SSE est une *vue*
-  sur elle, réattachable, qui rejoue ce qui a été manqué depuis le dernier numéro de
-  séquence reçu. Fermer l'onglet en pleine réponse ne perd rien.
-- **Les deltas sont regroupés par frame** avant d'entrer dans l'état React : un modèle
-  local rapide transformerait sinon chaque token en re-rendu complet du markdown.
-- **Le rendu markdown est sans dépendance** et tolère un document en cours d'écriture — un
-  bloc de code non refermé, un tableau à moitié écrit. Aucun `dangerouslySetInnerHTML` :
-  la sortie du modèle ne peut injecter aucun balisage.
+- **The context window is sized from the model**, not left at Ollama's default. That default
+  is 4096 tokens whatever the model; an agent's prompt — instructions plus tool schemas —
+  takes most of it, and the model gets cut off mid-sentence, turn after turn, until the
+  budget is gone. The app asks for the window the model declares, capped at **16k for a
+  model running here** (past that the KV cache pushes it off the GPU) and **64k for one
+  Ollama hosts**, where this machine's memory is not the constraint. Both adjustable in
+  *Guardrails*.
+- **A run outlives the tab.** It runs server-side; the SSE stream is a *view* of it,
+  re-attachable, replaying whatever was missed since the last sequence number received.
+  Closing the tab mid-answer loses nothing.
+- **Deltas are batched per frame** before entering React state: a fast local model would
+  otherwise turn every token into a full re-parse of the markdown so far.
+- **Markdown rendering is dependency-free** and tolerates a document still being written — an
+  unclosed code fence, a half-written table. No `dangerouslySetInnerHTML`, and hrefs are
+  restricted to http(s)/mailto so a `javascript:` link repeated from a scraped page never
+  reaches the DOM.
+- **Fonts are self-hosted** (Space Grotesk for the wordmark, Inter for everything read —
+  72 KB together). A page that phones a font CDN on every load to draw its own name is not a
+  local-first app.
 
 ---
 
-## Limites, dites franchement
+## Limits, said plainly
 
-- Un modèle de 4 milliards de paramètres se trompe. Les garde-fous rendent ses erreurs
-  visibles et rattrapables ; ils ne les suppriment pas. Un modèle local plus gros améliore
-  nettement la qualité, au prix de la vitesse.
-- `run_python` n'est pas un bac à sable de sécurité (voir plus haut).
-- Le store JSON suppose **un seul processus**. Il tient très bien pour un agent personnel ;
-  il faudra une vraie base le jour où plusieurs instances écriront en même temps.
-- La recherche web passe par le point d'entrée HTML de DuckDuckGo, sans clé. S'il change de
-  forme ou limite les requêtes, l'outil **le dit** au lieu de renvoyer une liste vide que le
-  modèle interpréterait comme « rien n'existe à ce sujet ».
-- Le rappel mémoire utilise un recouvrement de termes pondéré, pas des embeddings :
-  inspectable, sans second modèle à charger, et suffisant pour la poignée de faits durables
-  qu'accumule un agent personnel.
+- A small model gets things wrong. The guardrails make its mistakes visible and
+  recoverable; they do not remove them.
+- `run_python` is not a security sandbox (see above).
+- The JSON store assumes **a single process**. It holds up well for a personal agent; a real
+  database is needed the day several instances write at once.
+- Web search goes through DuckDuckGo's HTML endpoint, keyless. If it changes shape or rate
+  limits, the tool **says so** instead of returning an empty list the model would read as
+  "nothing exists about this".
+- Memory recall uses weighted term overlap, not embeddings: inspectable, no second model to
+  load, and enough for the handful of durable facts a personal agent accumulates.
 
 ---
 
 ## Ports
 
-`3040` interface · `3041` API. Repli : `3050` / `3051` (`npm run dev:alt`).
+`3040` web · `3041` API. Fallback pair: `3050` / `3051` (`npm run dev:alt`).

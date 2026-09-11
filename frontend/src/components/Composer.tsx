@@ -122,7 +122,7 @@ export function Composer({
                 {file.kind === 'image' ? <ImageIcon size={11} className="dimmer" /> : <Paperclip size={11} className="dimmer" />}
                 <span className="max-w-[16rem] truncate">{file.name}</span>
                 {file.kind === 'image' && !vision && (
-                  <span className="text-amber-600 dark:text-amber-400" title="Le modèle actif ne lit pas les images">⚠</span>
+                  <span className="text-amber-600 dark:text-amber-400" title="The active model cannot read images">⚠</span>
                 )}
                 <button onClick={() => setFiles((c) => c.filter((f) => f.id !== file.id))}
                   className="focus-ring rounded p-0.5 dimmer hover:text-zinc-700 dark:hover:text-zinc-200">
@@ -130,7 +130,7 @@ export function Composer({
                 </button>
               </span>
             ))}
-            {uploading > 0 && <span className="flex items-center gap-1.5 px-2 py-1 text-2xs dim"><Spinner size={11} /> envoi…</span>}
+            {uploading > 0 && <span className="flex items-center gap-1.5 px-2 py-1 text-2xs dim"><Spinner size={11} /> uploading…</span>}
           </div>
         )}
 
@@ -138,7 +138,7 @@ export function Composer({
           <button
             onClick={() => fileInput.current?.click()}
             disabled={disabled}
-            title="Joindre un fichier"
+            title="Attach a file"
             className="focus-ring mb-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-40 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200"
           >
             <Paperclip size={16} strokeWidth={1.9} />
@@ -151,7 +151,7 @@ export function Composer({
             rows={1}
             value={text}
             disabled={disabled}
-            placeholder={disabled ? (disabledReason ?? 'Indisponible') : (placeholder ?? 'Demandez n’importe quoi…')}
+            placeholder={disabled ? (disabledReason ?? 'Unavailable') : (placeholder ?? 'Ask anything')}
             onChange={(e) => setText(e.target.value)}
             onPaste={onPaste}
             onKeyDown={(e) => {
@@ -164,15 +164,15 @@ export function Composer({
           />
 
           {running ? (
-            <button onClick={onStop} title="Arrêter"
+            <button onClick={onStop} title="Stop"
               className="focus-ring mb-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-zinc-900 text-white transition-transform hover:scale-105 active:scale-95 dark:bg-zinc-100 dark:text-zinc-900">
               <Square size={12} fill="currentColor" />
             </button>
           ) : (
-            <button onClick={send} disabled={!canSend} title="Envoyer"
+            <button onClick={send} disabled={!canSend} title="Send"
               className={cls('focus-ring mb-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-all',
                 canSend
-                  ? 'bg-brand-600 text-white shadow-sm hover:bg-brand-500 hover:scale-105 active:scale-95'
+                  ? 'bg-brand-500 text-zinc-950 shadow-sm hover:bg-brand-400 hover:scale-105 active:scale-95'
                   : 'bg-zinc-100 text-zinc-300 dark:bg-white/[0.06] dark:text-zinc-600')}>
               <ArrowUp size={16} strokeWidth={2.4} />
             </button>
@@ -180,9 +180,6 @@ export function Composer({
         </div>
       </div>
 
-      <p className={cls('mt-2 text-center text-2xs dimmer transition-opacity', centred ? 'opacity-100' : 'opacity-0')}>
-        Entrée pour envoyer · Maj+Entrée pour une nouvelle ligne
-      </p>
     </div>
   );
 }

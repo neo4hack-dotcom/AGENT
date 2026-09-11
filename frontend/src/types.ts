@@ -85,6 +85,8 @@ export interface ModelState {
   provider: string;
   label: string;
   model: string;
+  /** False when the tag is Ollama-hosted (`:cloud`) rather than running on this machine. */
+  local: boolean;
   base_url?: string;
   error: string | null;
   capabilities: ModelCapabilities;

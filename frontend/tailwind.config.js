@@ -5,15 +5,23 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['-apple-system', 'BlinkMacSystemFont', 'Inter', 'Segoe UI', 'Roboto', 'sans-serif'],
+        // Inter for everything that is read, Space Grotesk for everything that is a mark:
+        // the wordmark, section labels, the few places the interface should feel built
+        // rather than written.
+        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+        display: ['Space Grotesk', 'Inter', '-apple-system', 'sans-serif'],
         mono: ['ui-monospace', 'SF Mono', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       colors: {
         // One accent, used only for what is interactive or alive. Everything else is zinc.
+        // Anchored on #00d4aa. Note what the scale is *for*: 400-500 are surfaces that
+        // carry dark text, 700-800 are the only shades dark enough to BE text on white.
+        // A mint this luminous never carries white text — 2.6:1 — and pretending
+        // otherwise is how an accent colour quietly becomes an accessibility bug.
         brand: {
-          50: '#f2f1ff', 100: '#e8e5ff', 200: '#d3ccff', 300: '#b5a9ff',
-          400: '#9180ff', 500: '#6d5efc', 600: '#5b45f0', 700: '#4c36d1',
-          800: '#3f2fa8', 900: '#362b85', 950: '#20174f',
+          50: '#e6fff8', 100: '#c0fced', 200: '#84f7da', 300: '#46edc6',
+          400: '#14dcb1', 500: '#00d4aa', 600: '#00b491', 700: '#008f74',
+          800: '#00715d', 900: '#005c4c', 950: '#00352c',
         },
       },
       fontSize: {

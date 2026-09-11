@@ -1,6 +1,6 @@
 """The model layer: a local Ollama server, and nothing else.
 
-That is a design constraint, not a limitation waiting to be lifted — Lumen is meant to
+That is a design constraint, not a limitation waiting to be lifted — Agent is meant to
 run entirely on the machine it is installed on, so there is no code path here that can
 send a prompt anywhere else.
 
@@ -16,6 +16,7 @@ Two things this provider does that a thin HTTP wrapper would not:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -51,7 +52,7 @@ class LLMResult:
 
 
 class LLMProvider:
-    """Interface. Every call in Lumen goes through `chat`."""
+    """Interface. Every call in Agent goes through `chat`."""
 
     name = "base"
     label = "Base"
@@ -73,7 +74,7 @@ class LLMProvider:
 class UnconfiguredProvider(LLMProvider):
     """No model picked yet.
 
-    Lumen starts, every screen loads, the MCP library works — and this raises the moment
+    Agent starts, every screen loads, the MCP library works — and this raises the moment
     something genuinely needs to reason, naming the fix instead of fabricating an answer.
     """
 
@@ -82,8 +83,8 @@ class UnconfiguredProvider(LLMProvider):
 
     def __init__(self, reason: str = "") -> None:
         self.reason = reason or (
-            "Aucun modèle local n’est sélectionné. Ouvrez Administration → Modèle et "
-            "choisissez-en un parmi ceux que votre serveur Ollama a téléchargés."
+            "No model selected yet. Open Admin → Model and pick one of the models your "
+            "Ollama server offers."
         )
 
     async def chat(self, *args: Any, **kwargs: Any) -> LLMResult:
@@ -91,7 +92,7 @@ class UnconfiguredProvider(LLMProvider):
 
     async def healthcheck(self) -> dict:
         return {"ok": False, "provider": self.name, "label": self.label, "model": "",
-                "error": self.reason}
+                "local": True, "error": self.reason}
 
     async def capabilities(self) -> dict:
         return {"tools": False, "thinking": False, "vision": False, "context_length": 0,
@@ -101,12 +102,24 @@ class UnconfiguredProvider(LLMProvider):
         return {"ok": False, "models": [], "error": self.reason}
 
 
+def runs_remotely(model: str) -> bool:
+    """Whether a model tag is hosted by Ollama rather than by this machine.
+
+    The tag is the only honest signal: a cloud model stores nothing locally and reports a
+    placeholder size, so nothing else about it distinguishes it from one that does. This
+    decides what the interface claims about where a conversation goes, which is not a
+    claim worth guessing at.
+    """
+    name = (model or "").lower()
+    return name.endswith("-cloud") or name.endswith(":cloud")
+
+
 def _explain(exc: Exception, base_url: str) -> str:
     if isinstance(exc, httpx.ConnectError):
-        return (f"Ollama est injoignable sur {base_url}. Démarrez-le avec « ollama serve », "
-                f"ou pointez LUMEN_OLLAMA_BASE_URL ailleurs.")
+        return (f"Cannot reach Ollama at {base_url}. Start it with `ollama serve`, or point "
+                f"AGENT_OLLAMA_BASE_URL somewhere else.")
     if isinstance(exc, httpx.TimeoutException):
-        return f"Ollama sur {base_url} n’a pas répondu à temps."
+        return f"Ollama at {base_url} did not answer in time."
     return f"{type(exc).__name__}: {exc}"
 
 
@@ -163,8 +176,13 @@ def recover_tool_calls(text: str, known: set[str]) -> tuple[list[ToolCall], str]
     return calls, leftover.strip()
 
 
+class _Retryable(Exception):
+    """A server-side failure that a second attempt may well survive."""
+
+
 class OllamaProvider(LLMProvider):
-    """A local model served by Ollama. Nothing leaves the machine."""
+    """A model served through Ollama — running on this machine, or hosted by Ollama when
+    the tag says so. :func:`runs_remotely` is what the rest of the app asks to know which."""
 
     name = "ollama"
     label = "Ollama (local)"
@@ -174,11 +192,14 @@ class OllamaProvider(LLMProvider):
     # on its own, so the model gets cut off mid-thought and returns nothing at all, over and
     # over, until the loop's budget is gone. Sizing the window from what the model actually
     # declares is not a tuning preference; it is the difference between working and not.
-    # Capped, not maximised. The KV cache for a large window is what pushes a model off
-    # the GPU and onto the CPU — on a 9 GB machine this model runs fully on the GPU at
-    # 16k and drops to 38% CPU at 32k, which is several times slower for a window nothing
-    # here needs. Raise it in Admin when the machine has the memory for it.
+    # Capped, not maximised — but only where the cap buys something. On a model running
+    # here, the KV cache for a large window is what pushes it off the GPU and onto the
+    # CPU: measured on a 9 GB machine, 74% GPU at 16k against 62% at 32k, several times
+    # slower for a window nothing here needs. A model Ollama hosts has none of that
+    # constraint on this machine, so it gets a window sized for the work instead of for
+    # the hardware. Both are overridable in Admin.
     AUTO_CTX_CAP = 16384
+    AUTO_CTX_CAP_REMOTE = 65536
 
     def __init__(self, base_url: str, model: str, timeout_s: int = 900,
                  num_ctx: int = 0) -> None:
@@ -187,6 +208,7 @@ class OllamaProvider(LLMProvider):
         self.timeout_s = timeout_s
         self.num_ctx = num_ctx
         self._caps: dict | None = None
+        self._last_meta: tuple[int, int, str] = (0, 0, "")
 
     async def context_window(self) -> int:
         """The window to ask Ollama for: what was configured, else the model's own maximum
@@ -196,7 +218,8 @@ class OllamaProvider(LLMProvider):
         declared = (await self.capabilities()).get("context_length") or 0
         if not declared:
             return 8192  # nothing declared: still far better than the 4096 default
-        return min(declared, self.AUTO_CTX_CAP)
+        cap = self.AUTO_CTX_CAP_REMOTE if runs_remotely(self.model) else self.AUTO_CTX_CAP
+        return min(declared, cap)
 
     # --- capability discovery -------------------------------------------------
     async def capabilities(self) -> dict:
@@ -224,8 +247,8 @@ class OllamaProvider(LLMProvider):
             "audio": "audio" in declared,
             "context_length": ctx,
             "declared": declared,
-            "source": (f"{self.model} déclare : {', '.join(declared)}." if declared
-                       else f"{self.model} ne déclare pas ses capacités."),
+            "source": (f"{self.model} reports: {', '.join(declared)}." if declared
+                       else f"{self.model} does not report its capabilities."),
         }
         self._caps = caps
         return caps
@@ -281,42 +304,28 @@ class OllamaProvider(LLMProvider):
         tokens_in = tokens_out = 0
         stop_reason = ""
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_s, connect=15)) as client:
+        # One retry, and only on a server-side failure that happened *before* a single
+        # token reached the caller. A hosted endpoint returns the occasional 500, and
+        # losing a run to one is avoidable; resuming a half-streamed answer is not — the
+        # deltas are already on the user's screen, so a second attempt would duplicate
+        # them. That condition is the whole safety of this loop.
+        for attempt in range(2):
             try:
-                async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as resp:
-                    if resp.status_code >= 400:
-                        body = (await resp.aread()).decode(errors="replace")[:500]
-                        raise NotConfigured(
-                            f"Ollama a refusé la requête (HTTP {resp.status_code}) : {body}")
-                    async for line in resp.aiter_lines():
-                        if should_stop is not None and should_stop():
-                            stop_reason = "cancelled"
-                            break
-                        if not line.strip():
-                            continue
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        message = chunk.get("message") or {}
-                        piece = message.get("content")
-                        if piece:
-                            text_parts.append(piece)
-                            if on_text is not None:
-                                on_text(piece)
-                        reasoning = message.get("thinking")
-                        if reasoning:
-                            think_parts.append(reasoning)
-                            if on_thinking is not None:
-                                on_thinking(reasoning)
-                        for call in message.get("tool_calls") or []:
-                            raw_calls.append(call)
-                        if chunk.get("done"):
-                            tokens_in = chunk.get("prompt_eval_count") or 0
-                            tokens_out = chunk.get("eval_count") or 0
-                            stop_reason = chunk.get("done_reason") or ""
+                await self._stream_once(payload, text_parts, think_parts, raw_calls,
+                                        on_text, on_thinking, should_stop)
+            except _Retryable as exc:
+                streamed = bool(text_parts or think_parts or raw_calls)
+                if attempt == 0 and not streamed:
+                    await asyncio.sleep(1.5)
+                    continue
+                raise NotConfigured(str(exc)) from exc
             except httpx.HTTPError as exc:
+                if attempt == 0 and not (text_parts or think_parts or raw_calls):
+                    await asyncio.sleep(1.5)
+                    continue
                 raise NotConfigured(_explain(exc, self.base_url)) from exc
+            break
+        tokens_in, tokens_out, stop_reason = self._last_meta
 
         content = "".join(text_parts)
         calls: list[ToolCall] = []
@@ -350,6 +359,51 @@ class OllamaProvider(LLMProvider):
             stop_reason=stop_reason,
         )
 
+    async def _stream_once(self, payload: dict, text_parts: list[str], think_parts: list[str],
+                           raw_calls: list[dict], on_text: Delta | None,
+                           on_thinking: Delta | None,
+                           should_stop: Callable[[], bool] | None = None) -> None:
+        """One pass over the streamed response, appending into the caller's buffers."""
+        tokens_in = tokens_out = 0
+        stop_reason = ""
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_s, connect=15)) as client:
+            async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode(errors="replace")[:500]
+                    message = f"Ollama refused the request (HTTP {resp.status_code}): {body}"
+                    # A 4xx is our fault and will fail identically next time; a 5xx is
+                    # theirs and often will not.
+                    raise (_Retryable(message) if resp.status_code >= 500
+                           else NotConfigured(message))
+                async for line in resp.aiter_lines():
+                    if should_stop is not None and should_stop():
+                        stop_reason = "cancelled"
+                        break
+                    if not line.strip():
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    message_obj = chunk.get("message") or {}
+                    piece = message_obj.get("content")
+                    if piece:
+                        text_parts.append(piece)
+                        if on_text is not None:
+                            on_text(piece)
+                    reasoning = message_obj.get("thinking")
+                    if reasoning:
+                        think_parts.append(reasoning)
+                        if on_thinking is not None:
+                            on_thinking(reasoning)
+                    for call in message_obj.get("tool_calls") or []:
+                        raw_calls.append(call)
+                    if chunk.get("done"):
+                        tokens_in = chunk.get("prompt_eval_count") or 0
+                        tokens_out = chunk.get("eval_count") or 0
+                        stop_reason = chunk.get("done_reason") or ""
+        self._last_meta = (tokens_in, tokens_out, stop_reason)
+
     # --- diagnostics ----------------------------------------------------------
     async def healthcheck(self) -> dict:
         try:
@@ -358,13 +412,15 @@ class OllamaProvider(LLMProvider):
             names = [m.get("name", "") for m in (resp.json().get("models") or [])]
         except Exception as exc:
             return {"ok": False, "provider": self.name, "label": self.label,
-                    "model": self.model, "error": _explain(exc, self.base_url)}
+                    "model": self.model, "local": not runs_remotely(self.model),
+                    "error": _explain(exc, self.base_url)}
         present = any(n == self.model or n.startswith(f"{self.model}:") for n in names)
         return {
             "ok": present,
             "provider": self.name,
             "label": self.label,
             "model": self.model,
+            "local": not runs_remotely(self.model),
             "base_url": self.base_url,
             "error": None if present else
                      f"'{self.model}' is not pulled on this Ollama server — run: ollama pull {self.model}",
@@ -405,14 +461,14 @@ class OllamaProvider(LLMProvider):
             return {"ok": False, "models": [], "error": _explain(exc, self.base_url)}
         if resp.status_code >= 400:
             return {"ok": False, "models": [],
-                    "error": f"HTTP {resp.status_code} depuis {self.base_url}/api/tags — quelque "
-                             f"chose écoute à cette adresse, mais ce n’est pas un serveur Ollama."}
+                    "error": f"HTTP {resp.status_code} from {self.base_url}/api/tags — something "
+                             f"is listening there, but it is not an Ollama server."}
         try:
             entries = resp.json().get("models") or []
         except ValueError:
             return {"ok": False, "models": [],
-                    "error": f"{self.base_url}/api/tags n’a pas renvoyé de JSON — est-ce bien un "
-                             f"serveur Ollama ?"}
+                    "error": f"{self.base_url}/api/tags did not return JSON — is that an "
+                             f"Ollama server?"}
         models = []
         for entry in entries:
             name = str(entry.get("name") or "")

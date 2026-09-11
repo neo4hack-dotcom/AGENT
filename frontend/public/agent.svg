@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#46edc6"/>
+      <stop offset="100%" stop-color="#008f74"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#g)"/>
+  <!-- A flat-terminal "A", drawn rather than typeset, so the mark never depends on a font.
+       Ink on the accent, never white: this green is far too luminous to carry it. -->
+  <path d="M9 24 L15 8 h2 L23 24 h-3.4 l-1.35-3.8h-6.5L10.4 24Z M13.1 17.6h5.8L16 9.4Z"
+        fill="#06231d" fill-rule="evenodd"/>
+</svg>

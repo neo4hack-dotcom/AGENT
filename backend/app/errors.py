@@ -4,25 +4,25 @@ them ends up rendered verbatim in the UI."""
 from __future__ import annotations
 
 
-class LumenError(Exception):
-    """Base for everything Lumen raises on purpose."""
+class AgentError(Exception):
+    """Base for everything Agent raises on purpose."""
 
 
-class NotConfigured(LumenError):
+class NotConfigured(AgentError):
     """Something real was asked of a dependency that has not been connected yet."""
 
 
-class McpError(LumenError):
+class McpError(AgentError):
     """An MCP server could not be reached, started, or answered with an error."""
 
 
-class ToolError(LumenError):
+class ToolError(AgentError):
     """A tool ran and failed. The message is shown to both the model and the user."""
 
 
-class RunCancelled(LumenError):
+class RunCancelled(AgentError):
     """The user stopped the run."""
 
 
-class GuardrailTripped(LumenError):
+class GuardrailTripped(AgentError):
     """A budget ceiling (steps, wall clock, stagnation) stopped the run."""

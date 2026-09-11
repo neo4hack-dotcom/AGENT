@@ -83,8 +83,8 @@ def check_admin(container, request: Request) -> None:
             return
         raise HTTPException(
             403,
-            "Admin is restricted to the machine Lumen runs on. To administer it from "
-            "elsewhere, set LUMEN_ADMIN_PASSWORD and restart.")
+            "Admin is restricted to the machine this runs on. To administer it from "
+            "elsewhere, set AGENT_ADMIN_PASSWORD and restart.")
     header = request.headers.get("authorization") or ""
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if not token or not _valid_token(container, token):

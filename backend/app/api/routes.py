@@ -83,8 +83,8 @@ async def get_conversation(conv_id: str) -> dict:
         for message in messages:
             if message.get("role") == "assistant" and message.get("status") == "running":
                 message["status"] = "failed"
-                message["error"] = ("Cette réponse a été interrompue par l’arrêt de Lumen. "
-                                    "Relancez la demande.")
+                message["error"] = ("This answer was cut short when the server stopped. "
+                                    "Ask again.")
                 c.store.touch()
     return {**conv, "active_run_id": active}
 

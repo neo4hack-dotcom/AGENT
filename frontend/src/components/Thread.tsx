@@ -40,8 +40,13 @@ function argSummary(args: Record<string, unknown> | undefined): string {
 
 /* ------------------------------------------------------------------- plan */
 
-export function PlanCard({ steps }: { steps: PlanStep[] }) {
+export function PlanCard({ steps, live }: { steps: PlanStep[]; live?: boolean }) {
   const done = steps.filter((s) => s.status === 'done').length;
+  // A finished run whose plan is still all-pending did the work without reporting it. The
+  // counter is the literal truth and stays as it is — checking boxes the agent never
+  // checked would be fabricating progress, which is the one thing this app does not do —
+  // but "0/3" alone reads as "nothing happened", so the card says which it is.
+  const unreported = !live && done < steps.length;
   return (
     <div className="my-3 overflow-hidden rounded-xl border hairline bg-zinc-50/60 dark:bg-white/[0.03] animate-fade-up">
       <div className="flex items-center gap-2 border-b px-3.5 py-2 hairline">
@@ -69,6 +74,12 @@ export function PlanCard({ steps }: { steps: PlanStep[] }) {
           </li>
         ))}
       </ol>
+      {unreported && (
+        <p className="border-t px-3.5 py-2 text-2xs leading-relaxed hairline dimmer">
+          The agent stopped updating this plan partway. What it actually did is the tool
+          calls below, not this list.
+        </p>
+      )}
     </div>
   );
 }
@@ -86,7 +97,7 @@ function ThinkingBlock({ block, live }: { block: Block; live: boolean }) {
         className="focus-ring group flex w-full items-center gap-2 rounded-lg py-1 text-left">
         <Brain size={13} className={cls('shrink-0', live ? 'text-brand-500 animate-breathe' : 'dimmer')} />
         <span className="text-2xs font-medium uppercase tracking-wider dim">
-          {live ? 'Réflexion' : 'Raisonnement'}
+          {live ? 'Thinking' : 'Reasoning'}
         </span>
         {!open && (
           <span className="min-w-0 flex-1 truncate text-2xs italic dimmer">{tail}</span>
@@ -120,15 +131,15 @@ function ToolBlock({ block }: { block: Block }) {
         <span className={cls('grid h-5 w-5 shrink-0 place-items-center rounded-md',
           failed ? 'bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400'
                  : denied ? 'bg-zinc-100 text-zinc-500 dark:bg-white/[0.07]'
-                 : 'bg-brand-50 text-brand-600 dark:bg-brand-500/12 dark:text-brand-300')}>
+                 : 'bg-brand-100 text-brand-800 dark:bg-brand-500/12 dark:text-brand-300')}>
           {running ? <Spinner size={11} /> : denied ? <Ban size={11} />
             : failed ? <X size={11} strokeWidth={3} /> : <Icon size={11} />}
         </span>
         <span className="shrink-0 font-mono text-2xs font-medium text-zinc-700 dark:text-zinc-200">
           {block.name}
         </span>
-        {block.by === 'critic' && <Badge tone="brand">critique</Badge>}
-        {block.cached && <Badge>déjà obtenu</Badge>}
+        {block.by === 'critic' && <Badge tone="brand">critic</Badge>}
+        {block.cached && <Badge>already fetched</Badge>}
         <span className="min-w-0 flex-1 truncate text-2xs dimmer">
           {running ? argSummary(block.args) : (block.summary || argSummary(block.args))}
         </span>
@@ -139,7 +150,7 @@ function ToolBlock({ block }: { block: Block }) {
         <div className="mt-1 space-y-2 rounded-lg border px-3 py-2.5 hairline bg-zinc-50/60 dark:bg-black/20 animate-fade-in">
           <div>
             <div className="mb-1 text-2xs font-semibold uppercase tracking-wider dimmer">
-              Appel{block.server ? ` · ${block.server}` : ''}
+              Call{block.server ? ` · ${block.server}` : ''}
             </div>
             <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed dim">
               {JSON.stringify(block.args ?? {}, null, 2)}
@@ -148,7 +159,7 @@ function ToolBlock({ block }: { block: Block }) {
           {(block.text || block.summary) && (
             <div>
               <div className="mb-1 text-2xs font-semibold uppercase tracking-wider dimmer">
-                {failed ? 'Erreur' : 'Résultat'}
+                {failed ? 'Error' : 'Result'}
               </div>
               <pre className={cls('max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed',
                 failed ? 'text-red-600 dark:text-red-400' : 'dim')}>
@@ -181,7 +192,7 @@ export function ApprovalCard({
         <ShieldQuestion size={15} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">
-            Autoriser <span className="font-mono">{request.name}</span>
+            Allow <span className="font-mono">{request.name}</span>
             {request.server && <span className="font-normal opacity-70"> · {request.server}</span>} ?
           </p>
           <p className="mt-0.5 text-2xs leading-relaxed text-amber-800/80 dark:text-amber-200/70">{request.reason}</p>
@@ -189,8 +200,8 @@ export function ApprovalCard({
             {JSON.stringify(request.args ?? {}, null, 2)}
           </pre>
           <div className="mt-2.5 flex gap-2">
-            <Button size="xs" busy={busy} onClick={() => onResolve(true)} icon={Check}>Autoriser</Button>
-            <Button size="xs" variant="outline" disabled={busy} onClick={() => onResolve(false)} icon={X}>Refuser</Button>
+            <Button size="xs" busy={busy} onClick={() => onResolve(true)} icon={Check}>Allow</Button>
+            <Button size="xs" variant="outline" disabled={busy} onClick={() => onResolve(false)} icon={X}>Deny</Button>
           </div>
         </div>
       </div>
@@ -221,11 +232,11 @@ function Blocks({ blocks, live }: { blocks: Block[]; live: boolean }) {
 }
 
 const PHASES: Record<string, string> = {
-  starting: 'Démarrage',
-  thinking: 'Réflexion',
-  checking: 'Vérification',
-  writing: 'Rédaction',
-  cancelled: 'Arrêté',
+  starting: 'Starting',
+  thinking: 'Thinking',
+  checking: 'Checking',
+  writing: 'Writing',
+  cancelled: 'Stopped',
   done: '',
 };
 
@@ -244,13 +255,13 @@ export function AssistantTurn({
   const blocks = message.blocks ?? [];
   return (
     <div className="animate-fade-up">
-      {(message.plan?.length ?? 0) > 0 && <PlanCard steps={message.plan!} />}
+      {(message.plan?.length ?? 0) > 0 && <PlanCard steps={message.plan!} live={live} />}
       <Blocks blocks={blocks} live={!!live} />
 
       {live && !blocks.length && (
         <div className="flex items-center gap-2 py-2 text-xs dim">
           <Spinner size={13} className="text-brand-500" />
-          <span className="animate-pulse">{PHASES[phase ?? 'starting'] ?? 'Travail en cours'}…</span>
+          <span className="animate-pulse">{PHASES[phase ?? 'starting'] ?? 'Working'}…</span>
         </div>
       )}
 
@@ -291,12 +302,12 @@ function TurnFooter({ message }: { message: Message }) {
       interrupted ? 'opacity-100' : 'opacity-0 group-hover/turn:opacity-100 focus-within:opacity-100')}>
       {message.status === 'cancelled' && (
         <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-          <Ban size={11} /> Réponse interrompue
+          <Ban size={11} /> Answer interrupted
         </span>
       )}
       {answer.trim() && <CopyAnswer text={answer} />}
       {message.model && <span className="font-mono">{message.model}</span>}
-      {!!usage.tool_calls && <span>{usage.tool_calls} outil{usage.tool_calls > 1 ? 's' : ''}</span>}
+      {!!usage.tool_calls && <span>{usage.tool_calls} tool{usage.tool_calls > 1 ? 's' : ''}</span>}
       {!!usage.tokens_out && <span>{usage.tokens_in}→{usage.tokens_out} tok</span>}
     </div>
   );
@@ -314,7 +325,7 @@ function CopyAnswer({ text }: { text: string }) {
         }).catch(() => { /* clipboard denied */ });
       }}
     >
-      {copied ? 'Copié' : 'Copier la réponse'}
+      {copied ? 'Copied' : 'Copy answer'}
     </button>
   );
 }

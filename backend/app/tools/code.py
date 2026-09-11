@@ -11,7 +11,7 @@ An agent that can compute is a different class of tool from one that can only ta
   bounded and inspectable rather than wherever the API happens to have been started.
 
 This is a guard against runaway and accident, not a security sandbox: code that runs here
-runs with the same rights as the Lumen process. That is stated plainly in the admin UI,
+runs with the same rights as the Agent process. That is stated plainly in the admin UI,
 and the whole tool can be switched off there.
 """
 
