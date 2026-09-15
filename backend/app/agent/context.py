@@ -35,7 +35,20 @@ CHARS_PER_TOKEN = 3.4
 
 
 def estimate_tokens(messages: list[dict]) -> int:
-    return int(sum(len(str(m.get("content") or "")) + 40 for m in messages) / CHARS_PER_TOKEN)
+    """Roughly how much of the window a message list occupies.
+
+    Counts the whole message, not just its text: an assistant turn that calls three tools
+    carries its arguments in `tool_calls` and nothing in `content`, so counting content
+    alone reports a fraction of what is really sent — and then reports a cache hit rate
+    that cannot be true.
+    """
+    total = 0
+    for message in messages:
+        total += len(str(message.get("content") or "")) + 40
+        calls = message.get("tool_calls")
+        if calls:
+            total += len(json.dumps(calls, default=str))
+    return int(total / CHARS_PER_TOKEN)
 
 
 # ------------------------------------------------------------ progressive disclosure
@@ -222,6 +235,63 @@ def render_for_compaction(messages: list[dict]) -> str:
             content = f"{content}\n[called: {names}]".strip()
         parts.append(f"### {role}\n{content[:6000]}")
     return "\n\n".join(parts)
+
+
+def compress_schema(function: dict, aggressive: bool) -> dict:
+    """Trim a tool definition down to what actually drives selection.
+
+    Measured work on long-horizon tool-using agents puts schema overhead among the cheapest
+    tokens to recover: the model picks a tool from its name and first sentence, and reads
+    the parameter prose almost never. Under pressure the prose goes and the shapes stay —
+    a parameter without a description is still a parameter the model can fill, while a
+    parameter that was dropped is one it cannot.
+    """
+    if not aggressive:
+        return function
+    fn = dict(function.get("function") or {})
+    description = fn.get("description") or ""
+    # First sentence, or the first line — whichever comes first.
+    cut = min([i for i in (description.find(". "), description.find("\n")) if i > 0]
+              or [len(description)])
+    fn["description"] = description[:cut + 1].strip()[:220]
+    params = dict(fn.get("parameters") or {})
+    properties = {}
+    for name, spec in (params.get("properties") or {}).items():
+        trimmed = {k: v for k, v in (spec or {}).items() if k in ("type", "enum", "items")}
+        properties[name] = trimmed or {"type": "string"}
+    params["properties"] = properties
+    fn["parameters"] = params
+    return {**function, "function": fn}
+
+
+def mask_observations(messages: list[dict], keep_full: int = 4) -> tuple[list[dict], int]:
+    """Replace older tool results with their first line, keeping the recent ones whole.
+
+    An observation matters most in the turn that follows it. Ten turns later it is usually
+    a number already extracted and a page already summarised, still costing its full weight
+    in every request. Masking keeps the shape of what happened — which tool, what it said
+    in one line — and returns the rest of the budget to the work.
+    """
+    tool_positions = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    if len(tool_positions) <= keep_full:
+        return messages, 0
+    stale = set(tool_positions[:-keep_full])
+    saved = 0
+    out: list[dict] = []
+    for index, message in enumerate(messages):
+        if index not in stale:
+            out.append(message)
+            continue
+        body = str(message.get("content") or "")
+        if len(body) <= 400:
+            out.append(message)
+            continue
+        head = body.strip().splitlines()[0][:300]
+        saved += len(body) - len(head)
+        out.append({**message,
+                    "content": f"{head}\n[…earlier result, {len(body)} characters, "
+                               f"already used above…]"})
+    return out, saved
 
 
 def pack_result(text: str, limit: int) -> str:

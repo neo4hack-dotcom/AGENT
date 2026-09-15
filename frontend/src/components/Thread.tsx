@@ -7,10 +7,10 @@
 
 import {
   AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileText, FolderOpen, Globe,
-  Layers, ListChecks, Plug, Save, Search, ShieldAlert, ShieldQuestion, Sparkles, Terminal,
-  X, type LucideIcon,
+  Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
+  Sparkles, Terminal, X, type LucideIcon,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Block, Message, PlanStep, Usage } from '../types';
 import { Markdown } from './Markdown';
 import { Badge, Button, Spinner, cls } from './ui';
@@ -117,6 +117,81 @@ function ThinkingBlock({ block, live }: { block: Block; live: boolean }) {
 
 /* ------------------------------------------------------------------ tools */
 
+/**
+ * A query returned rows; show them as rows.
+ *
+ * Tool results arrive as JSON text, and a fifty-row SELECT rendered as raw JSON is
+ * unreadable at exactly the moment the reader most wants to check the agent's arithmetic.
+ * Strictly opt-in: anything that is not a clean rectangle of scalars falls back to the
+ * JSON, because a half-parsed table is worse than none.
+ */
+function asTable(raw: string): { columns: string[]; rows: unknown[][] } | null {
+  if (raw.length > 400_000) return null;
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return null; }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const key of ['rows', 'records', 'data', 'results']) {
+      const inner = (value as Record<string, unknown>)[key];
+      if (Array.isArray(inner)) { value = inner; break; }
+    }
+  }
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) return null;
+  const scalar = (v: unknown) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+  if (!value.every((row) => row && typeof row === 'object' && !Array.isArray(row)
+                   && Object.values(row as object).every(scalar))) return null;
+  const columns: string[] = [];
+  for (const row of value as Record<string, unknown>[]) {
+    for (const key of Object.keys(row)) if (!columns.includes(key)) columns.push(key);
+  }
+  if (columns.length === 0 || columns.length > 24) return null;
+  return { columns, rows: (value as Record<string, unknown>[]).map((r) => columns.map((c) => r[c])) };
+}
+
+function ResultTable({ table }: { table: { columns: string[]; rows: unknown[][] } }) {
+  const [all, setAll] = useState(false);
+  const rows = all ? table.rows : table.rows.slice(0, 50);
+  return (
+    <div>
+      <div className="max-h-80 overflow-auto rounded-lg border hairline">
+        <table className="w-full border-collapse text-[11px]">
+          <thead className="sticky top-0 bg-zinc-100/95 backdrop-blur dark:bg-zinc-900/95">
+            <tr>
+              {table.columns.map((column) => (
+                <th key={column}
+                  className="whitespace-nowrap border-b px-2.5 py-1.5 text-left font-mono font-semibold hairline dim">
+                  {column}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} className="even:bg-zinc-50/60 dark:even:bg-white/[0.02]">
+                {row.map((cell, j) => (
+                  <td key={j} className={cls('max-w-[22rem] truncate px-2.5 py-1 font-mono dim',
+                    typeof cell === 'number' && 'text-right tabular-nums')}
+                    title={cell === null ? '' : String(cell)}>
+                    {cell === null ? <span className="dimmer">null</span> : String(cell)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-1 flex items-center gap-2 text-2xs dimmer">
+        <span>{table.rows.length} row{table.rows.length > 1 ? 's' : ''} × {table.columns.length} columns</span>
+        {table.rows.length > 50 && (
+          <button onClick={() => setAll((v) => !v)}
+            className="focus-ring rounded px-1 hover:text-zinc-700 dark:hover:text-zinc-200">
+            {all ? 'Show first 50' : `Show all ${table.rows.length}`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
   const [open, setOpen] = useState(false);
   const Icon = toolIcon(block);
@@ -125,6 +200,9 @@ function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
   const denied = block.status === 'denied' || block.status === 'expired';
   const blocked = block.status === 'blocked';
   const flagged = (block.injection?.length ?? 0) > 0;
+  const table = useMemo(
+    () => (open && !failed ? asTable((block.text || '').trim()) : null),
+    [open, failed, block.text]);
 
   return (
     <div className="my-1.5" id={cite && block.ref ? `${cite}${block.ref.slice(1)}` : undefined}>
@@ -192,10 +270,12 @@ function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
               <div className="mb-1 text-2xs font-semibold uppercase tracking-wider dimmer">
                 {failed ? 'Error' : 'Result'}
               </div>
-              <pre className={cls('max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed',
-                failed ? 'text-red-600 dark:text-red-400' : 'dim')}>
-                {(block.text || block.summary || '').slice(0, 6000)}
-              </pre>
+              {table ? <ResultTable table={table} /> : (
+                <pre className={cls('max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed',
+                  failed ? 'text-red-600 dark:text-red-400' : 'dim')}>
+                  {(block.text || block.summary || '').slice(0, 6000)}
+                </pre>
+              )}
             </div>
           )}
         </div>
@@ -385,6 +465,11 @@ function TurnFooter({ message }: { message: Message }) {
     .filter((b) => b.type === 'text' && !b.superseded)
     .map((b) => b.text ?? '').join('\n\n') || message.content;
   const interrupted = message.status === 'cancelled' || message.status === 'failed';
+  // Cached prefixes are the difference between a 2-second and a 30-second turn, and the
+  // provider reports them nowhere else: what we sent, minus what it re-read.
+  const reuse = usage.prompt_sent && usage.prompt_evaluated && usage.prompt_sent > 400
+    ? Math.max(0, Math.round((1 - usage.prompt_evaluated / usage.prompt_sent) * 100))
+    : null;
   if (!answer.trim() && !interrupted) return null;
   return (
     <div className={cls('mt-2.5 flex items-center gap-3 text-2xs dimmer transition-opacity duration-200',
@@ -400,7 +485,45 @@ function TurnFooter({ message }: { message: Message }) {
       {message.model && <span className="font-mono">{message.model}</span>}
       {!!usage.tool_calls && <span>{usage.tool_calls} tool{usage.tool_calls > 1 ? 's' : ''}</span>}
       {!!usage.tokens_out && <span>{usage.tokens_in}→{usage.tokens_out} tok</span>}
+      {!!usage.ttft_ms && <span title="Time to the first token">{(usage.ttft_ms / 1000).toFixed(1)}s to first word</span>}
+      {reuse !== null && (
+        <span title={`${usage.prompt_evaluated} of ${usage.prompt_sent} prompt tokens were re-read; the rest came from the provider's cache.`}>
+          {reuse}% prompt reused
+        </span>
+      )}
+      {!!usage.masked_chars && (
+        <span title="Old tool results collapsed to their summaries to keep the window open.">
+          {Math.round(usage.masked_chars / 1000)}k chars masked
+        </span>
+      )}
+      <ContextMeter usage={usage} />
     </div>
+  );
+}
+
+/**
+ * How full the window was when this answer was written.
+ *
+ * Compaction is the moment an agent silently forgets things, and it arrives without
+ * warning unless someone is watching this number. Shown only past half-full: below that
+ * it is noise.
+ */
+function ContextMeter({ usage }: { usage: Usage }) {
+  const limit = usage.context_limit ?? 0;
+  const used = usage.context_tokens ?? 0;
+  if (!limit || !used) return null;
+  const share = Math.min(1, used / limit);
+  if (share < 0.5) return null;
+  return (
+    <span className="flex items-center gap-1.5"
+      title={`${used.toLocaleString()} of ${limit.toLocaleString()} tokens. Past ~90% the oldest turns are summarised away.`}>
+      <span className="h-1 w-8 overflow-hidden rounded-full bg-zinc-200 dark:bg-white/10">
+        <span className={cls('block h-full rounded-full transition-[width] duration-500',
+          share > 0.9 ? 'bg-red-500' : share > 0.75 ? 'bg-amber-500' : 'bg-brand-500')}
+          style={{ width: `${Math.round(share * 100)}%` }} />
+      </span>
+      {Math.round(share * 100)}% context
+    </span>
   );
 }
 
@@ -421,12 +544,80 @@ function CopyAnswer({ text }: { text: string }) {
   );
 }
 
-export function UserTurn({ message }: { message: Message }) {
+export function UserTurn({ message, onRetry, busy }: {
+  message: Message;
+  /** Ask again, optionally reworded. Everything after this question is discarded. */
+  onRetry?: (text: string) => void;
+  busy?: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
+  const area = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    setDraft(message.content);
+    const handle = requestAnimationFrame(() => {
+      const el = area.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+      el.style.height = `${el.scrollHeight}px`;
+    });
+    return () => cancelAnimationFrame(handle);
+  }, [editing, message.content]);
+
+  if (editing) {
+    const submit = () => {
+      const text = draft.trim();
+      if (!text) return;
+      setEditing(false);
+      onRetry?.(text);
+    };
+    return (
+      <div className="animate-fade-up rounded-xl border px-3 py-2.5 hairline bg-zinc-50/60 dark:bg-white/[0.03]">
+        <textarea ref={area} value={draft}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            e.target.style.height = 'auto';
+            e.target.style.height = `${e.target.scrollHeight}px`;
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setEditing(false);
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+          }}
+          className="w-full resize-none bg-transparent text-[17px] font-medium leading-snug tracking-[-0.011em] outline-none text-zinc-900 dark:text-white" />
+        <div className="mt-2 flex items-center justify-end gap-2">
+          <button onClick={() => setEditing(false)}
+            className="focus-ring rounded px-2 py-1 text-2xs dim hover:text-zinc-700 dark:hover:text-zinc-200">
+            Cancel
+          </button>
+          <Button size="sm" onClick={submit} disabled={!draft.trim()}>Ask again</Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="animate-fade-up">
+    <div className="group/ask animate-fade-up">
       <p className="whitespace-pre-wrap text-[17px] font-medium leading-snug tracking-[-0.011em] text-zinc-900 dark:text-white">
         {message.content}
       </p>
+      {onRetry && (
+        <div className="mt-1 flex items-center gap-2 text-2xs dimmer opacity-0 transition-opacity duration-200 group-hover/ask:opacity-100 focus-within:opacity-100">
+          {/* Rewording the question and trying again is the commonest thing anyone wants
+              from a transcript — and starting a new conversation to do it throws away the
+              context that made the question make sense. */}
+          <button disabled={busy} onClick={() => setEditing(true)}
+            className="focus-ring flex items-center gap-1 rounded px-1 py-0.5 hover:text-zinc-700 disabled:opacity-50 dark:hover:text-zinc-200">
+            <Pencil size={10} /> Edit
+          </button>
+          <button disabled={busy} onClick={() => onRetry(message.content)}
+            className="focus-ring flex items-center gap-1 rounded px-1 py-0.5 hover:text-zinc-700 disabled:opacity-50 dark:hover:text-zinc-200">
+            <RotateCcw size={10} /> Retry
+          </button>
+        </div>
+      )}
       {(message.images?.length ?? 0) > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {message.images!.map((img, i) => (

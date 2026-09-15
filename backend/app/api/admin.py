@@ -238,7 +238,93 @@ async def audit(limit: int = 200, run_id: str = "") -> dict:
             "verified": c.audit.verify(), "path": str(c.env.audit_path)}
 
 
+# ------------------------------------------------------------ identity & skills
+class SoulBody(BaseModel):
+    text: str = Field(default="", max_length=4000)
+
+
+@guarded.get("/soul")
+async def get_soul() -> dict:
+    return {"text": c.skills.soul()}
+
+
+@guarded.post("/soul")
+async def set_soul(body: SoulBody) -> dict:
+    """The agent's standing instructions, first in every system prompt.
+
+    Yours, not the agent's: nothing it reads can edit this, which is what makes it the one
+    place a preference can be stated once instead of retyped every conversation.
+    """
+    text = c.skills.set_soul(body.text)
+    await c.store.save()
+    return {"text": text}
+
+
+class SkillBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    trigger: str = Field(default="", max_length=400)
+    body: str = Field(min_length=1, max_length=4000)
+
+
+@guarded.get("/skills")
+async def list_skills() -> dict:
+    return {"skills": c.skills.all(), "stats": c.skills.stats()}
+
+
+@guarded.post("/skills")
+async def add_skill(body: SkillBody) -> dict:
+    return c.skills.add(body.name, body.trigger, body.body, source="user")
+
+
+@guarded.delete("/skills/{skill_id}")
+async def delete_skill(skill_id: str) -> dict:
+    if not c.skills.forget(skill_id):
+        raise HTTPException(404, "No such skill.")
+    return {"ok": True}
+
+
 # --------------------------------------------------------------- diagnostics
+def run_metrics(sample: int = 60) -> dict:
+    """What the last runs actually cost, read back from what was saved.
+
+    Kept as a derivation rather than a counter: a counter drifts from the conversations it
+    claims to describe, and the numbers are only worth reading if they cannot.
+    """
+    turns: list[dict] = []
+    for conv in c.store.conversations().values():
+        for message in conv.get("messages") or []:
+            if message.get("role") == "assistant" and (message.get("usage") or {}).get("llm_calls"):
+                turns.append({**message["usage"], "at": message.get("created_at", 0),
+                              "status": message.get("status")})
+    turns.sort(key=lambda t: t["at"], reverse=True)
+    recent = turns[:sample]
+    if not recent:
+        return {"runs": 0}
+
+    def total(field: str) -> int:
+        return sum(int(t.get(field) or 0) for t in recent)
+
+    ttfts = sorted(t["ttft_ms"] for t in recent if t.get("ttft_ms"))
+    sent, evaluated = total("prompt_sent"), total("prompt_evaluated")
+    windows = [t["context_tokens"] for t in recent if t.get("context_tokens")]
+    return {
+        "runs": len(recent),
+        "tokens_in": total("tokens_in"),
+        "tokens_out": total("tokens_out"),
+        "llm_calls": total("llm_calls"),
+        "tool_calls": total("tool_calls"),
+        "calls_per_run": round(total("llm_calls") / len(recent), 1),
+        # The fraction of the prompt the provider did not have to re-read. The single most
+        # useful number for telling a context problem from a model problem.
+        "cache_hit": round(100 * (1 - evaluated / sent)) if sent > evaluated > 0 else 0,
+        "ttft_median_ms": ttfts[len(ttfts) // 2] if ttfts else 0,
+        "ttft_p90_ms": ttfts[int(len(ttfts) * 0.9)] if ttfts else 0,
+        "masked_chars": total("masked_chars"),
+        "peak_context": max(windows) if windows else 0,
+        "failed": sum(1 for t in recent if t.get("status") in ("failed", "cancelled")),
+    }
+
+
 @guarded.get("/diagnostics")
 async def diagnostics() -> dict:
     llm = await c.llm.healthcheck()
@@ -265,6 +351,7 @@ async def diagnostics() -> dict:
                         f"Install it with: {runtime['install']}")
     return {
         "model": {**llm, "capabilities": caps},
+        "runs": run_metrics(),
         "mcp": c.mcp.summary(),
         "runtimes": runtimes.probe(),
         "runtime": runtime,

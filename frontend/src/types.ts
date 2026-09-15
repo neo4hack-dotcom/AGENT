@@ -43,6 +43,48 @@ export interface Usage {
   tokens_in?: number;
   tokens_out?: number;
   tool_calls?: number;
+  /** What we sent versus what the provider actually re-read: the cache-hit signal. */
+  prompt_sent?: number;
+  prompt_evaluated?: number;
+  /** Time to the first token of the first turn — what the wait actually feels like. */
+  ttft_ms?: number;
+  /** Characters recovered by masking old tool results. */
+  masked_chars?: number;
+  /** How full the window was on the last turn, not a running total. */
+  context_tokens?: number;
+  context_limit?: number;
+}
+
+export interface Artifact {
+  path: string;
+  name: string;
+  bytes: number;
+  modified: number;
+  kind: string;
+}
+
+export interface SearchHit {
+  conversation_id: string;
+  title: string;
+  role: string;
+  updated_at: number;
+  excerpt: string;
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  trigger: string;
+  body: string;
+  source: string;
+  uses: number;
+  created_at: number;
+}
+
+export interface SkillStats {
+  total: number;
+  learned: number;
+  ready: number;
 }
 
 export interface Message {
@@ -254,8 +296,24 @@ export interface ModelRuntime {
   context?: number;
 }
 
+export interface RunMetrics {
+  runs: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  llm_calls?: number;
+  tool_calls?: number;
+  calls_per_run?: number;
+  cache_hit?: number;
+  ttft_median_ms?: number;
+  ttft_p90_ms?: number;
+  masked_chars?: number;
+  peak_context?: number;
+  failed?: number;
+}
+
 export interface Diagnostics {
   model: ModelState;
+  runs: RunMetrics;
   mcp: McpSummary;
   runtime: ModelRuntime;
   context_window: number;
@@ -296,7 +354,7 @@ export type StreamEvent =
   | { type: 'injection'; index: number; tool: string; patterns: string[] }
   | { type: 'offload'; index: number; handle: string; bytes: number }
   | { type: 'compaction'; turns: number; digest_chars: number; count: number }
-  | { type: 'usage'; llm_calls: number; tokens_in: number; tokens_out: number; tool_calls: number }
+  | ({ type: 'usage' } & Usage)
   | { type: 'notice'; message: string }
   | { type: 'error'; message: string; kind: string }
   | { type: 'done'; status: string; usage: Usage; message_id: string };

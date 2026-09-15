@@ -4,7 +4,8 @@
 
 import type {
   AdminState, AuditReport, Bootstrap, CatalogEntry, Conversation, ConversationSummary,
-  Diagnostics, MemoryEntry, McpServer, ModelOption, RuntimeInfo, StreamEvent, UploadResult,
+  Artifact, Diagnostics, MemoryEntry, McpServer, ModelOption, RuntimeInfo, SearchHit, Skill,
+  SkillStats, StreamEvent, UploadResult,
 } from './types';
 
 const TOKEN_KEY = 'agent.admin.token';
@@ -76,6 +77,25 @@ export const api = {
     return request<UploadResult>('/uploads', { method: 'POST', body: form });
   },
 
+  // --- what came out of it -----------------------------------------------
+  artifacts: () => request<Artifact[]>('/artifacts'),
+  artifactUrl: (path: string) => `/api/artifacts/${path.split('/').map(encodeURIComponent).join('/')}`,
+  artifactText: async (path: string) => {
+    const res = await fetch(api.artifactUrl(path));
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    return res.text();
+  },
+  search: (q: string) => request<SearchHit[]>(`/search?q=${encodeURIComponent(q)}`),
+  exportUrl: (id: string) => `/api/conversations/${id}/export`,
+  exportConversation: async (id: string) => {
+    const res = await fetch(api.exportUrl(id));
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    return res.text();
+  },
+  retry: (id: string, messageId: string, text: string) =>
+    request<{ run_id: string; conversation_id: string; user_message_id: string; message_id: string }>(
+      `/conversations/${id}/retry`, { method: 'POST', body: body({ message_id: messageId, text }) }),
+
   // --- memory ------------------------------------------------------------
   listMemory: () => request<MemoryEntry[]>('/memory'),
   addMemory: (text: string) => request<MemoryEntry>('/memory', { method: 'POST', body: body({ text }) }),
@@ -118,6 +138,15 @@ export const api = {
   callTool: (name: string, args: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/admin/tools/${encodeURIComponent(name)}/call`,
       { method: 'POST', body: body({ arguments: args }) }),
+  soul: () => request<{ text: string }>('/admin/soul'),
+  setSoul: (text: string) =>
+    request<{ text: string }>('/admin/soul', { method: 'POST', body: body({ text }) }),
+  skills: () => request<{ skills: Skill[]; stats: SkillStats }>('/admin/skills'),
+  addSkill: (payload: { name: string; trigger: string; body: string }) =>
+    request<Skill>('/admin/skills', { method: 'POST', body: body(payload) }),
+  forgetSkill: (id: string) =>
+    request<{ ok: boolean }>(`/admin/skills/${id}`, { method: 'DELETE' }),
+
   diagnostics: () => request<Diagnostics>('/admin/diagnostics'),
   audit: (limit = 200) => request<AuditReport>(`/admin/audit?limit=${limit}`),
 };

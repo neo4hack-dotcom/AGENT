@@ -97,7 +97,9 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                    foreign_roots: Callable[[], str] | None = None,
                    granted_roots: Callable[[], list[str]] | None = None,
                    is_tainted: Callable[[], bool] | None = None,
-                   find_tools: Callable[[str], dict] | None = None) -> dict[str, ToolSpec]:
+                   find_tools: Callable[[str], dict] | None = None,
+                   bridge=None, bridge_tools: Callable[[], list[str]] | None = None
+                   ) -> dict[str, ToolSpec]:
     """Assemble the built-in tools that are actually enabled right now.
 
     A tool switched off in Admin is *absent* from the catalog the model sees, not present
@@ -127,16 +129,20 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                 "data": {"url": result["url"], "title": result["title"]}}
 
     async def h_run_python(code: str = "", **_: Any) -> dict:
+        callable_tools = bridge_tools() if bridge_tools else []
         result = await code_tool.run_python(code, workspace=workspace,
                                             timeout_s=settings.python_timeout_s,
-                                            memory_mb=settings.python_memory_mb)
+                                            memory_mb=settings.python_memory_mb,
+                                            bridge=bridge, bridge_tools=callable_tools)
         if not result.get("ok"):
             return {"ok": False, "error": result.get("error", "failed"),
                     "text": result.get("stdout", "")}
         out = result.get("stdout", "").strip()
+        used = result.get("bridge_calls") or []
         return {"ok": True,
                 "summary": (f"ran in {result['elapsed_ms']} ms — "
-                            + (f"{len(out.splitlines())} line(s) of output" if out else "no output")),
+                            + (f"{len(out.splitlines())} line(s) of output" if out else "no output")
+                            + (f", {len(used)} tool call(s)" if used else "")),
                 "text": out or "(the code ran and printed nothing — print() what you need to see)",
                 "data": {"elapsed_ms": result["elapsed_ms"]}}
 
@@ -288,8 +294,15 @@ def build_registry(settings, memory, workspace: Path, on_plan,
             f"documents. Never compute a number in your head when you can run it here. "
             f"print() everything you need to see — nothing else is returned. "
             f"Available beyond the standard library: {modules}. "
-            f"The working directory is the Agent workspace, so relative paths are shared with the "
-            f"file tools. Killed after {settings.python_timeout_s}s.",
+            f"The working directory is the workspace, so relative paths are shared with the "
+            f"file tools. Killed after {settings.python_timeout_s}s.\n\n"
+            f"**The other tools are callable from inside your code** as ordinary functions — "
+            f"`web_fetch(url=...)`, `sqlite__read_query(query=...)` — each returning the "
+            f"result as text and raising `ToolError` on failure. Prefer this whenever a task "
+            f"is several steps over the same data: one program that fetches, filters and "
+            f"writes is one turn, where the same work as separate tool calls is five. Loops "
+            f"and conditionals belong here too — asking the model to iterate is how iteration "
+            f"goes wrong.",
             _obj({"code": {"type": "string", "description": "The Python source to run."}}, ["code"]),
             h_run_python, write=True, group="Compute",
             capabilities=(trust.EXEC, trust.FS_READ, trust.FS_WRITE)))

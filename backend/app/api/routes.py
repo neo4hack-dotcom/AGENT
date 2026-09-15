@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.api.stream import run_stream
 from app.deps import container as c
+from app.tools import files as file_tool
 from app.security import admin_state
 from app.store import new_id, now
 
@@ -205,6 +206,132 @@ async def upload(file: UploadFile = File(...)) -> dict:
     return {"id": upload_id, "name": safe, "mime": mime, "size": len(raw),
             "kind": "image" if mime in IMAGE_MIMES else "file",
             "path": f"{UPLOAD_DIRNAME}/{target.name}"}
+
+
+# ------------------------------------------------------------------ artifacts
+@router.get("/artifacts")
+async def artifacts() -> list[dict]:
+    """What the agent has produced, newest first.
+
+    The workspace is where files land; without a list of them, "I saved it to report.md"
+    is a claim the reader has to go and check in a terminal.
+    """
+    root = c.workspace()
+    found: list[dict] = []
+    for path in root.rglob("*"):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] in ("uploads", ".results"):
+            continue
+        stat = path.stat()
+        found.append({"path": str(relative), "name": path.name, "bytes": stat.st_size,
+                      "modified": stat.st_mtime,
+                      "kind": path.suffix.lstrip(".").lower() or "file"})
+    return sorted(found, key=lambda f: f["modified"], reverse=True)[:400]
+
+
+@router.get("/artifacts/{path:path}")
+async def artifact(path: str):
+    from fastapi.responses import FileResponse, PlainTextResponse
+    try:
+        target = file_tool.resolve(c.workspace(), path)
+    except file_tool.OutsideWorkspace as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not target.is_file():
+        raise HTTPException(404, "No such file in the workspace.")
+    if target.stat().st_size > 2_000_000:
+        return FileResponse(target, filename=target.name)
+    try:
+        return PlainTextResponse(target.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        return FileResponse(target, filename=target.name)
+
+
+# --------------------------------------------------------------------- search
+@router.get("/search")
+async def search(q: str, limit: int = 30) -> list[dict]:
+    """Find a conversation by what was said in it.
+
+    A scan, not an index: a personal agent accumulates hundreds of conversations, not
+    millions, and a scan over hundreds is instant and cannot fall out of sync.
+    """
+    needle = (q or "").strip().lower()
+    if len(needle) < 2:
+        return []
+    hits: list[dict] = []
+    for conv in c.store.conversations().values():
+        for message in conv.get("messages") or []:
+            body = str(message.get("content") or "")
+            position = body.lower().find(needle)
+            if position < 0:
+                continue
+            start = max(0, position - 60)
+            hits.append({"conversation_id": conv["id"],
+                         "title": conv.get("title") or "",
+                         "role": message.get("role"),
+                         "updated_at": conv.get("updated_at"),
+                         "excerpt": ("…" if start else "") + body[start:position + 140]})
+            break
+    return sorted(hits, key=lambda h: h.get("updated_at") or 0, reverse=True)[:limit]
+
+
+# ---------------------------------------------------------------- export, retry
+@router.get("/conversations/{conv_id}/export")
+async def export_conversation(conv_id: str):
+    """One Markdown document: the questions, the answers, and the evidence behind them."""
+    from fastapi.responses import PlainTextResponse
+    conv = c.store.conversation(conv_id)
+    if conv is None:
+        raise HTTPException(404, "No such conversation.")
+    lines = [f"# {conv.get('title') or 'Conversation'}", ""]
+    for message in conv.get("messages") or []:
+        if message["role"] == "user":
+            lines += ["---", "", f"## {message.get('content', '').strip()}", ""]
+            continue
+        for block in message.get("blocks") or []:
+            if block["type"] == "text" and not block.get("superseded") and block.get("text"):
+                lines += [block["text"].strip(), ""]
+        evidence = [b for b in (message.get("blocks") or []) if b["type"] == "tool"]
+        if evidence:
+            lines += ["<details><summary>Evidence</summary>", ""]
+            for block in evidence:
+                mark = "ok" if block.get("ok") else "failed"
+                lines.append(f"- `{block.get('ref', '')}` **{block.get('name')}** ({mark}) — "
+                             f"{(block.get('summary') or '')[:200]}")
+            lines += ["", "</details>", ""]
+        trust_note = message.get("trust") or {}
+        if trust_note.get("sources"):
+            lines += [f"> Read from outside: {', '.join(trust_note['sources'])}.", ""]
+    return PlainTextResponse("\n".join(lines), media_type="text/markdown")
+
+
+class RetryBody(BaseModel):
+    message_id: str
+    text: str = ""
+
+
+@router.post("/conversations/{conv_id}/retry")
+async def retry(conv_id: str, body: RetryBody) -> dict:
+    """Re-ask a question, optionally reworded, discarding what followed it.
+
+    Editing the question and trying again is the commonest thing anyone wants from a
+    transcript, and forking a new conversation to do it loses the context that made the
+    question make sense.
+    """
+    conv = c.store.conversation(conv_id)
+    if conv is None:
+        raise HTTPException(404, "No such conversation.")
+    messages = conv.get("messages") or []
+    index = next((i for i, m in enumerate(messages) if m["id"] == body.message_id), -1)
+    if index < 0 or messages[index]["role"] != "user":
+        raise HTTPException(404, "That is not a question in this conversation.")
+    question = (body.text or messages[index].get("content") or "").strip()
+    conv["messages"] = messages[:index]
+    conv["updated_at"] = now()
+    c.store.touch()
+    await c.store.save()
+    return await c.runner.start(conv_id, question, [])
 
 
 # --------------------------------------------------------------------- memory

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.memory import Memory
+from app.agent.skills import Skills
 from app.audit import AuditLog
 from app.config import Settings, settings as env_settings
 from app.events import EventBus
@@ -57,6 +58,9 @@ class Container:
         self.bus = EventBus()
         self.memory = Memory(self.store, env_settings.memory_path)
         self.audit = AuditLog(env_settings.audit_path)
+        # Skills share the memory database: both are things the agent keeps, and
+        # one file is one thing to back up.
+        self.skills = Skills(self.memory._db, self.store)
         self.mcp = McpRegistry(self.store, self.bus, self.settings)
         self._llm: LLMProvider | None = None
         self._fast_llm: LLMProvider | None = None

@@ -163,15 +163,28 @@ def synthesis_prompt(question: str, evidence: str) -> str:
             f"# Now\nWrite the answer.")
 
 
-def system_prompt(model: str, catalog: str, memory_block: str, host: str = "this machine") -> str:
+def system_prompt(model: str, catalog: str, memory_block: str, host: str = "this machine",
+                  identity: str = "") -> str:
+    """The stable half of the system prompt.
+
+    Ordering here is a performance decision, not a stylistic one. A provider serves a
+    prompt from its cached prefix only up to the first byte that differs, so anything
+    that changes per run — a nonce, recalled memories, matching skills — must come *after*
+    everything that does not. Put the nonce at the top and the cache hit rate is zero,
+    every run, for a string nobody reads.
+
+    So: who the agent is, how it works, what it can call. Volatile blocks are appended by
+    the caller, in `volatile_suffix`.
+    """
     tools_block = TOOLS_HEADER.format(catalog=catalog) if catalog.strip() else NO_TOOLS_NOTE
-    return SYSTEM.format(
+    head = f"{identity.strip()}\n\n" if identity.strip() else ""
+    return head + SYSTEM.format(
         model=model or "a local model",
         today=datetime.now().strftime("%A %d %B %Y"),
         user_host=host,
         tools_block=tools_block,
-        memory_block=memory_block or "",
-    )
+        memory_block="",
+    ) + (memory_block or "")
 
 
 def rewrite_instruction(question: str) -> str:

@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from app.agent import builtin, context, prompts, subagent, trust
+from app.agent import builtin, context, prompts, skills, subagent, trust
 from app.agent.guard import LoopGuard, signature
 from app.errors import NotConfigured, RunCancelled
 from app.llm.provider import ToolCall
@@ -112,6 +112,9 @@ class RunContext:
         self.pinned_tools: set[str] = set()
         self.compactions = 0
         self._refs = 0
+        # Tool names a `run_python` program may call. Set per turn from what is offered, so
+        # code can reach exactly what the model could have called directly — no more.
+        self.bridge_names: list[str] = []
 
     def next_ref(self) -> str:
         """A short, stable label for one piece of evidence.
@@ -204,6 +207,7 @@ class AgentRunner:
     def __init__(self, container) -> None:
         self.c = container
         self.runs: dict[str, RunContext] = {}
+        self._turn_tools: dict[str, builtin.ToolSpec] = {}
 
     # ------------------------------------------------------------------ public
     def get(self, run_id: str) -> RunContext | None:
@@ -377,9 +381,18 @@ class AgentRunner:
             return {"ok": True, "summary": f"{len(matches)} tool(s) now callable",
                     "text": f"These are callable from now on:\n{listing}"}
 
+        async def bridge(name: str, args: dict) -> dict:
+            return await self._bridge_call(ctx, name, args)
+
+        def bridge_tools() -> list[str]:
+            # Only what is callable by a plain identifier, and never run_python itself:
+            # a program that can spawn another program is a loop with no ceiling.
+            return [n for n in ctx.bridge_names if n.isidentifier() and n != "run_python"]
+
         tools = builtin.build_registry(self.c.settings, self.c.memory, workspace, on_plan,
                                        foreign_roots, granted_roots,
-                                       lambda: ctx.taint.tainted, find_tools)
+                                       lambda: ctx.taint.tainted, find_tools,
+                                       bridge, bridge_tools)
 
         async def research(question: str = "", **_: Any) -> dict:
             mcp_now = self.c.mcp.tools()
@@ -456,11 +469,16 @@ class AgentRunner:
         await self.c.mcp.wait_ready(timeout=min(8.0, settings.mcp_startup_timeout_s))
 
         tools, mcp_tools, _all_functions = self._tool_surface(ctx)
+        self._turn_tools = tools
         catalog = builtin.catalog_text(tools, mcp_tools, self.c.mcp.scopes(),
                                        str(Path(self.c.settings.workspace_dir)
                                            .expanduser().resolve()))
-        memory_block = self.c.memory.prompt_block(text, nonce=ctx.nonce)
-        system = (prompts.system_prompt(getattr(self.c.llm, "model", ""), catalog, memory_block)
+        # Stable first, volatile last — see prompts.system_prompt. The nonce notice is the
+        # most volatile thing in the prompt, so it goes at the very end.
+        volatile = (self.c.skills.prompt_block(text, nonce=ctx.nonce)
+                    + self.c.memory.prompt_block(text, nonce=ctx.nonce))
+        system = (prompts.system_prompt(getattr(self.c.llm, "model", ""), catalog, volatile,
+                                        identity=self.c.skills.soul())
                   + trust.spotlight_notice(ctx.nonce))
         # Hosts the user named are the user's own idea, and stay allowed however tainted
         # the run becomes. Everything else has to earn it.
@@ -480,6 +498,7 @@ class AgentRunner:
 
         reflected = False
         must_compose = False
+        window = 0
         empty_turns = 0
         tools_used = 0
         pending_hint: str | None = None
@@ -506,13 +525,26 @@ class AgentRunner:
             offered, omitted = context.select_tools(
                 mcp_tools, text, ctx.recent_tools, ctx.pinned_tools,
                 budget=int(settings.tool_budget))
-            functions = ([spec.as_function() for spec in tools.values()]
-                         + self.c.mcp.ollama_tools(offered))
+            # Full schemas while the catalogue is small; compressed once it is not, which
+            # is exactly when the tokens are needed elsewhere.
+            dense = len(tools) + len(offered) > int(settings.tool_budget)
+            functions = [context.compress_schema(spec.as_function(), dense)
+                         for spec in tools.values()]
+            functions += [context.compress_schema(f, dense)
+                          for f in self.c.mcp.ollama_tools(offered)]
+            ctx.bridge_names = ([n for n in tools if n != "run_python"]
+                                + [t["qualified_name"] for t in offered])
             if omitted and iteration == 0:
                 ctx.emit({"type": "notice", "message":
                           f"{omitted} of {len(mcp_tools)} MCP tools are not offered this turn; "
                           f"the agent can reach them with find_tools."})
 
+            if not window:
+                window = await self._context_window()
+
+            messages, masked = context.mask_observations(messages)
+            if masked:
+                ctx.usage["masked_chars"] = ctx.usage.get("masked_chars", 0) + masked
             messages = await self._maybe_compact(ctx, messages, text)
             ctx.emit({"type": "status", "phase": "thinking"})
             text_block: dict | None = None
@@ -553,6 +585,22 @@ class AgentRunner:
             ctx.usage["llm_calls"] += 1
             ctx.usage["tokens_in"] += result.tokens_in
             ctx.usage["tokens_out"] += result.tokens_out
+            # What the provider re-evaluated versus what we sent. A cached prefix shows up
+            # as a prompt_eval_count far below the prompt's real size — the single most
+            # useful number for telling a context problem from a model problem.
+            # Everything handed to the provider, schemas included: they are re-sent on
+            # every call and are often larger than the conversation itself.
+            schema_chars = len(json.dumps(functions, default=str)) if functions else 0
+            sent = (context.estimate_tokens(messages)
+                    + (len(system) + schema_chars) // 4)
+            ctx.usage["prompt_sent"] = ctx.usage.get("prompt_sent", 0) + sent
+            ctx.usage["prompt_evaluated"] = ctx.usage.get("prompt_evaluated", 0) + result.tokens_in
+            # Not cumulative: how full the window is *right now*. The one number that
+            # predicts a compaction before it happens.
+            ctx.usage["context_tokens"] = sent
+            ctx.usage["context_limit"] = window
+            if iteration == 0:
+                ctx.usage["ttft_ms"] = result.latency_ms
             ctx.emit({"type": "usage", **ctx.usage})
 
             if not result.tool_calls:
@@ -643,6 +691,41 @@ class AgentRunner:
 
         ctx.emit({"type": "status", "phase": "done"})
         asyncio.create_task(self._maybe_title(ctx.conversation_id))
+        asyncio.create_task(self._maybe_distil(ctx, text))
+
+    async def _bridge_call(self, ctx: RunContext, name: str, args: dict) -> dict:
+        """One tool call made from inside a `run_python` program.
+
+        Routed through the same gates as a call the model makes directly — egress, taint,
+        redaction, audit, and a block in the transcript. A tool reached from code is not a
+        different tool, and a boundary that code can step around is not a boundary.
+        """
+        if name not in ctx.bridge_names:
+            return {"ok": False, "error": f"`{name}` is not callable from code in this turn."}
+        call = ToolCall(id=new_id("t"), name=name, arguments=args or {})
+        spec = self._turn_tools.get(name)
+        mcp_tool = None if spec else self.c.mcp.resolve(name)
+        block = {"type": "tool", "index": len(ctx.blocks), "id": call.id,
+                 "ref": ctx.next_ref(), "name": name, "args": call.arguments,
+                 "server": (mcp_tool["server_name"] if mcp_tool
+                            else (spec.group if spec else "unknown")),
+                 "kind": "mcp" if mcp_tool else "builtin", "by": "code",
+                 "status": "running", "ok": None, "summary": "", "text": "", "ms": 0}
+        ctx.blocks.append(block)
+        ctx.emit({"type": "tool.start", "index": block["index"], "id": block["id"],
+                  "name": name, "args": call.arguments, "server": block["server"],
+                  "kind": block["kind"], "by": "code", "ref": block["ref"]})
+
+        refused = self._check_egress(ctx, call)
+        if refused:
+            self._fail(ctx, block, refused, status="blocked")
+            return {"ok": False, "error": refused}
+        if spec is None and mcp_tool is None:
+            self._fail(ctx, block, f"no tool named {name}")
+            return {"ok": False, "error": f"no tool named {name}"}
+        outcome = await self._invoke(ctx, call, block, self._turn_tools)
+        return {"ok": outcome["ok"], "text": block.get("text", ""),
+                "error": outcome.get("error", "")}
 
     async def _maybe_compact(self, ctx: RunContext, messages: list[dict],
                              question: str) -> list[dict]:
@@ -1181,6 +1264,14 @@ class AgentRunner:
             ctx.usage["llm_calls"] += 1
             ctx.usage["tokens_in"] += result.tokens_in
             ctx.usage["tokens_out"] += result.tokens_out
+            # What the provider re-evaluated versus what we sent. A cached prefix shows up
+            # as a prompt_eval_count far below the prompt's real size — the single most
+            # useful number for telling a context problem from a model problem.
+            sent = context.estimate_tokens(payload) + len(system) // 4
+            ctx.usage["prompt_sent"] = ctx.usage.get("prompt_sent", 0) + sent
+            ctx.usage["prompt_evaluated"] = ctx.usage.get("prompt_evaluated", 0) + result.tokens_in
+            if iteration == 0:
+                ctx.usage["ttft_ms"] = result.latency_ms
             ctx.emit({"type": "usage", **ctx.usage})
         except Exception as exc:  # noqa: BLE001
             failed = [b for b in ctx.blocks if b["type"] == "tool" and not b.get("ok")]
@@ -1220,6 +1311,48 @@ class AgentRunner:
                 chunks.append("[earlier calls omitted for length]")
                 break
         return "\n\n".join(reversed(chunks))
+
+    async def _maybe_distil(self, ctx: RunContext, question: str) -> None:
+        """Turn three successes of the same shape into a procedure.
+
+        Not one success: a procedure written from a single run is that run with the
+        specifics filed off, and it will be retrieved for work it does not fit. The third
+        is where what varies and what does not become visible. Runs quietly after the
+        answer — the user asked a question, not for a lesson.
+        """
+        if ctx.status != "completed":
+            return
+        used = [b["name"] for b in ctx.blocks if b["type"] == "tool" and b.get("ok")]
+        signature = self.c.skills.note_success(used, question)
+        if not signature:
+            return
+        earlier = self.c.skills.trace_example(signature)
+        steps = "\n".join(
+            f"- {b['name']}({json.dumps(b.get('args') or {}, ensure_ascii=False)[:160]})"
+            for b in ctx.blocks if b["type"] == "tool" and b.get("ok"))
+        try:
+            result = await self.c.fast_llm.chat(
+                [{"role": "user",
+                  "content": f"Run just completed — question: {question[:400]}\n"
+                             f"Tool sequence:\n{steps}\n\n"
+                             f"An earlier run of the same shape asked: {earlier[:400]}"}],
+                system=skills.DISTIL_SYSTEM, temperature=0.1, think=False,
+                json_schema={"type": "object",
+                             "properties": {"name": {"type": "string"},
+                                            "trigger": {"type": "string"},
+                                            "body": {"type": "string"}},
+                             "required": ["name", "body"]})
+            distilled = json.loads(result.content)
+        except Exception:  # noqa: BLE001 - learning must never fail a completed run
+            return
+        if not str(distilled.get("name") or "").strip():
+            self.c.skills.mark_distilled(signature)
+            return
+        self.c.skills.add(distilled["name"], distilled.get("trigger", ""),
+                          distilled.get("body", ""), source="learned", signature=signature)
+        self.c.skills.mark_distilled(signature)
+        self.c.audit.record("skill.learned", run_id=ctx.run_id, name=distilled["name"])
+        self.c.bus.emit("system", {"type": "skill.learned", "name": distilled["name"]})
 
     async def _maybe_title(self, conversation_id: str) -> None:
         conv = self.c.store.conversation(conversation_id)
