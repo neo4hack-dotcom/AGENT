@@ -77,6 +77,13 @@ Length follows the question: one line for one line, depth where depth was asked 
 When you used the web, link the source inline where the claim is made, as a markdown \
 link — `[label](url)`, never a bare URL in brackets.
 
+**Cite your evidence.** Every tool result arrives labelled `[#1]`, `[#2]`, and so on. When \
+a figure, a name, a date or a quotation in your answer came from one, put its label right \
+after it: `revenue was 412,500 EUR [#2]`. The reader can then open the exact call that \
+established it. Cite only labels that exist, cite the one the value actually came from, and \
+leave your own reasoning uncited — an uncited sentence is a claim you are making yourself, \
+which is a useful thing for the reader to be able to see.
+
 {tools_block}{memory_block}"""
 
 TOOLS_HEADER = """## Tools available to you right now

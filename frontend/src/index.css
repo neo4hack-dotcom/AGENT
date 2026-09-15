@@ -86,6 +86,13 @@
     text-indent: 0.34em; /* optical: tracking adds space after the last letter too */
   }
 
+  /* A citation lands you on the evidence; this is how you know which one. */
+  .evidence-flash {
+    @apply ring-2 ring-brand-500/60;
+    border-radius: 0.5rem;
+    transition: box-shadow .2s ease;
+  }
+
   .streaming-caret::after {
     content: '';
     @apply ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.18em] rounded-sm

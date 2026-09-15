@@ -3,8 +3,8 @@
 // caller that needs updating with it.
 
 import type {
-  AdminState, Bootstrap, CatalogEntry, Conversation, ConversationSummary, Diagnostics,
-  MemoryEntry, McpServer, ModelOption, RuntimeInfo, StreamEvent, UploadResult,
+  AdminState, AuditReport, Bootstrap, CatalogEntry, Conversation, ConversationSummary,
+  Diagnostics, MemoryEntry, McpServer, ModelOption, RuntimeInfo, StreamEvent, UploadResult,
 } from './types';
 
 const TOKEN_KEY = 'agent.admin.token';
@@ -80,6 +80,8 @@ export const api = {
   listMemory: () => request<MemoryEntry[]>('/memory'),
   addMemory: (text: string) => request<MemoryEntry>('/memory', { method: 'POST', body: body({ text }) }),
   forgetMemory: (id: string) => request<{ ok: boolean }>(`/memory/${id}`, { method: 'DELETE' }),
+  confirmMemory: (id: string) =>
+    request<{ ok: boolean }>(`/memory/${id}/confirm`, { method: 'POST' }),
 
   // --- admin -------------------------------------------------------------
   adminState: () => request<AdminState>('/admin/state'),
@@ -117,6 +119,7 @@ export const api = {
     request<Record<string, unknown>>(`/admin/tools/${encodeURIComponent(name)}/call`,
       { method: 'POST', body: body({ arguments: args }) }),
   diagnostics: () => request<Diagnostics>('/admin/diagnostics'),
+  audit: (limit = 200) => request<AuditReport>(`/admin/audit?limit=${limit}`),
 };
 
 /**

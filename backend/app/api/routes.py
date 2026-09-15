@@ -41,7 +41,7 @@ async def bootstrap(request: Request) -> dict:
         "admin": admin_state(c, request),
         "prefs": {"approval_mode": c.get("approval_mode")},
         "workspace": str(workspace),
-        "memory_count": len(c.store.memory()),
+        "memory": c.memory.stats(),
     }
 
 
@@ -210,7 +210,20 @@ async def upload(file: UploadFile = File(...)) -> dict:
 # --------------------------------------------------------------------- memory
 @router.get("/memory")
 async def list_memory() -> list[dict]:
-    return sorted(c.store.memory(), key=lambda m: m.get("updated_at", 0), reverse=True)
+    return c.memory.all()
+
+
+@router.post("/memory/{memory_id}/confirm")
+async def confirm_memory(memory_id: str) -> dict:
+    """Release one quarantined memory.
+
+    A fact the agent learned while reading something foreign waits here. Confirming is the
+    user saying "yes, that is true and worth keeping" — which is a judgement only they can
+    make, because the alternative is trusting the page that suggested it.
+    """
+    if not c.memory.confirm(memory_id):
+        raise HTTPException(404, "No memory is waiting under that id.")
+    return {"ok": True}
 
 
 class MemoryBody(BaseModel):
@@ -219,14 +232,11 @@ class MemoryBody(BaseModel):
 
 @router.post("/memory")
 async def add_memory(body: MemoryBody) -> dict:
-    entry = c.memory.add(body.text, source="user")
-    await c.store.save()
-    return entry
+    return c.memory.add(body.text, source="user")
 
 
 @router.delete("/memory/{memory_id}")
 async def forget(memory_id: str) -> dict:
     if not c.memory.forget(memory_id):
         raise HTTPException(404, "No such memory.")
-    await c.store.save()
     return {"ok": True}

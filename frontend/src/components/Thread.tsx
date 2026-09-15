@@ -7,7 +7,8 @@
 
 import {
   AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileText, FolderOpen, Globe,
-  ListChecks, Plug, Save, Search, ShieldQuestion, Sparkles, Terminal, X, type LucideIcon,
+  Layers, ListChecks, Plug, Save, Search, ShieldAlert, ShieldQuestion, Sparkles, Terminal,
+  X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { Block, Message, PlanStep, Usage } from '../types';
@@ -15,9 +16,10 @@ import { Markdown } from './Markdown';
 import { Badge, Button, Spinner, cls } from './ui';
 
 const TOOL_ICONS: Record<string, LucideIcon> = {
-  web_search: Search, web_fetch: Globe, run_python: Terminal, read_file: FileText,
-  write_file: Save, list_files: FolderOpen, remember: Brain, recall: Brain,
-  plan: ListChecks, current_time: Clock,
+  web_search: Search, web_fetch: Globe, run_python: Terminal, workspace_read: FileText,
+  workspace_write: Save, workspace_import: Save, workspace_list: FolderOpen,
+  remember: Brain, recall: Brain, plan: ListChecks, current_time: Clock,
+  find_tools: Search,
 };
 
 function toolIcon(block: Block): LucideIcon {
@@ -115,19 +117,22 @@ function ThinkingBlock({ block, live }: { block: Block; live: boolean }) {
 
 /* ------------------------------------------------------------------ tools */
 
-function ToolBlock({ block }: { block: Block }) {
+function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
   const [open, setOpen] = useState(false);
   const Icon = toolIcon(block);
   const running = block.status === 'running' || block.status === 'awaiting_approval';
   const failed = block.ok === false;
   const denied = block.status === 'denied' || block.status === 'expired';
+  const blocked = block.status === 'blocked';
+  const flagged = (block.injection?.length ?? 0) > 0;
 
   return (
-    <div className="my-1.5">
+    <div className="my-1.5" id={cite && block.ref ? `${cite}${block.ref.slice(1)}` : undefined}>
       <button onClick={() => setOpen((v) => !v)}
         className={cls('focus-ring group flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors',
-          failed ? 'border-red-300/60 bg-red-50/50 dark:border-red-500/25 dark:bg-red-500/[0.07]'
-                 : 'hairline hover:bg-zinc-50 dark:hover:bg-white/[0.04]')}>
+          blocked ? 'border-amber-300/70 bg-amber-50/60 dark:border-amber-500/25 dark:bg-amber-500/[0.07]'
+          : failed ? 'border-red-300/60 bg-red-50/50 dark:border-red-500/25 dark:bg-red-500/[0.07]'
+                   : 'hairline hover:bg-zinc-50 dark:hover:bg-white/[0.04]')}>
         <span className={cls('grid h-5 w-5 shrink-0 place-items-center rounded-md',
           failed ? 'bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400'
                  : denied ? 'bg-zinc-100 text-zinc-500 dark:bg-white/[0.07]'
@@ -135,11 +140,25 @@ function ToolBlock({ block }: { block: Block }) {
           {running ? <Spinner size={11} /> : denied ? <Ban size={11} />
             : failed ? <X size={11} strokeWidth={3} /> : <Icon size={11} />}
         </span>
+        {block.ref && (
+          <span className="shrink-0 font-mono text-2xs text-brand-800/70 dark:text-brand-300/70">
+            {block.ref}
+          </span>
+        )}
         <span className="shrink-0 font-mono text-2xs font-medium text-zinc-700 dark:text-zinc-200">
           {block.name}
         </span>
         {block.by === 'critic' && <Badge tone="brand">critic</Badge>}
         {block.cached && <Badge>already fetched</Badge>}
+        {/* The document tried to give the agent orders. It did not get them — but you
+            should know it tried, because that is a fact about the source. */}
+        {flagged && (
+          <Badge tone="warn" className="gap-1">
+            <ShieldAlert size={9} /> injection blocked
+          </Badge>
+        )}
+        {block.offloaded && <Badge className="gap-1"><Layers size={9} /> saved in full</Badge>}
+        {!!block.redacted && <Badge tone="warn">secret removed</Badge>}
         <span className="min-w-0 flex-1 truncate text-2xs dimmer">
           {running ? argSummary(block.args) : (block.summary || argSummary(block.args))}
         </span>
@@ -156,6 +175,18 @@ function ToolBlock({ block }: { block: Block }) {
               {JSON.stringify(block.args ?? {}, null, 2)}
             </pre>
           </div>
+          {flagged && (
+            <div className="rounded-lg border border-amber-300/70 bg-amber-50/60 px-2.5 py-2 text-2xs leading-relaxed text-amber-900 dark:border-amber-500/25 dark:bg-amber-500/[0.07] dark:text-amber-200">
+              This content contains text shaped like instructions to the agent
+              ({block.injection!.join(', ')}). It was fenced as data and reported, not obeyed.
+            </div>
+          )}
+          {block.offloaded && (
+            <p className="text-2xs dimmer">
+              Full result saved to <code className="font-mono">{block.offloaded}</code> —
+              the agent kept an excerpt in context and can read the rest on demand.
+            </p>
+          )}
           {(block.text || block.summary) && (
             <div>
               <div className="mb-1 text-2xs font-semibold uppercase tracking-wider dimmer">
@@ -223,7 +254,7 @@ export function ApprovalCard({
 
 /* ---------------------------------------------------------------- message */
 
-function Blocks({ blocks, live }: { blocks: Block[]; live: boolean }) {
+function Blocks({ blocks, live, cite }: { blocks: Block[]; live: boolean; cite?: string }) {
   const lastIndex = blocks.length - 1;
   return (
     <>
@@ -231,11 +262,13 @@ function Blocks({ blocks, live }: { blocks: Block[]; live: boolean }) {
         if (block.type === 'thinking') {
           return <ThinkingBlock key={`b${block.index}`} block={block} live={live && i === lastIndex} />;
         }
-        if (block.type === 'tool') return <ToolBlock key={`b${block.index}`} block={block} />;
+        if (block.type === 'tool') {
+          return <ToolBlock key={`b${block.index}`} block={block} cite={cite} />;
+        }
         if (!(block.text || '').trim()) return null;
         return (
           <div key={`b${block.index}`} className={cls(block.superseded && 'hidden')}>
-            <Markdown text={block.text ?? ''} />
+            <Markdown text={block.text ?? ''} cite={cite} />
           </div>
         );
       })}
@@ -247,10 +280,55 @@ const PHASES: Record<string, string> = {
   starting: 'Starting',
   thinking: 'Thinking',
   checking: 'Checking',
+  compacting: 'Compressing context',
   writing: 'Writing',
   cancelled: 'Stopped',
   done: '',
 };
+
+/**
+ * One line, only when there is something to say: this answer read things from outside.
+ *
+ * Not a warning — reading the web is the job. It is provenance, in the place where a
+ * reader decides how much weight to give an answer, and it expands into exactly which
+ * sources and whether any of them tried to give the agent orders.
+ */
+function TrustLine({ trust }: { trust: NonNullable<Message['trust']> }) {
+  const [open, setOpen] = useState(false);
+  const flagged = trust.injections.length > 0;
+  if (!trust.sources.length && !flagged && !trust.compactions) return null;
+  return (
+    <div className="mt-2.5">
+      <button onClick={() => setOpen((v) => !v)}
+        className={cls('focus-ring inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-2xs transition-colors',
+          flagged ? 'text-amber-600 dark:text-amber-400' : 'dimmer hover:text-zinc-600 dark:hover:text-zinc-300')}>
+        {flagged ? <ShieldAlert size={11} /> : <ShieldQuestion size={11} />}
+        {flagged
+          ? `${trust.injections.length} source tried to instruct the agent`
+          : `read ${trust.sources.length} outside source${trust.sources.length > 1 ? 's' : ''}`}
+        <ChevronRight size={10} className={cls('transition-transform', open && 'rotate-90')} />
+      </button>
+      {open && (
+        <div className="mt-1.5 space-y-1 border-l-2 border-zinc-200 pl-3 text-2xs leading-relaxed dim dark:border-white/10 animate-fade-in">
+          {trust.sources.length > 0 && (
+            <p>Content entered this answer from: <b>{trust.sources.join(', ')}</b>. It was
+              fenced as data — the agent could read it, not take orders from it.</p>
+          )}
+          {trust.injections.map((hit, i) => (
+            <p key={i} className="text-amber-700 dark:text-amber-400">
+              <b>{hit.tool}</b> returned text shaped like instructions ({hit.patterns.join(', ')}).
+              Reported, not obeyed.
+            </p>
+          ))}
+          {trust.compactions > 0 && (
+            <p>The transcript was compressed {trust.compactions}× to fit the context window;
+              the question and the standing rules were carried through verbatim.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function AssistantTurn({
   message, live, phase, approval, onApprove, approving, notices, error,
@@ -268,7 +346,7 @@ export function AssistantTurn({
   return (
     <div className="animate-fade-up">
       {(message.plan?.length ?? 0) > 0 && <PlanCard steps={message.plan!} live={live} />}
-      <Blocks blocks={blocks} live={!!live} />
+      <Blocks blocks={blocks} live={!!live} cite={`ev-${message.id}-`} />
 
       {live && !blocks.length && (
         <div className="flex items-center gap-2 py-2 text-xs dim">
@@ -295,6 +373,7 @@ export function AssistantTurn({
         </div>
       )}
 
+      {!live && message.trust && <TrustLine trust={message.trust} />}
       {!live && <TurnFooter message={message} />}
     </div>
   );

@@ -7,18 +7,20 @@
 // people stop trusting.
 
 import {
-  Activity, Brain, Check, Cpu, Eye, KeyRound, Plug, Settings2, ShieldCheck, Trash2,
-  Wrench, X, Zap,
+  Activity, Brain, Check, Cpu, Eye, FileLock2, KeyRound, Plug, Settings2, ShieldAlert,
+  ShieldCheck, Trash2, Wrench, X, Zap,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api, setAdminToken } from '../api';
-import type { AdminState, Diagnostics, MemoryEntry, ModelOption, ToolInfo } from '../types';
+import type {
+  AdminState, AuditReport, Diagnostics, MemoryEntry, ModelOption, ToolInfo,
+} from '../types';
 import { McpLibrary } from './McpLibrary';
 import {
   Badge, Button, Dot, Empty, Field, IconButton, Input, Switch, cls, useConfirm, useToast,
 } from './ui';
 
-type Tab = 'model' | 'mcp' | 'tools' | 'guardrails' | 'memory' | 'diagnostics';
+type Tab = 'model' | 'mcp' | 'tools' | 'guardrails' | 'memory' | 'audit' | 'diagnostics';
 
 const TABS: { id: Tab; label: string; icon: typeof Cpu }[] = [
   { id: 'model', label: 'Model', icon: Cpu },
@@ -26,6 +28,7 @@ const TABS: { id: Tab; label: string; icon: typeof Cpu }[] = [
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'guardrails', label: 'Guardrails', icon: ShieldCheck },
   { id: 'memory', label: 'Memory', icon: Brain },
+  { id: 'audit', label: 'Audit', icon: FileLock2 },
   { id: 'diagnostics', label: 'Diagnostics', icon: Activity },
 ];
 
@@ -74,6 +77,7 @@ export function Admin({
               {tab === 'tools' && <ToolsPanel />}
               {tab === 'guardrails' && <GuardrailsPanel onChanged={onChanged} />}
               {tab === 'memory' && <MemoryPanel />}
+              {tab === 'audit' && <AuditPanel />}
               {tab === 'diagnostics' && <DiagnosticsPanel />}
             </div>
           </main>
@@ -409,17 +413,52 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
 
 function MemoryPanel() {
   const confirm = useConfirm();
+  const toast = useToast();
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [draft, setDraft] = useState('');
   const load = async () => setEntries(await api.listMemory());
   useEffect(() => { void load(); }, []);
 
+  const quarantined = entries.filter((e) => e.status === 'quarantined');
+  const trusted = entries.filter((e) => e.status !== 'quarantined');
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <p className="text-xs leading-relaxed dim">
-        What the agent has kept about you, from one conversation to the next. It writes here
-        itself when it judges a fact durable; you can add and remove freely.
+        What the agent has kept about you, from one conversation to the next. Searched
+        full-text, so it stays useful as it grows.
       </p>
+
+      {quarantined.length > 0 && (
+        <section className="rounded-xl border border-amber-300/70 bg-amber-50/60 p-3.5 dark:border-amber-500/25 dark:bg-amber-500/[0.07]">
+          <h3 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-amber-900 dark:text-amber-200">
+            <ShieldAlert size={13} /> Waiting for you ({quarantined.length})
+          </h3>
+          {/* Memory is the one part of an agent that outlives the conversation, which makes
+              it the part worth attacking: persuade it to remember something once and the
+              instruction returns, trusted, in every later run. So a fact learned while
+              untrusted content was in context waits here. */}
+          <p className="mb-3 text-2xs leading-relaxed text-amber-800/80 dark:text-amber-200/70">
+            The agent learned these while it had content from outside in context — a web page,
+            a file, a server reply. They are not recalled and never reach a prompt until you
+            say they are true.
+          </p>
+          <div className="space-y-1.5">
+            {quarantined.map((entry) => (
+              <div key={entry.id} className="flex items-start gap-2 rounded-lg bg-white/70 px-3 py-2 dark:bg-black/25">
+                <span className="min-w-0 flex-1 text-xs leading-relaxed">{entry.text}</span>
+                <Button size="xs" icon={Check} onClick={async () => {
+                  await api.confirmMemory(entry.id); await load(); toast('Kept');
+                }}>Keep</Button>
+                <Button size="xs" variant="ghost" icon={Trash2} onClick={async () => {
+                  await api.forgetMemory(entry.id); await load();
+                }}>Discard</Button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       <div className="flex gap-2">
         <Input value={draft} onChange={(e) => setDraft(e.target.value)}
           placeholder="One fact worth keeping, in a sentence…"
@@ -431,13 +470,15 @@ function MemoryPanel() {
           Add
         </Button>
       </div>
-      {entries.length === 0 ? (
+
+      {trusted.length === 0 ? (
         <Empty icon={Brain} title="Nothing remembered yet" />
       ) : (
         <div className="space-y-1.5">
-          {entries.map((entry) => (
+          {trusted.map((entry) => (
             <div key={entry.id} className="group flex items-start gap-2.5 rounded-xl border px-3 py-2.5 hairline">
               <span className="min-w-0 flex-1 text-xs leading-relaxed">{entry.text}</span>
+              {entry.kind === 'identity' && <Badge tone="brand">identity</Badge>}
               <Badge>{entry.source === 'user' ? 'you' : 'agent'}</Badge>
               <button onClick={async () => {
                 if (await confirm({ title: 'Forget this?', danger: true, confirmLabel: 'Forget' })) {
@@ -450,6 +491,62 @@ function MemoryPanel() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function AuditPanel() {
+  const [report, setReport] = useState<AuditReport | null>(null);
+  useEffect(() => { void api.audit(300).then(setReport); }, []);
+  if (!report) return <PanelSkeleton />;
+  const { verified } = report;
+  return (
+    <div className="space-y-4">
+      <p className="text-xs leading-relaxed dim">
+        Every action the agent took, in order. Each line carries the hash of the one before
+        it — the log cannot stop someone editing it, but it cannot hide that they did.
+      </p>
+      <div className={cls('flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-xs',
+        verified.ok ? 'border-emerald-300/60 bg-emerald-50/50 dark:border-emerald-500/25 dark:bg-emerald-500/[0.07]'
+                    : 'border-red-300/70 bg-red-50/60 dark:border-red-500/25 dark:bg-red-500/[0.07]')}>
+        <FileLock2 size={14} className={cls('mt-px shrink-0',
+          verified.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600')} />
+        <span className={verified.ok ? 'text-emerald-900 dark:text-emerald-200' : 'text-red-800 dark:text-red-300'}>
+          {verified.ok
+            ? `Chain intact across ${verified.entries} entries.`
+            : `Chain broken at entry ${verified.broken_at}: ${verified.reason}. Everything after that point was written after the log was altered.`}
+        </span>
+      </div>
+      <div className="overflow-hidden rounded-xl border hairline">
+        <table className="w-full text-left text-2xs">
+          <thead className="bg-zinc-50 dark:bg-white/[0.04]">
+            <tr>
+              <th className="px-3 py-2 font-semibold">When</th>
+              <th className="px-3 py-2 font-semibold">Event</th>
+              <th className="px-3 py-2 font-semibold">Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...report.entries].reverse().slice(0, 120).map((entry) => (
+              <tr key={entry.hash} className="border-t hairline align-top">
+                <td className="whitespace-nowrap px-3 py-1.5 font-mono dimmer">
+                  {new Date(entry.ts * 1000).toLocaleTimeString()}
+                </td>
+                <td className="whitespace-nowrap px-3 py-1.5">
+                  <span className="font-mono">{entry.event}</span>
+                  {entry.tainted && <Badge tone="warn" className="ml-1.5">tainted</Badge>}
+                  {entry.injection && <Badge tone="bad" className="ml-1.5">injection</Badge>}
+                </td>
+                <td className="px-3 py-1.5 font-mono dim">
+                  {[entry.tool, entry.status, entry.verdict, entry.args, entry.reason]
+                    .filter(Boolean).join(' · ').slice(0, 140)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-2xs dimmer">Written to <code className="font-mono">{report.path}</code>.</p>
     </div>
   );
 }

@@ -29,6 +29,38 @@ PRELUDE = (
     "import sys, os, json, math, statistics, re, datetime, itertools, collections, pathlib\n"
 )
 
+SANDBOX = "/usr/bin/sandbox-exec"
+
+
+def sandbox_available() -> bool:
+    return sys.platform == "darwin" and Path(SANDBOX).exists()
+
+
+def _profile(workspace: Path) -> str:
+    """A Seatbelt profile: everything as before, minus the network and minus writes
+    outside the workspace.
+
+    `allow default` then subtractive denies, rather than an allow-list: an allow-list for
+    a Python interpreter means enumerating every dylib, locale file and framework it
+    touches, and the first one missed looks like a broken tool rather than a policy. The
+    two things that must not happen are enumerable; everything else may proceed.
+
+    The write allow-list is the workspace and the three device files a process needs to
+    speak. Not the system temp directory: `TMPDIR` already points into the workspace, and
+    leaving `/private/tmp` open was a hole wide enough to walk through — verified by
+    walking through it.
+    """
+    root = str(workspace)
+    return f"""(version 1)
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write*
+    (subpath "{root}")
+    (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr")
+    (regex #"^/dev/tty"))
+"""
+
 
 def _limits(memory_mb: int, cpu_s: int):
     def apply() -> None:
@@ -71,14 +103,21 @@ def available_modules() -> list[str]:
     return found
 
 
-async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: int) -> dict:
+async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: int,
+                     allow_network: bool = False) -> dict:
     if not (code or "").strip():
         return {"ok": False, "error": "No code to run."}
     workspace.mkdir(parents=True, exist_ok=True)
     started = time.time()
+
+    argv = [sys.executable, "-I", "-u", "-c", PRELUDE + code]
+    if sandbox_available() and not allow_network:
+        profile = workspace / ".sandbox.sb"
+        profile.write_text(_profile(workspace.resolve()))
+        argv = [SANDBOX, "-f", str(profile), *argv]
     try:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-I", "-u", "-c", PRELUDE + code,
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
@@ -109,9 +148,14 @@ async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: i
         out = out[:20000] + f"\n[stdout truncated — {len(stdout)} bytes total]"
     if proc.returncode != 0:
         detail = err.strip()[-3000:] or f"exit code {proc.returncode}"
+        if "Operation not permitted" in detail and sandbox_available():
+            detail += ("\n\nThis process runs with the network denied by the kernel and "
+                       "writes confined to the workspace. Fetch with web_fetch and pass the "
+                       "result in, or write inside the workspace.")
         if proc.returncode == -signal.SIGKILL:
             detail = ("killed — most likely it exceeded the memory or CPU ceiling. "
                       + detail)
         return {"ok": False, "elapsed_ms": elapsed_ms, "stdout": out, "error": detail}
     return {"ok": True, "elapsed_ms": elapsed_ms, "stdout": out,
-            "stderr": err.strip()[-2000:], "returncode": 0}
+            "stderr": err.strip()[-2000:], "returncode": 0,
+            "sandboxed": sandbox_available() and not allow_network}

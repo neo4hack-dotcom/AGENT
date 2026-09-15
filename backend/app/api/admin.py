@@ -227,6 +227,17 @@ async def call_tool(tool_name: str, body: CallBody) -> dict:
     return await c.mcp.call(tool_name, body.arguments)
 
 
+@guarded.get("/audit")
+async def audit(limit: int = 200, run_id: str = "") -> dict:
+    """The action log, plus whether its hash chain still checks out.
+
+    `verified.ok: false` means the file was edited after the fact — by a person, a script,
+    or the agent itself. The log cannot stop that; it can refuse to hide it.
+    """
+    return {"entries": c.audit.read(limit=min(limit, 1000), run_id=run_id),
+            "verified": c.audit.verify(), "path": str(c.env.audit_path)}
+
+
 # --------------------------------------------------------------- diagnostics
 @guarded.get("/diagnostics")
 async def diagnostics() -> dict:

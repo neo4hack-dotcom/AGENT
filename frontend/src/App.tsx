@@ -29,6 +29,8 @@ interface Live {
   notices: string[];
   approval: ApprovalRequest | null;
   error: string | null;
+  trust: { sources: string[]; injections: { tool: string; patterns: string[] }[];
+           compactions: number };
 }
 
 const LAST_CONVERSATION = 'agent.conversation';
@@ -44,6 +46,7 @@ const emptyLive = (runId: string, conversationId: string, messageId: string): Li
   runId, conversationId, messageId,
   blocks: new Map(), plan: [], usage: {}, phase: 'starting', notices: [],
   approval: null, error: null,
+  trust: { sources: [], injections: [], compactions: 0 },
 });
 
 export default function App() {
@@ -343,7 +346,8 @@ export default function App() {
                 if (message.role === 'user') return <UserTurn key={message.id} message={message} />;
                 const isLive = live?.messageId === message.id;
                 const rendered: Message = isLive
-                  ? { ...message, blocks: liveBlocks, plan: live!.plan, usage: live!.usage }
+                  ? { ...message, blocks: liveBlocks, plan: live!.plan, usage: live!.usage,
+                      trust: live!.trust }
                   : message;
                 return (
                   <div key={message.id} className="group/turn">
@@ -526,9 +530,28 @@ function applyEvent(live: Live, event: StreamEvent): void {
     case 'tool.start':
       live.blocks.set(event.index, {
         index: event.index, type: 'tool', id: event.id, name: event.name, args: event.args,
-        server: event.server, kind: event.kind, by: event.by, status: 'running', ok: null,
-        summary: '', text: '', ms: 0,
+        server: event.server, kind: event.kind, by: event.by, ref: event.ref,
+        status: 'running', ok: null, summary: '', text: '', ms: 0,
       });
+      break;
+    case 'taint':
+      live.trust = { ...live.trust, sources: event.sources };
+      break;
+    case 'injection': {
+      const flagged = live.blocks.get(event.index);
+      if (flagged) live.blocks.set(event.index, { ...flagged, injection: event.patterns });
+      live.trust = { ...live.trust,
+                     injections: [...live.trust.injections,
+                                  { tool: event.tool, patterns: event.patterns }] };
+      break;
+    }
+    case 'offload': {
+      const big = live.blocks.get(event.index);
+      if (big) live.blocks.set(event.index, { ...big, offloaded: event.handle });
+      break;
+    }
+    case 'compaction':
+      live.trust = { ...live.trust, compactions: event.count };
       break;
     case 'tool.end': {
       const block = live.blocks.get(event.index);
