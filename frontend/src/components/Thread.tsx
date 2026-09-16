@@ -7,17 +7,19 @@
 
 import {
   AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileText, FolderOpen, Globe,
-  ListChecks, Plug, Save, Search, ShieldQuestion, Sparkles, Terminal, X, type LucideIcon,
+  Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
+  Sparkles, Terminal, X, type LucideIcon,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Block, Message, PlanStep, Usage } from '../types';
 import { Markdown } from './Markdown';
 import { Badge, Button, Spinner, cls } from './ui';
 
 const TOOL_ICONS: Record<string, LucideIcon> = {
-  web_search: Search, web_fetch: Globe, run_python: Terminal, read_file: FileText,
-  write_file: Save, list_files: FolderOpen, remember: Brain, recall: Brain,
-  plan: ListChecks, current_time: Clock,
+  web_search: Search, web_fetch: Globe, run_python: Terminal, workspace_read: FileText,
+  workspace_write: Save, workspace_import: Save, workspace_list: FolderOpen,
+  remember: Brain, recall: Brain, plan: ListChecks, current_time: Clock,
+  find_tools: Search,
 };
 
 function toolIcon(block: Block): LucideIcon {
@@ -115,19 +117,100 @@ function ThinkingBlock({ block, live }: { block: Block; live: boolean }) {
 
 /* ------------------------------------------------------------------ tools */
 
-function ToolBlock({ block }: { block: Block }) {
+/**
+ * A query returned rows; show them as rows.
+ *
+ * Tool results arrive as JSON text, and a fifty-row SELECT rendered as raw JSON is
+ * unreadable at exactly the moment the reader most wants to check the agent's arithmetic.
+ * Strictly opt-in: anything that is not a clean rectangle of scalars falls back to the
+ * JSON, because a half-parsed table is worse than none.
+ */
+function asTable(raw: string): { columns: string[]; rows: unknown[][] } | null {
+  if (raw.length > 400_000) return null;
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return null; }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const key of ['rows', 'records', 'data', 'results']) {
+      const inner = (value as Record<string, unknown>)[key];
+      if (Array.isArray(inner)) { value = inner; break; }
+    }
+  }
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) return null;
+  const scalar = (v: unknown) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+  if (!value.every((row) => row && typeof row === 'object' && !Array.isArray(row)
+                   && Object.values(row as object).every(scalar))) return null;
+  const columns: string[] = [];
+  for (const row of value as Record<string, unknown>[]) {
+    for (const key of Object.keys(row)) if (!columns.includes(key)) columns.push(key);
+  }
+  if (columns.length === 0 || columns.length > 24) return null;
+  return { columns, rows: (value as Record<string, unknown>[]).map((r) => columns.map((c) => r[c])) };
+}
+
+function ResultTable({ table }: { table: { columns: string[]; rows: unknown[][] } }) {
+  const [all, setAll] = useState(false);
+  const rows = all ? table.rows : table.rows.slice(0, 50);
+  return (
+    <div>
+      <div className="max-h-80 overflow-auto rounded-lg border hairline">
+        <table className="w-full border-collapse text-[11px]">
+          <thead className="sticky top-0 bg-zinc-100/95 backdrop-blur dark:bg-zinc-900/95">
+            <tr>
+              {table.columns.map((column) => (
+                <th key={column}
+                  className="whitespace-nowrap border-b px-2.5 py-1.5 text-left font-mono font-semibold hairline dim">
+                  {column}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} className="even:bg-zinc-50/60 dark:even:bg-white/[0.02]">
+                {row.map((cell, j) => (
+                  <td key={j} className={cls('max-w-[22rem] truncate px-2.5 py-1 font-mono dim',
+                    typeof cell === 'number' && 'text-right tabular-nums')}
+                    title={cell === null ? '' : String(cell)}>
+                    {cell === null ? <span className="dimmer">null</span> : String(cell)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-1 flex items-center gap-2 text-2xs dimmer">
+        <span>{table.rows.length} row{table.rows.length > 1 ? 's' : ''} × {table.columns.length} columns</span>
+        {table.rows.length > 50 && (
+          <button onClick={() => setAll((v) => !v)}
+            className="focus-ring rounded px-1 hover:text-zinc-700 dark:hover:text-zinc-200">
+            {all ? 'Show first 50' : `Show all ${table.rows.length}`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
   const [open, setOpen] = useState(false);
   const Icon = toolIcon(block);
   const running = block.status === 'running' || block.status === 'awaiting_approval';
   const failed = block.ok === false;
   const denied = block.status === 'denied' || block.status === 'expired';
+  const blocked = block.status === 'blocked';
+  const flagged = (block.injection?.length ?? 0) > 0;
+  const table = useMemo(
+    () => (open && !failed ? asTable((block.text || '').trim()) : null),
+    [open, failed, block.text]);
 
   return (
-    <div className="my-1.5">
+    <div className="my-1.5" id={cite && block.ref ? `${cite}${block.ref.slice(1)}` : undefined}>
       <button onClick={() => setOpen((v) => !v)}
         className={cls('focus-ring group flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors',
-          failed ? 'border-red-300/60 bg-red-50/50 dark:border-red-500/25 dark:bg-red-500/[0.07]'
-                 : 'hairline hover:bg-zinc-50 dark:hover:bg-white/[0.04]')}>
+          blocked ? 'border-amber-300/70 bg-amber-50/60 dark:border-amber-500/25 dark:bg-amber-500/[0.07]'
+          : failed ? 'border-red-300/60 bg-red-50/50 dark:border-red-500/25 dark:bg-red-500/[0.07]'
+                   : 'hairline hover:bg-zinc-50 dark:hover:bg-white/[0.04]')}>
         <span className={cls('grid h-5 w-5 shrink-0 place-items-center rounded-md',
           failed ? 'bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400'
                  : denied ? 'bg-zinc-100 text-zinc-500 dark:bg-white/[0.07]'
@@ -135,11 +218,25 @@ function ToolBlock({ block }: { block: Block }) {
           {running ? <Spinner size={11} /> : denied ? <Ban size={11} />
             : failed ? <X size={11} strokeWidth={3} /> : <Icon size={11} />}
         </span>
+        {block.ref && (
+          <span className="shrink-0 font-mono text-2xs text-brand-800/70 dark:text-brand-300/70">
+            {block.ref}
+          </span>
+        )}
         <span className="shrink-0 font-mono text-2xs font-medium text-zinc-700 dark:text-zinc-200">
           {block.name}
         </span>
         {block.by === 'critic' && <Badge tone="brand">critic</Badge>}
         {block.cached && <Badge>already fetched</Badge>}
+        {/* The document tried to give the agent orders. It did not get them — but you
+            should know it tried, because that is a fact about the source. */}
+        {flagged && (
+          <Badge tone="warn" className="gap-1">
+            <ShieldAlert size={9} /> injection blocked
+          </Badge>
+        )}
+        {block.offloaded && <Badge className="gap-1"><Layers size={9} /> saved in full</Badge>}
+        {!!block.redacted && <Badge tone="warn">secret removed</Badge>}
         <span className="min-w-0 flex-1 truncate text-2xs dimmer">
           {running ? argSummary(block.args) : (block.summary || argSummary(block.args))}
         </span>
@@ -156,15 +253,29 @@ function ToolBlock({ block }: { block: Block }) {
               {JSON.stringify(block.args ?? {}, null, 2)}
             </pre>
           </div>
+          {flagged && (
+            <div className="rounded-lg border border-amber-300/70 bg-amber-50/60 px-2.5 py-2 text-2xs leading-relaxed text-amber-900 dark:border-amber-500/25 dark:bg-amber-500/[0.07] dark:text-amber-200">
+              This content contains text shaped like instructions to the agent
+              ({block.injection!.join(', ')}). It was fenced as data and reported, not obeyed.
+            </div>
+          )}
+          {block.offloaded && (
+            <p className="text-2xs dimmer">
+              Full result saved to <code className="font-mono">{block.offloaded}</code> —
+              the agent kept an excerpt in context and can read the rest on demand.
+            </p>
+          )}
           {(block.text || block.summary) && (
             <div>
               <div className="mb-1 text-2xs font-semibold uppercase tracking-wider dimmer">
                 {failed ? 'Error' : 'Result'}
               </div>
-              <pre className={cls('max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed',
-                failed ? 'text-red-600 dark:text-red-400' : 'dim')}>
-                {(block.text || block.summary || '').slice(0, 6000)}
-              </pre>
+              {table ? <ResultTable table={table} /> : (
+                <pre className={cls('max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed',
+                  failed ? 'text-red-600 dark:text-red-400' : 'dim')}>
+                  {(block.text || block.summary || '').slice(0, 6000)}
+                </pre>
+              )}
             </div>
           )}
         </div>
@@ -223,7 +334,7 @@ export function ApprovalCard({
 
 /* ---------------------------------------------------------------- message */
 
-function Blocks({ blocks, live }: { blocks: Block[]; live: boolean }) {
+function Blocks({ blocks, live, cite }: { blocks: Block[]; live: boolean; cite?: string }) {
   const lastIndex = blocks.length - 1;
   return (
     <>
@@ -231,11 +342,13 @@ function Blocks({ blocks, live }: { blocks: Block[]; live: boolean }) {
         if (block.type === 'thinking') {
           return <ThinkingBlock key={`b${block.index}`} block={block} live={live && i === lastIndex} />;
         }
-        if (block.type === 'tool') return <ToolBlock key={`b${block.index}`} block={block} />;
+        if (block.type === 'tool') {
+          return <ToolBlock key={`b${block.index}`} block={block} cite={cite} />;
+        }
         if (!(block.text || '').trim()) return null;
         return (
           <div key={`b${block.index}`} className={cls(block.superseded && 'hidden')}>
-            <Markdown text={block.text ?? ''} />
+            <Markdown text={block.text ?? ''} cite={cite} />
           </div>
         );
       })}
@@ -247,10 +360,55 @@ const PHASES: Record<string, string> = {
   starting: 'Starting',
   thinking: 'Thinking',
   checking: 'Checking',
+  compacting: 'Compressing context',
   writing: 'Writing',
   cancelled: 'Stopped',
   done: '',
 };
+
+/**
+ * One line, only when there is something to say: this answer read things from outside.
+ *
+ * Not a warning — reading the web is the job. It is provenance, in the place where a
+ * reader decides how much weight to give an answer, and it expands into exactly which
+ * sources and whether any of them tried to give the agent orders.
+ */
+function TrustLine({ trust }: { trust: NonNullable<Message['trust']> }) {
+  const [open, setOpen] = useState(false);
+  const flagged = trust.injections.length > 0;
+  if (!trust.sources.length && !flagged && !trust.compactions) return null;
+  return (
+    <div className="mt-2.5">
+      <button onClick={() => setOpen((v) => !v)}
+        className={cls('focus-ring inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-2xs transition-colors',
+          flagged ? 'text-amber-600 dark:text-amber-400' : 'dimmer hover:text-zinc-600 dark:hover:text-zinc-300')}>
+        {flagged ? <ShieldAlert size={11} /> : <ShieldQuestion size={11} />}
+        {flagged
+          ? `${trust.injections.length} source tried to instruct the agent`
+          : `read ${trust.sources.length} outside source${trust.sources.length > 1 ? 's' : ''}`}
+        <ChevronRight size={10} className={cls('transition-transform', open && 'rotate-90')} />
+      </button>
+      {open && (
+        <div className="mt-1.5 space-y-1 border-l-2 border-zinc-200 pl-3 text-2xs leading-relaxed dim dark:border-white/10 animate-fade-in">
+          {trust.sources.length > 0 && (
+            <p>Content entered this answer from: <b>{trust.sources.join(', ')}</b>. It was
+              fenced as data — the agent could read it, not take orders from it.</p>
+          )}
+          {trust.injections.map((hit, i) => (
+            <p key={i} className="text-amber-700 dark:text-amber-400">
+              <b>{hit.tool}</b> returned text shaped like instructions ({hit.patterns.join(', ')}).
+              Reported, not obeyed.
+            </p>
+          ))}
+          {trust.compactions > 0 && (
+            <p>The transcript was compressed {trust.compactions}× to fit the context window;
+              the question and the standing rules were carried through verbatim.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function AssistantTurn({
   message, live, phase, approval, onApprove, approving, notices, error,
@@ -268,7 +426,7 @@ export function AssistantTurn({
   return (
     <div className="animate-fade-up">
       {(message.plan?.length ?? 0) > 0 && <PlanCard steps={message.plan!} live={live} />}
-      <Blocks blocks={blocks} live={!!live} />
+      <Blocks blocks={blocks} live={!!live} cite={`ev-${message.id}-`} />
 
       {live && !blocks.length && (
         <div className="flex items-center gap-2 py-2 text-xs dim">
@@ -295,6 +453,7 @@ export function AssistantTurn({
         </div>
       )}
 
+      {!live && message.trust && <TrustLine trust={message.trust} />}
       {!live && <TurnFooter message={message} />}
     </div>
   );
@@ -306,6 +465,11 @@ function TurnFooter({ message }: { message: Message }) {
     .filter((b) => b.type === 'text' && !b.superseded)
     .map((b) => b.text ?? '').join('\n\n') || message.content;
   const interrupted = message.status === 'cancelled' || message.status === 'failed';
+  // Cached prefixes are the difference between a 2-second and a 30-second turn, and the
+  // provider reports them nowhere else: what we sent, minus what it re-read.
+  const reuse = usage.prompt_sent && usage.prompt_evaluated && usage.prompt_sent > 400
+    ? Math.max(0, Math.round((1 - usage.prompt_evaluated / usage.prompt_sent) * 100))
+    : null;
   if (!answer.trim() && !interrupted) return null;
   return (
     <div className={cls('mt-2.5 flex items-center gap-3 text-2xs dimmer transition-opacity duration-200',
@@ -321,7 +485,45 @@ function TurnFooter({ message }: { message: Message }) {
       {message.model && <span className="font-mono">{message.model}</span>}
       {!!usage.tool_calls && <span>{usage.tool_calls} tool{usage.tool_calls > 1 ? 's' : ''}</span>}
       {!!usage.tokens_out && <span>{usage.tokens_in}→{usage.tokens_out} tok</span>}
+      {!!usage.ttft_ms && <span title="Time to the first token">{(usage.ttft_ms / 1000).toFixed(1)}s to first word</span>}
+      {reuse !== null && (
+        <span title={`${usage.prompt_evaluated} of ${usage.prompt_sent} prompt tokens were re-read; the rest came from the provider's cache.`}>
+          {reuse}% prompt reused
+        </span>
+      )}
+      {!!usage.masked_chars && (
+        <span title="Old tool results collapsed to their summaries to keep the window open.">
+          {Math.round(usage.masked_chars / 1000)}k chars masked
+        </span>
+      )}
+      <ContextMeter usage={usage} />
     </div>
+  );
+}
+
+/**
+ * How full the window was when this answer was written.
+ *
+ * Compaction is the moment an agent silently forgets things, and it arrives without
+ * warning unless someone is watching this number. Shown only past half-full: below that
+ * it is noise.
+ */
+function ContextMeter({ usage }: { usage: Usage }) {
+  const limit = usage.context_limit ?? 0;
+  const used = usage.context_tokens ?? 0;
+  if (!limit || !used) return null;
+  const share = Math.min(1, used / limit);
+  if (share < 0.5) return null;
+  return (
+    <span className="flex items-center gap-1.5"
+      title={`${used.toLocaleString()} of ${limit.toLocaleString()} tokens. Past ~90% the oldest turns are summarised away.`}>
+      <span className="h-1 w-8 overflow-hidden rounded-full bg-zinc-200 dark:bg-white/10">
+        <span className={cls('block h-full rounded-full transition-[width] duration-500',
+          share > 0.9 ? 'bg-red-500' : share > 0.75 ? 'bg-amber-500' : 'bg-brand-500')}
+          style={{ width: `${Math.round(share * 100)}%` }} />
+      </span>
+      {Math.round(share * 100)}% context
+    </span>
   );
 }
 
@@ -342,12 +544,80 @@ function CopyAnswer({ text }: { text: string }) {
   );
 }
 
-export function UserTurn({ message }: { message: Message }) {
+export function UserTurn({ message, onRetry, busy }: {
+  message: Message;
+  /** Ask again, optionally reworded. Everything after this question is discarded. */
+  onRetry?: (text: string) => void;
+  busy?: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
+  const area = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    setDraft(message.content);
+    const handle = requestAnimationFrame(() => {
+      const el = area.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+      el.style.height = `${el.scrollHeight}px`;
+    });
+    return () => cancelAnimationFrame(handle);
+  }, [editing, message.content]);
+
+  if (editing) {
+    const submit = () => {
+      const text = draft.trim();
+      if (!text) return;
+      setEditing(false);
+      onRetry?.(text);
+    };
+    return (
+      <div className="animate-fade-up rounded-xl border px-3 py-2.5 hairline bg-zinc-50/60 dark:bg-white/[0.03]">
+        <textarea ref={area} value={draft}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            e.target.style.height = 'auto';
+            e.target.style.height = `${e.target.scrollHeight}px`;
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setEditing(false);
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+          }}
+          className="w-full resize-none bg-transparent text-[17px] font-medium leading-snug tracking-[-0.011em] outline-none text-zinc-900 dark:text-white" />
+        <div className="mt-2 flex items-center justify-end gap-2">
+          <button onClick={() => setEditing(false)}
+            className="focus-ring rounded px-2 py-1 text-2xs dim hover:text-zinc-700 dark:hover:text-zinc-200">
+            Cancel
+          </button>
+          <Button size="sm" onClick={submit} disabled={!draft.trim()}>Ask again</Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="animate-fade-up">
+    <div className="group/ask animate-fade-up">
       <p className="whitespace-pre-wrap text-[17px] font-medium leading-snug tracking-[-0.011em] text-zinc-900 dark:text-white">
         {message.content}
       </p>
+      {onRetry && (
+        <div className="mt-1 flex items-center gap-2 text-2xs dimmer opacity-0 transition-opacity duration-200 group-hover/ask:opacity-100 focus-within:opacity-100">
+          {/* Rewording the question and trying again is the commonest thing anyone wants
+              from a transcript — and starting a new conversation to do it throws away the
+              context that made the question make sense. */}
+          <button disabled={busy} onClick={() => setEditing(true)}
+            className="focus-ring flex items-center gap-1 rounded px-1 py-0.5 hover:text-zinc-700 disabled:opacity-50 dark:hover:text-zinc-200">
+            <Pencil size={10} /> Edit
+          </button>
+          <button disabled={busy} onClick={() => onRetry(message.content)}
+            className="focus-ring flex items-center gap-1 rounded px-1 py-0.5 hover:text-zinc-700 disabled:opacity-50 dark:hover:text-zinc-200">
+            <RotateCcw size={10} /> Retry
+          </button>
+        </div>
+      )}
       {(message.images?.length ?? 0) > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {message.images!.map((img, i) => (

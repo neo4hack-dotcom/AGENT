@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.memory import Memory
+from app.agent.skills import Skills
+from app.audit import AuditLog
 from app.config import Settings, settings as env_settings
 from app.events import EventBus
 from app.llm.provider import LLMProvider, make_provider
@@ -29,6 +31,7 @@ OVERRIDABLE = {
     "run_timeout_s", "tool_timeout_s", "enable_python_tool", "enable_web_tools",
     "python_timeout_s", "python_memory_mb", "num_ctx", "critic_min_tools",
     "history_turns", "parallel_max_fanout", "stagnation_limit", "max_retries",
+    "tool_budget", "subagent_iterations", "subagent_timeout_s",
     "web_timeout_s", "mcp_call_timeout_s", "mcp_startup_timeout_s",
     "approval_timeout_s",
 }
@@ -53,7 +56,11 @@ class Container:
         self.settings = _SettingsProxy(self)
         self.store = JsonStore(env_settings.db_path)
         self.bus = EventBus()
-        self.memory = Memory(self.store)
+        self.memory = Memory(self.store, env_settings.memory_path)
+        self.audit = AuditLog(env_settings.audit_path)
+        # Skills share the memory database: both are things the agent keeps, and
+        # one file is one thing to back up.
+        self.skills = Skills(self.memory._db, self.store)
         self.mcp = McpRegistry(self.store, self.bus, self.settings)
         self._llm: LLMProvider | None = None
         self._fast_llm: LLMProvider | None = None
@@ -75,6 +82,29 @@ class Container:
         if key in prefs:
             return prefs[key]
         return EXTRA_DEFAULTS.get(key)
+
+    def secret_values(self) -> list[str]:
+        """Every credential this app holds, so a tool reply carrying one can be caught.
+
+        These values are given to server *processes*, never to the model. If one comes
+        back through a reply, something is echoing an environment it should not see — or
+        the reply is crafted to put it in front of the model, which is the first step of
+        every credential-theft chain an agent can be talked into.
+        """
+        found: list[str] = []
+        for server in self.store.mcp_servers().values():
+            for section in ("env", "headers"):
+                for value in (server.get(section) or {}).values():
+                    text = str(value).strip()
+                    if len(text) >= 8:
+                        found.append(text)
+                        # A bearer header is a wrapper around the secret, not the secret.
+                        if text.lower().startswith("bearer "):
+                            found.append(text[7:].strip())
+        password = (self.env.admin_password or "").strip()
+        if len(password) >= 8:
+            found.append(password)
+        return found
 
     def workspace(self) -> Path:
         path = Path(self.env.workspace_dir).expanduser()

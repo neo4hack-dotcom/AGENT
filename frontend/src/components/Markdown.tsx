@@ -17,13 +17,40 @@ import { CopyButton, cls } from './ui';
 // The 【…】 alternative is not decoration: some models (gpt-oss among them) cite sources
 // with CJK lenticular brackets around a bare URL. Left alone they render as literal
 // punctuation wrapped around a link, which looks like a rendering bug in every answer.
-const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|\[[^\]]*\]\([^)\s]+\)|【[^】]+】|https?:\/\/[^\s<>()]+)/g;
+const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|\[[^\]]*\]\([^)\s]+\)|[[【]#\d{1,3}[\]】]|【[^】]+】|https?:\/\/[^\s<>()]+)/g;
 
 /** Plain text, with soft line breaks turned into real ones. */
 function withBreaks(text: string, key: string): ReactNode[] {
   const lines = text.split('\n');
   return lines.flatMap((line, i) =>
     i === 0 ? [line] : [<br key={`${key}-br${i}`} />, line]);
+}
+
+/** Where citations point. Set per message so `#1` in one answer never jumps into another. */
+let citePrefix = '';
+
+function Citation({ label }: { label: string }) {
+  // `label` arrives as `[#2]`; the anchor is built from the number alone.
+  const target = `${citePrefix}${label.replace(/[[\]#]/g, '')}`;
+  return (
+    <a
+      href={`#${target}`}
+      title="Show the tool call this came from"
+      onClick={(event) => {
+        // Scroll and flash rather than navigate: the evidence is a few lines up, and
+        // losing the reader's place to prove a number defeats the purpose.
+        const node = document.getElementById(target);
+        if (!node) return;
+        event.preventDefault();
+        node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        node.classList.add('evidence-flash');
+        setTimeout(() => node.classList.remove('evidence-flash'), 1400);
+      }}
+      className="mx-0.5 inline-flex -translate-y-[0.15em] items-center rounded px-1 align-baseline font-mono text-[0.62em] font-medium text-brand-800 no-underline ring-1 ring-brand-500/25 transition-colors hover:bg-brand-100 dark:text-brand-300 dark:ring-brand-400/25 dark:hover:bg-brand-500/15"
+    >
+      {label.slice(1, -1)}
+    </a>
+  );
 }
 
 function renderInline(text: string, key: string): ReactNode[] {
@@ -52,6 +79,9 @@ function renderInline(text: string, key: string): ReactNode[] {
     }
     const link = /^\[([^\]]*)\]\(([^)\s]+)\)$/.exec(part);
     if (link) return <Link key={k} href={link[2]}>{link[1] || link[2]}</Link>;
+    // Some models wrap citations in lenticular brackets of their own accord; the label is
+    // the same either way and the reader should not have to know the difference.
+    if (/^[[【]#\d{1,3}[\]】]$/.test(part)) return <Citation key={k} label={part} />;
     const bracketed = /^【\s*(https?:\/\/[^\s】]+)\s*】$/.exec(part);
     if (bracketed) return <Link key={k} href={bracketed[1]}>{prettyUrl(bracketed[1])}</Link>;
     if (part.startsWith('【')) return <span key={k}>{part.slice(1, -1)}</span>;
@@ -154,7 +184,12 @@ function splitRow(line: string): string[] {
   return line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
 }
 
-export function Markdown({ text, className }: { text: string; className?: string }) {
+export function Markdown({ text, className, cite }: {
+  text: string; className?: string;
+  /** Prefix for citation anchors, unique per message. */
+  cite?: string;
+}) {
+  citePrefix = cite ?? '';
   const lines = (text || '').split('\n');
   const blocks: ReactNode[] = [];
   let list: { ordered: boolean; items: string[] } | null = null;

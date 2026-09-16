@@ -77,6 +77,13 @@ Length follows the question: one line for one line, depth where depth was asked 
 When you used the web, link the source inline where the claim is made, as a markdown \
 link — `[label](url)`, never a bare URL in brackets.
 
+**Cite your evidence.** Every tool result arrives labelled `[#1]`, `[#2]`, and so on. When \
+a figure, a name, a date or a quotation in your answer came from one, put its label right \
+after it: `revenue was 412,500 EUR [#2]`. The reader can then open the exact call that \
+established it. Cite only labels that exist, cite the one the value actually came from, and \
+leave your own reasoning uncited — an uncited sentence is a claim you are making yourself, \
+which is a useful thing for the reader to be able to see.
+
 {tools_block}{memory_block}"""
 
 TOOLS_HEADER = """## Tools available to you right now
@@ -156,15 +163,28 @@ def synthesis_prompt(question: str, evidence: str) -> str:
             f"# Now\nWrite the answer.")
 
 
-def system_prompt(model: str, catalog: str, memory_block: str, host: str = "this machine") -> str:
+def system_prompt(model: str, catalog: str, memory_block: str, host: str = "this machine",
+                  identity: str = "") -> str:
+    """The stable half of the system prompt.
+
+    Ordering here is a performance decision, not a stylistic one. A provider serves a
+    prompt from its cached prefix only up to the first byte that differs, so anything
+    that changes per run — a nonce, recalled memories, matching skills — must come *after*
+    everything that does not. Put the nonce at the top and the cache hit rate is zero,
+    every run, for a string nobody reads.
+
+    So: who the agent is, how it works, what it can call. Volatile blocks are appended by
+    the caller, in `volatile_suffix`.
+    """
     tools_block = TOOLS_HEADER.format(catalog=catalog) if catalog.strip() else NO_TOOLS_NOTE
-    return SYSTEM.format(
+    head = f"{identity.strip()}\n\n" if identity.strip() else ""
+    return head + SYSTEM.format(
         model=model or "a local model",
         today=datetime.now().strftime("%A %d %B %Y"),
         user_host=host,
         tools_block=tools_block,
-        memory_block=memory_block or "",
-    )
+        memory_block="",
+    ) + (memory_block or "")
 
 
 def rewrite_instruction(question: str) -> str:

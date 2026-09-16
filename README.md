@@ -118,6 +118,19 @@ latency:
   model shown its own plan as "evidence" reports every step as done, which is how a run that
   wrote no file ends up claiming it wrote *and verified* one.
 
+### The trust layer
+
+Content the agent reads is not content the agent trusts. Every tool result is stripped of
+known secrets, scanned for manipulation, marked as having come from outside, and fenced
+with a per-run nonce the system prompt declares — so a page can be summarised without being
+obeyed. Once a run has read something foreign, the one capability with irreversible reach
+outside this machine stops being automatic; the rest are held precisely, by an egress policy
+that knows whose idea each host was and by a kernel sandbox that denies `run_python` the
+network outright. Facts the agent learns while reading are quarantined until you confirm
+them, and every action lands in a hash-chained log that cannot hide being edited.
+
+[`SECURITY.md`](SECURITY.md) is the whole model, including what it does not claim.
+
 ### Honesty before completeness
 
 The principle above all others: **a failure stays visible**. A tool that fails says so, a
@@ -213,6 +226,21 @@ than an opaque import error.
   unclosed code fence, a half-written table. No `dangerouslySetInnerHTML`, and hrefs are
   restricted to http(s)/mailto so a `javascript:` link repeated from a scraped page never
   reaches the DOM.
+- **Context is engineered, not just filled.** Only the tools a turn plausibly needs are put
+  in front of the model — the rest stay reachable through `find_tools` — and an oversized
+  tool result is parked in the workspace with a handle left in its place. When the
+  transcript still outgrows the window it is compacted, with the question and the standing
+  rules copied through **verbatim**: measurements of long-horizon agents show safety
+  constraints do not survive summarisation, because a compressor optimising for continuity
+  has no reason to keep a rule competing for a shrinking budget.
+- **Answers cite their evidence.** Every tool result is labelled `#1`, `#2`…; the answer
+  puts the label after the value it produced, and clicking it scrolls to the call that
+  established it. An uncited sentence is the agent's own claim, which is a useful thing to
+  be able to see.
+- **A reader with no hands.** `research` delegates a question to a sub-agent with its own
+  context and only read-only tools. It keeps six pages of sources out of the conversation,
+  and anything hostile in them is talking to something that cannot write, run, send or
+  remember.
 - **Fonts are self-hosted** (Space Grotesk for the wordmark, Inter for everything read —
   72 KB together). A page that phones a font CDN on every load to draw its own name is not a
   local-first app.

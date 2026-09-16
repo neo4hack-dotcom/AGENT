@@ -2,7 +2,8 @@
 // Edited in the same commit as the backend model it mirrors — that is the whole contract.
 
 export type BlockType = 'text' | 'thinking' | 'tool';
-export type ToolStatus = 'running' | 'done' | 'error' | 'denied' | 'expired' | 'awaiting_approval';
+export type ToolStatus =
+  | 'running' | 'done' | 'error' | 'denied' | 'expired' | 'blocked' | 'awaiting_approval';
 
 export interface Block {
   type: BlockType;
@@ -22,6 +23,13 @@ export interface Block {
   cached?: boolean;
   by?: string;
   data?: unknown;
+  /** Short evidence label (`#3`) the answer cites and the reader can follow back. */
+  ref?: string;
+  /** Manipulation patterns found in this result — flagged, never acted on. */
+  injection?: string[];
+  /** Workspace handle when the result was too large to keep in context. */
+  offloaded?: string;
+  redacted?: number;
 }
 
 export interface PlanStep {
@@ -35,6 +43,48 @@ export interface Usage {
   tokens_in?: number;
   tokens_out?: number;
   tool_calls?: number;
+  /** What we sent versus what the provider actually re-read: the cache-hit signal. */
+  prompt_sent?: number;
+  prompt_evaluated?: number;
+  /** Time to the first token of the first turn — what the wait actually feels like. */
+  ttft_ms?: number;
+  /** Characters recovered by masking old tool results. */
+  masked_chars?: number;
+  /** How full the window was on the last turn, not a running total. */
+  context_tokens?: number;
+  context_limit?: number;
+}
+
+export interface Artifact {
+  path: string;
+  name: string;
+  bytes: number;
+  modified: number;
+  kind: string;
+}
+
+export interface SearchHit {
+  conversation_id: string;
+  title: string;
+  role: string;
+  updated_at: number;
+  excerpt: string;
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  trigger: string;
+  body: string;
+  source: string;
+  uses: number;
+  created_at: number;
+}
+
+export interface SkillStats {
+  total: number;
+  learned: number;
+  ready: number;
 }
 
 export interface Message {
@@ -49,6 +99,9 @@ export interface Message {
   error?: string | null;
   model?: string;
   images?: { name: string; mime: string }[];
+  /** What this answer rests on: outside sources read, manipulation attempts, compactions. */
+  trust?: { sources: string[]; injections: { tool: string; patterns: string[] }[];
+            compactions: number };
 }
 
 export interface Conversation {
@@ -122,7 +175,7 @@ export interface Bootstrap {
   admin: AdminState;
   prefs: { approval_mode: string };
   workspace: string;
-  memory_count: number;
+  memory: { total: number; pending: number };
 }
 
 export interface McpServer {
@@ -201,11 +254,38 @@ export interface ModelOption {
 
 export interface MemoryEntry {
   id: string;
+  kind: 'identity' | 'fact';
   text: string;
   source: string;
+  origin: string;
+  /** `quarantined` means it was learned while untrusted content was in context. */
+  status: 'trusted' | 'quarantined';
   created_at: number;
   updated_at: number;
   hits: number;
+}
+
+export interface AuditEntry {
+  ts: number;
+  event: string;
+  hash: string;
+  prev: string;
+  run_id?: string;
+  tool?: string;
+  args?: string;
+  ok?: boolean;
+  ms?: number;
+  tainted?: boolean;
+  status?: string;
+  reason?: string;
+  verdict?: string;
+  injection?: string[] | null;
+}
+
+export interface AuditReport {
+  entries: AuditEntry[];
+  verified: { ok: boolean; entries: number; broken_at: number | null; reason?: string };
+  path: string;
 }
 
 export interface ModelRuntime {
@@ -216,8 +296,24 @@ export interface ModelRuntime {
   context?: number;
 }
 
+export interface RunMetrics {
+  runs: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  llm_calls?: number;
+  tool_calls?: number;
+  calls_per_run?: number;
+  cache_hit?: number;
+  ttft_median_ms?: number;
+  ttft_p90_ms?: number;
+  masked_chars?: number;
+  peak_context?: number;
+  failed?: number;
+}
+
 export interface Diagnostics {
   model: ModelState;
+  runs: RunMetrics;
   mcp: McpSummary;
   runtime: ModelRuntime;
   context_window: number;
@@ -246,7 +342,7 @@ export type StreamEvent =
   | { type: 'thinking.delta'; index: number; text: string }
   | { type: 'plan'; steps: PlanStep[] }
   | { type: 'tool.start'; index: number; id: string; name: string; args: Record<string, unknown>;
-      server: string; kind: 'builtin' | 'mcp'; by?: string }
+      server: string; kind: 'builtin' | 'mcp'; by?: string; ref?: string }
   | { type: 'tool.end'; index: number; id: string; ok: boolean; status: ToolStatus;
       summary: string; ms: number; preview?: string; cached?: boolean }
   | { type: 'approval.request'; call_id: string; index: number; name: string;
@@ -254,7 +350,11 @@ export type StreamEvent =
       expires_in_s: number }
   | { type: 'approval.resolved'; call_id: string; approved: boolean; reason?: string }
   | { type: 'critic'; tool: string; status: string; reason: string; advice: string }
-  | { type: 'usage'; llm_calls: number; tokens_in: number; tokens_out: number; tool_calls: number }
+  | { type: 'taint'; source: string; sources: string[] }
+  | { type: 'injection'; index: number; tool: string; patterns: string[] }
+  | { type: 'offload'; index: number; handle: string; bytes: number }
+  | { type: 'compaction'; turns: number; digest_chars: number; count: number }
+  | ({ type: 'usage' } & Usage)
   | { type: 'notice'; message: string }
   | { type: 'error'; message: string; kind: string }
   | { type: 'done'; status: string; usage: Usage; message_id: string };

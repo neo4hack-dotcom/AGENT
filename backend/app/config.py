@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     app_name: str = "AGENT"
     port: int = 3041
     db_path: str = "data/agent.json"
+    # Memory lives in its own SQLite file: full-text search wants an index, and
+    # the transcript store wants to stay a readable JSON document.
+    memory_path: str = "data/memory.db"
+    # Append-only, hash-chained. See app/audit.py for why the chain is there.
+    audit_path: str = "data/audit.jsonl"
     static_dir: str = ""  # empty => auto-detect ../frontend/dist
 
     # --- The model. Local only, by design: Ollama on this machine. ---
@@ -24,9 +29,11 @@ class Settings(BaseSettings):
     # the `-cloud` tag: it is hosted by Ollama, not by this machine, and the interface
     # says so on every screen rather than letting the "local" claim quietly go stale.
     model: str = "gpt-oss:120b-cloud"
-    # The critic, the gap check and titles — never the answer. A small local model here
-    # keeps those off the network and off the clock.
-    fast_model: str = "qwen3.5:4b"
+    # The critic, the gap check, compaction and titles — never the answer. This one runs
+    # several times per question, so on a machine that cannot hold two models at once it is
+    # what makes the whole app feel slow. Point it at a local model to keep that work on
+    # the machine; the header says which of the two you are running.
+    fast_model: str = ""   # empty => the main model is reused
     llm_timeout_s: int = 900
     num_ctx: int = 0      # 0 => let Ollama use the model's own default
 
@@ -47,6 +54,12 @@ class Settings(BaseSettings):
     approval_timeout_s: int = 300
     parallel_max_fanout: int = 4  # concurrent tool calls in one turn
     history_turns: int = 20       # conversation turns replayed into the prompt
+    # How many MCP tools to put in front of the model per turn. The rest stay
+    # reachable through find_tools; see agent/context.py.
+    tool_budget: int = 28
+    # The quarantined reader's own ceilings, separate from the parent run's.
+    subagent_iterations: int = 6
+    subagent_timeout_s: int = 240
     critic_min_tools: int = 1     # tool calls before the pre-answer reflection runs
 
     # --- Built-in tools ---

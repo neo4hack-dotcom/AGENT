@@ -14,6 +14,7 @@ import re
 import time
 from typing import Any
 
+from app.agent import trust
 from app.errors import McpError
 from app.mcp.protocol import HttpTransport, McpClient, StdioTransport, flatten_tool_result
 from app.store import new_id, now
@@ -295,6 +296,14 @@ class McpRegistry:
                     "read_only": bool(annotations.get("readOnlyHint")),
                     "write": bool(annotations.get("destructiveHint")) or (
                         not annotations.get("readOnlyHint") and is_write_tool(name)),
+                    # Every MCP reply is content this app did not write, so every MCP tool
+                    # reads from outside. Only the ones that change something get the
+                    # capability that taint actually gates.
+                    "capabilities": ([trust.FS_READ, trust.WORLD_WRITE]
+                                     if (bool(annotations.get("destructiveHint"))
+                                         or (not annotations.get("readOnlyHint")
+                                             and is_write_tool(name)))
+                                     else [trust.FS_READ]),
                 })
         return out
 
@@ -320,10 +329,14 @@ class McpRegistry:
         lowered = [t for t in tools if t["name"].lower() == bare.lower()]
         return lowered[0] if len(lowered) == 1 else None
 
-    def ollama_tools(self) -> list[dict]:
-        """The MCP surface rendered as OpenAI-style function definitions Ollama accepts."""
+    def ollama_tools(self, subset: list[dict] | None = None) -> list[dict]:
+        """The MCP surface rendered as OpenAI-style function definitions Ollama accepts.
+
+        `subset` lets the caller offer part of the catalogue — see agent/context.py for why
+        offering all sixty-odd every turn is not free.
+        """
         out = []
-        for tool in self.tools():
+        for tool in (self.tools() if subset is None else subset):
             schema = tool["input_schema"] or {}
             if schema.get("type") != "object":
                 schema = {"type": "object", "properties": {}}

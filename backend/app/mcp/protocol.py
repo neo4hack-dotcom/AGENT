@@ -9,6 +9,7 @@ server's own stderr) instead of an opaque import-time error.
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import os
 import time
@@ -368,4 +369,34 @@ def flatten_tool_result(result: dict) -> tuple[str, Any]:
     text = "\n".join(c for c in chunks if c).strip()
     if structured is not None and not text:
         text = json.dumps(structured, ensure_ascii=False)[:4000]
-    return text, structured
+    return _as_json(text), structured
+
+
+def _as_json(text: str) -> str:
+    """Re-encode a Python repr as JSON, leaving everything else untouched.
+
+    Plenty of servers build their reply with `str(rows)`, which yields `[{'id': 1,
+    'paid': None}]` — single quotes, `None`, `True`. That is not JSON, so nothing
+    downstream can parse it: not the reader's table view, and not the model, which then
+    has to reconstruct the rows by eye. `literal_eval` reads literals only, never code,
+    so this converts the encoding without trusting the source.
+    """
+    stripped = text.strip()
+    if not (stripped[:1] in ("[", "{") and len(stripped) < 200_000):
+        return text
+    try:
+        json.loads(stripped)
+    except ValueError:
+        pass
+    else:
+        return text  # already JSON
+    try:
+        value = ast.literal_eval(stripped)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return text
+    if not isinstance(value, (list, dict)):
+        return text
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return text

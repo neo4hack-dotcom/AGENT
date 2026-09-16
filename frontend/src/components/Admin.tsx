@@ -7,25 +7,32 @@
 // people stop trusting.
 
 import {
-  Activity, Brain, Check, Cpu, Eye, KeyRound, Plug, Settings2, ShieldCheck, Trash2,
-  Wrench, X, Zap,
+  Activity, Brain, Check, Cpu, Eye, FileLock2, GraduationCap, KeyRound, Plug, Settings2,
+  ShieldAlert, ShieldCheck, Sparkles, Trash2, Wrench, X, Zap,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api, setAdminToken } from '../api';
-import type { AdminState, Diagnostics, MemoryEntry, ModelOption, ToolInfo } from '../types';
+import type {
+  AdminState, AuditReport, Diagnostics, MemoryEntry, ModelOption, RunMetrics, Skill,
+  SkillStats, ToolInfo,
+} from '../types';
 import { McpLibrary } from './McpLibrary';
 import {
-  Badge, Button, Dot, Empty, Field, IconButton, Input, Switch, cls, useConfirm, useToast,
+  Badge, Button, Dot, Empty, Field, IconButton, Input, Switch, cls, useConfirm,
+  useToast,
 } from './ui';
 
-type Tab = 'model' | 'mcp' | 'tools' | 'guardrails' | 'memory' | 'diagnostics';
+type Tab = 'model' | 'mcp' | 'tools' | 'guardrails' | 'identity' | 'memory' | 'audit'
+  | 'diagnostics';
 
 const TABS: { id: Tab; label: string; icon: typeof Cpu }[] = [
   { id: 'model', label: 'Model', icon: Cpu },
   { id: 'mcp', label: 'MCP servers', icon: Plug },
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'guardrails', label: 'Guardrails', icon: ShieldCheck },
+  { id: 'identity', label: 'Identity', icon: Sparkles },
   { id: 'memory', label: 'Memory', icon: Brain },
+  { id: 'audit', label: 'Audit', icon: FileLock2 },
   { id: 'diagnostics', label: 'Diagnostics', icon: Activity },
 ];
 
@@ -73,7 +80,9 @@ export function Admin({
               {tab === 'mcp' && <McpLibrary onChanged={onChanged} />}
               {tab === 'tools' && <ToolsPanel />}
               {tab === 'guardrails' && <GuardrailsPanel onChanged={onChanged} />}
+              {tab === 'identity' && <IdentityPanel />}
               {tab === 'memory' && <MemoryPanel />}
+              {tab === 'audit' && <AuditPanel />}
               {tab === 'diagnostics' && <DiagnosticsPanel />}
             </div>
           </main>
@@ -407,19 +416,204 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
 
 /* ----------------------------------------------------------------- memory */
 
+/**
+ * Who the agent is, and what it has learned to do.
+ *
+ * Two things live here because they are the same thing at two time scales. Identity is
+ * what you tell it once and never again; skills are what it works out for itself after
+ * doing the same job enough times to be sure of the shape.
+ */
+function IdentityPanel() {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [soul, setSoul] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [stats, setStats] = useState<SkillStats | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState('');
+  const [trigger, setTrigger] = useState('');
+  const [body, setBody] = useState('');
+
+  const loadSkills = async () => {
+    const data = await api.skills();
+    setSkills(data.skills);
+    setStats(data.stats);
+  };
+  useEffect(() => {
+    void (async () => {
+      const [identity] = await Promise.all([api.soul(), loadSkills()]);
+      setSoul(identity.text);
+      setDraft(identity.text);
+    })();
+  }, []);
+
+  if (soul === null) return <PanelSkeleton />;
+  const dirty = draft !== soul;
+
+  return (
+    <div className="space-y-6">
+      <section>
+        <h3 className="mb-1 text-xs font-semibold">Standing instructions</h3>
+        <p className="mb-2.5 text-xs leading-relaxed dim">
+          The first thing in every system prompt, before the tools and before the memory.
+          Yours alone — nothing the agent reads can change it, which is what makes it the
+          one place a preference can be stated once instead of retyped every conversation.
+        </p>
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={7}
+          maxLength={4000}
+          placeholder={'Answer in French unless I write in English.\nPrefer SQL over pandas for anything a database can do.\nWhen you are unsure, say so in one line instead of hedging for a paragraph.'}
+          className="focus-ring w-full resize-y rounded-xl border bg-white px-3 py-2.5 font-mono text-[11px] leading-relaxed hairline outline-none dark:bg-black/20" />
+        <div className="mt-2 flex items-center gap-2">
+          <Button size="sm" busy={saving} disabled={!dirty}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                const saved = await api.setSoul(draft);
+                setSoul(saved.text); setDraft(saved.text); toast('Identity saved');
+              } catch (e) { toast(String((e as Error).message), 'error'); }
+              finally { setSaving(false); }
+            }}>Save</Button>
+          {dirty && (
+            <button onClick={() => setDraft(soul)}
+              className="focus-ring rounded px-1.5 py-1 text-2xs dim hover:text-zinc-700 dark:hover:text-zinc-200">
+              Revert
+            </button>
+          )}
+          <span className="ml-auto text-2xs dimmer">{draft.length}/4000</span>
+        </div>
+      </section>
+
+      <section>
+        <div className="mb-1 flex items-center gap-2">
+          <h3 className="text-xs font-semibold">Skills</h3>
+          {stats && stats.learned > 0 && (
+            <Badge tone="brand">{stats.learned} learned on its own</Badge>
+          )}
+          <Button size="xs" variant="ghost" className="ml-auto"
+            onClick={() => setAdding((v) => !v)}>{adding ? 'Cancel' : 'Add'}</Button>
+        </div>
+        <p className="mb-2.5 text-xs leading-relaxed dim">
+          Procedures, not facts — <em>how</em> to do a job this agent does often. It writes
+          these itself after finishing the same shape of work three times; the recipe is
+          then recalled the next time a question looks like that one.
+        </p>
+
+        {adding && (
+          <div className="mb-3 space-y-2 rounded-xl border p-3 hairline animate-fade-in">
+            <Field label="Name">
+              <Input value={name} onChange={(e) => setName(e.target.value)}
+                placeholder="Weekly sales report" />
+            </Field>
+            <Field label="Use it when" hint="A sentence describing the questions this applies to.">
+              <Input value={trigger} onChange={(e) => setTrigger(e.target.value)}
+                placeholder="Asked for revenue or order totals over a period" />
+            </Field>
+            <Field label="Procedure">
+              <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={5}
+                placeholder={'1. Read orders from shop.db with sqlite__read_query.\n2. Group by week, sum total_eur, exclude cancelled.\n3. Chart it with pandas and save the PNG to the workspace.'}
+                className="focus-ring w-full resize-y rounded-xl border bg-white px-3 py-2.5 font-mono text-[11px] leading-relaxed hairline outline-none dark:bg-black/20" />
+            </Field>
+            <Button size="sm" disabled={!name.trim() || !body.trim()}
+              onClick={async () => {
+                try {
+                  await api.addSkill({ name: name.trim(), trigger: trigger.trim(), body: body.trim() });
+                  setName(''); setTrigger(''); setBody(''); setAdding(false);
+                  await loadSkills(); toast('Skill added');
+                } catch (e) { toast(String((e as Error).message), 'error'); }
+              }}>Save skill</Button>
+          </div>
+        )}
+
+        {skills.length === 0 ? (
+          <Empty icon={GraduationCap} title="No skills yet"
+            hint="Give the agent the same kind of job a few times and it will write the procedure down by itself." />
+        ) : (
+          <div className="space-y-1.5">
+            {skills.map((skill) => (
+              <details key={skill.id}
+                className="group rounded-xl border px-3 py-2 hairline [&[open]]:bg-zinc-50/60 dark:[&[open]]:bg-white/[0.03]">
+                <summary className="flex cursor-pointer list-none items-center gap-2">
+                  <GraduationCap size={12} className="shrink-0 dimmer" />
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{skill.name}</span>
+                  {skill.source === 'learned' && <Badge tone="brand">learned</Badge>}
+                  {skill.uses > 0 && <span className="text-2xs dimmer">used {skill.uses}×</span>}
+                  <IconButton icon={Trash2} label="Forget" size={12} className="h-6 w-6"
+                    onClick={async (e) => {
+                      e.preventDefault();
+                      if (await confirm({ title: `Forget “${skill.name}”?`, danger: true,
+                                          confirmLabel: 'Forget' })) {
+                        await api.forgetSkill(skill.id); await loadSkills();
+                      }
+                    }} />
+                </summary>
+                {skill.trigger && (
+                  <p className="mt-1.5 text-2xs leading-relaxed dimmer">When: {skill.trigger}</p>
+                )}
+                <pre className="mt-1.5 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed dim">
+                  {skill.body}
+                </pre>
+              </details>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function MemoryPanel() {
   const confirm = useConfirm();
+  const toast = useToast();
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [draft, setDraft] = useState('');
   const load = async () => setEntries(await api.listMemory());
   useEffect(() => { void load(); }, []);
 
+  const quarantined = entries.filter((e) => e.status === 'quarantined');
+  const trusted = entries.filter((e) => e.status !== 'quarantined');
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <p className="text-xs leading-relaxed dim">
-        What the agent has kept about you, from one conversation to the next. It writes here
-        itself when it judges a fact durable; you can add and remove freely.
+        What the agent has kept about you, from one conversation to the next. Searched
+        full-text, so it stays useful as it grows.
       </p>
+
+      {quarantined.length > 0 && (
+        <section className="rounded-xl border border-amber-300/70 bg-amber-50/60 p-3.5 dark:border-amber-500/25 dark:bg-amber-500/[0.07]">
+          <h3 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-amber-900 dark:text-amber-200">
+            <ShieldAlert size={13} /> Waiting for you ({quarantined.length})
+          </h3>
+          {/* Memory is the one part of an agent that outlives the conversation, which makes
+              it the part worth attacking: persuade it to remember something once and the
+              instruction returns, trusted, in every later run. So a fact learned while
+              untrusted content was in context waits here. */}
+          <p className="mb-3 text-2xs leading-relaxed text-amber-800/80 dark:text-amber-200/70">
+            The agent learned these while it had content from outside in context — a web page,
+            a file, a server reply. They are not recalled and never reach a prompt until you
+            say they are true.
+          </p>
+          <div className="space-y-1.5">
+            {quarantined.map((entry) => (
+              <div key={entry.id} className="flex items-start gap-2 rounded-lg bg-white/70 px-3 py-2 dark:bg-black/25">
+                <span className="min-w-0 flex-1 text-xs leading-relaxed">{entry.text}</span>
+                <Button size="xs" icon={Check} onClick={async () => {
+                  await api.confirmMemory(entry.id); await load(); toast('Kept');
+                }}>Keep</Button>
+                <Button size="xs" variant="ghost" icon={Trash2} onClick={async () => {
+                  await api.forgetMemory(entry.id); await load();
+                }}>Discard</Button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       <div className="flex gap-2">
         <Input value={draft} onChange={(e) => setDraft(e.target.value)}
           placeholder="One fact worth keeping, in a sentence…"
@@ -431,13 +625,15 @@ function MemoryPanel() {
           Add
         </Button>
       </div>
-      {entries.length === 0 ? (
+
+      {trusted.length === 0 ? (
         <Empty icon={Brain} title="Nothing remembered yet" />
       ) : (
         <div className="space-y-1.5">
-          {entries.map((entry) => (
+          {trusted.map((entry) => (
             <div key={entry.id} className="group flex items-start gap-2.5 rounded-xl border px-3 py-2.5 hairline">
               <span className="min-w-0 flex-1 text-xs leading-relaxed">{entry.text}</span>
+              {entry.kind === 'identity' && <Badge tone="brand">identity</Badge>}
               <Badge>{entry.source === 'user' ? 'you' : 'agent'}</Badge>
               <button onClick={async () => {
                 if (await confirm({ title: 'Forget this?', danger: true, confirmLabel: 'Forget' })) {
@@ -450,6 +646,62 @@ function MemoryPanel() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function AuditPanel() {
+  const [report, setReport] = useState<AuditReport | null>(null);
+  useEffect(() => { void api.audit(300).then(setReport); }, []);
+  if (!report) return <PanelSkeleton />;
+  const { verified } = report;
+  return (
+    <div className="space-y-4">
+      <p className="text-xs leading-relaxed dim">
+        Every action the agent took, in order. Each line carries the hash of the one before
+        it — the log cannot stop someone editing it, but it cannot hide that they did.
+      </p>
+      <div className={cls('flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-xs',
+        verified.ok ? 'border-emerald-300/60 bg-emerald-50/50 dark:border-emerald-500/25 dark:bg-emerald-500/[0.07]'
+                    : 'border-red-300/70 bg-red-50/60 dark:border-red-500/25 dark:bg-red-500/[0.07]')}>
+        <FileLock2 size={14} className={cls('mt-px shrink-0',
+          verified.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600')} />
+        <span className={verified.ok ? 'text-emerald-900 dark:text-emerald-200' : 'text-red-800 dark:text-red-300'}>
+          {verified.ok
+            ? `Chain intact across ${verified.entries} entries.`
+            : `Chain broken at entry ${verified.broken_at}: ${verified.reason}. Everything after that point was written after the log was altered.`}
+        </span>
+      </div>
+      <div className="overflow-hidden rounded-xl border hairline">
+        <table className="w-full text-left text-2xs">
+          <thead className="bg-zinc-50 dark:bg-white/[0.04]">
+            <tr>
+              <th className="px-3 py-2 font-semibold">When</th>
+              <th className="px-3 py-2 font-semibold">Event</th>
+              <th className="px-3 py-2 font-semibold">Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...report.entries].reverse().slice(0, 120).map((entry) => (
+              <tr key={entry.hash} className="border-t hairline align-top">
+                <td className="whitespace-nowrap px-3 py-1.5 font-mono dimmer">
+                  {new Date(entry.ts * 1000).toLocaleTimeString()}
+                </td>
+                <td className="whitespace-nowrap px-3 py-1.5">
+                  <span className="font-mono">{entry.event}</span>
+                  {entry.tainted && <Badge tone="warn" className="ml-1.5">tainted</Badge>}
+                  {entry.injection && <Badge tone="bad" className="ml-1.5">injection</Badge>}
+                </td>
+                <td className="px-3 py-1.5 font-mono dim">
+                  {[entry.tool, entry.status, entry.verdict, entry.args, entry.reason]
+                    .filter(Boolean).join(' · ').slice(0, 140)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-2xs dimmer">Written to <code className="font-mono">{report.path}</code>.</p>
     </div>
   );
 }
@@ -471,6 +723,7 @@ function DiagnosticsPanel() {
           ))}
         </section>
       )}
+      <RunPanel metrics={data.runs} />
       <Row label="Active model" value={data.model.model || '—'}
         tone={data.model.ok ? 'good' : 'bad'} extra={data.model.capabilities.source} />
       <Row label="MCP servers"
@@ -490,6 +743,65 @@ function DiagnosticsPanel() {
       <Row label="Python modules available" value={data.python_modules.join(', ') || 'standard library only'} tone="good" />
       <Row label="Workspace" value={data.workspace} tone="good" />
       <Row label="Store" value={data.store} tone="good" />
+    </div>
+  );
+}
+
+/**
+ * What the last sixty answers actually cost.
+ *
+ * Averages, not a live feed: the useful question is never "how is this turn going" — you
+ * are watching that already — but "is it getting slower, and where did the slowness go".
+ */
+function RunPanel({ metrics }: { metrics: RunMetrics }) {
+  if (!metrics?.runs) return null;
+  const seconds = (ms?: number) => (ms ? `${(ms / 1000).toFixed(1)}s` : '—');
+  // One significant step per magnitude: a nine-digit token count read as digits tells you
+  // nothing a rounded "2.4M" does not, and takes four times the width to say it.
+  const compact = (n?: number) => {
+    if (!n) return '0';
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+    if (n >= 1_000) return `${(n / 1000).toFixed(1)}k`;
+    return String(n);
+  };
+  return (
+    <section className="rounded-xl border p-3.5 hairline">
+      <h3 className="mb-0.5 text-xs font-semibold">Last {metrics.runs} answers</h3>
+      <p className="mb-3 text-2xs leading-relaxed dimmer">
+        Read back from the saved conversations, so these numbers cannot drift from what
+        actually happened.
+      </p>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-4">
+        <Stat label="First word" value={seconds(metrics.ttft_median_ms)}
+          hint={metrics.ttft_p90_ms ? `p90 ${seconds(metrics.ttft_p90_ms)}` : 'median'} />
+        <Stat label="Prompt reused" value={`${metrics.cache_hit ?? 0}%`}
+          hint="served from cache" tone={(metrics.cache_hit ?? 0) > 40 ? 'good' : undefined} />
+        <Stat label="Model calls" value={String(metrics.calls_per_run ?? 0)} hint="per answer" />
+        <Stat label="Tools run" value={String(metrics.tool_calls ?? 0)} hint="in total" />
+        <Stat label="Tokens in" value={compact(metrics.tokens_in)} hint="read by the model" />
+        <Stat label="Tokens out" value={compact(metrics.tokens_out)} hint="written" />
+        <Stat label="Peak context" value={compact(metrics.peak_context)}
+          hint={metrics.masked_chars ? `${compact(metrics.masked_chars)} chars masked` : 'high-water mark'} />
+        <Stat label="Did not finish" value={String(metrics.failed ?? 0)}
+          hint="failed or stopped" tone={metrics.failed ? 'warn' : undefined} />
+      </div>
+    </section>
+  );
+}
+
+function Stat({ label, value, hint, tone }: {
+  label: string; value: string; hint?: string; tone?: 'good' | 'warn';
+}) {
+  return (
+    <div>
+      <p className={cls('font-mono text-base leading-none tracking-tight',
+        tone === 'good' ? 'text-brand-700 dark:text-brand-400'
+        : tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : '')}>
+        {value}
+      </p>
+      <p className="mt-1 text-2xs font-medium">{label}</p>
+      {hint && <p className="text-2xs dimmer">{hint}</p>}
     </div>
   );
 }

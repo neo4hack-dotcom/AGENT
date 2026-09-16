@@ -5,11 +5,13 @@
 // it is asked for.
 
 import {
-  AlertTriangle, Cloud, MonitorSmartphone, Moon, PanelLeft, Plus, Sparkles, Sun,
+  AlertTriangle, Cloud, Download, FolderOpen, MonitorSmartphone, Moon, PanelLeft, Plus,
+  Sparkles, Sun,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, streamRun } from './api';
 import { Admin, AdminDoor } from './components/Admin';
+import { Artifacts } from './components/Artifacts';
 import { Composer } from './components/Composer';
 import { Sidebar } from './components/Sidebar';
 import { AssistantTurn, UserTurn, useStickToBottom, type ApprovalRequest } from './components/Thread';
@@ -29,6 +31,8 @@ interface Live {
   notices: string[];
   approval: ApprovalRequest | null;
   error: string | null;
+  trust: { sources: string[]; injections: { tool: string; patterns: string[] }[];
+           compactions: number };
 }
 
 const LAST_CONVERSATION = 'agent.conversation';
@@ -44,6 +48,7 @@ const emptyLive = (runId: string, conversationId: string, messageId: string): Li
   runId, conversationId, messageId,
   blocks: new Map(), plan: [], usage: {}, phase: 'starting', notices: [],
   approval: null, error: null,
+  trust: { sources: [], injections: [], compactions: 0 },
 });
 
 export default function App() {
@@ -55,6 +60,7 @@ export default function App() {
   const [live, setLive] = useState<Live | null>(null);
   const [sidebar, setSidebar] = useState(false);
   const [admin, setAdmin] = useState(false);
+  const [artifacts, setArtifacts] = useState(false);
   const [approving, setApproving] = useState(false);
   const stopStream = useRef<(() => void) | null>(null);
   const liveRef = useRef<Live | null>(null);
@@ -214,6 +220,53 @@ export default function App() {
     }
   }, [conversation?.id, onEvent, toast, finishRun]);
 
+  /**
+   * Ask a question again, optionally reworded.
+   *
+   * The server truncates the conversation at that question and starts a fresh run, so the
+   * turns that followed the old answer do not survive into the new one — an answer built
+   * on a question that is no longer there is the confusing part of a naive "retry".
+   */
+  const retry = useCallback(async (messageId: string, text: string) => {
+    if (sending.current || liveRef.current || !conversation) return;
+    sending.current = true;
+    try {
+      const started = await api.retry(conversation.id, messageId, text);
+      const refreshed = await api.getConversation(started.conversation_id);
+      setConversation(refreshed);
+      const fresh = emptyLive(started.run_id, started.conversation_id, started.message_id);
+      setLive(fresh);
+      liveRef.current = fresh;
+      stopStream.current?.();
+      stopStream.current = streamRun(started.run_id, onEvent, (reason) => {
+        if (reason === 'error') {
+          toast('The live stream dropped. Reload the conversation to see the saved answer.', 'error');
+          void finishRun();
+        }
+      });
+    } catch (e) {
+      toast(String((e as Error).message), 'error');
+    } finally {
+      sending.current = false;
+    }
+  }, [conversation, onEvent, toast, finishRun]);
+
+  /** The whole conversation as one Markdown file, evidence included. */
+  const exportConversation = useCallback(async () => {
+    if (!conversation) return;
+    try {
+      const markdown = await api.exportConversation(conversation.id);
+      const url = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${(conversation.title || 'conversation').replace(/[^\w.-]+/g, '-').slice(0, 60)}.md`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast(String((e as Error).message), 'error');
+    }
+  }, [conversation, toast]);
+
   const stop = useCallback(async () => {
     if (!live) return;
     try { await api.cancelRun(live.runId); } catch { /* already finished */ }
@@ -307,6 +360,16 @@ export default function App() {
         )}
 
         <div className="ml-auto flex items-center gap-1">
+          {!empty && conversation && (
+            <button onClick={() => void exportConversation()} title="Export as Markdown"
+              className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
+              <Download size={15} strokeWidth={1.9} />
+            </button>
+          )}
+          <button onClick={() => setArtifacts(true)} title="Workspace files"
+            className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
+            <FolderOpen size={15} strokeWidth={1.9} />
+          </button>
           <button onClick={() => (canSeeAdmin || boot?.admin.local ? setAdmin(true) : undefined)}
             title={boot?.model.error
               ?? (boot?.model.local === false
@@ -340,10 +403,14 @@ export default function App() {
           <main ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-3xl space-y-8 px-5 pb-10 pt-4">
               {messages.map((message) => {
-                if (message.role === 'user') return <UserTurn key={message.id} message={message} />;
+                if (message.role === 'user') {
+                  return <UserTurn key={message.id} message={message} busy={!!live}
+                    onRetry={(text) => void retry(message.id, text)} />;
+                }
                 const isLive = live?.messageId === message.id;
                 const rendered: Message = isLive
-                  ? { ...message, blocks: liveBlocks, plan: live!.plan, usage: live!.usage }
+                  ? { ...message, blocks: liveBlocks, plan: live!.plan, usage: live!.usage,
+                      trust: live!.trust }
                   : message;
                 return (
                   <div key={message.id} className="group/turn">
@@ -378,6 +445,8 @@ export default function App() {
           </div>
         </>
       )}
+
+      <Artifacts open={artifacts} onClose={() => setArtifacts(false)} />
 
       {admin && boot && (
         <Admin state={boot.admin} onClose={() => setAdmin(false)}
@@ -526,9 +595,28 @@ function applyEvent(live: Live, event: StreamEvent): void {
     case 'tool.start':
       live.blocks.set(event.index, {
         index: event.index, type: 'tool', id: event.id, name: event.name, args: event.args,
-        server: event.server, kind: event.kind, by: event.by, status: 'running', ok: null,
-        summary: '', text: '', ms: 0,
+        server: event.server, kind: event.kind, by: event.by, ref: event.ref,
+        status: 'running', ok: null, summary: '', text: '', ms: 0,
       });
+      break;
+    case 'taint':
+      live.trust = { ...live.trust, sources: event.sources };
+      break;
+    case 'injection': {
+      const flagged = live.blocks.get(event.index);
+      if (flagged) live.blocks.set(event.index, { ...flagged, injection: event.patterns });
+      live.trust = { ...live.trust,
+                     injections: [...live.trust.injections,
+                                  { tool: event.tool, patterns: event.patterns }] };
+      break;
+    }
+    case 'offload': {
+      const big = live.blocks.get(event.index);
+      if (big) live.blocks.set(event.index, { ...big, offloaded: event.handle });
+      break;
+    }
+    case 'compaction':
+      live.trust = { ...live.trust, compactions: event.count };
       break;
     case 'tool.end': {
       const block = live.blocks.get(event.index);
@@ -549,10 +637,11 @@ function applyEvent(live: Live, event: StreamEvent): void {
     case 'approval.resolved':
       live.approval = null;
       break;
-    case 'usage':
-      live.usage = { llm_calls: event.llm_calls, tokens_in: event.tokens_in,
-                     tokens_out: event.tokens_out, tool_calls: event.tool_calls };
+    case 'usage': {
+      const { type: _type, ...usage } = event;
+      live.usage = usage;
       break;
+    }
     case 'notice':
       live.notices = [...live.notices, event.message];
       break;

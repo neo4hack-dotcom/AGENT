@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from app.agent import trust
 from app.tools import code as code_tool
 from app.tools import files as file_tool
 from app.tools import web as web_tool
@@ -26,13 +27,17 @@ from app.tools import web as web_tool
 class ToolSpec:
     def __init__(self, name: str, description: str, parameters: dict,
                  handler: Callable[..., Any], *, write: bool = False,
-                 group: str = "Built-in") -> None:
+                 group: str = "Built-in",
+                 capabilities: tuple[str, ...] = ()) -> None:
         self.name = name
         self.description = description
         self.parameters = parameters
         self.handler = handler
         self.write = write
         self.group = group
+        # What this tool can reach. The taint rules in agent/trust.py act on these, so a
+        # tool that only reads the workspace is never gated by something a web page said.
+        self.capabilities = frozenset(capabilities)
 
     def as_function(self) -> dict:
         return {"type": "function",
@@ -90,7 +95,11 @@ def normalize_plan(raw: Any) -> list[dict]:
 
 def build_registry(settings, memory, workspace: Path, on_plan,
                    foreign_roots: Callable[[], str] | None = None,
-                   granted_roots: Callable[[], list[str]] | None = None) -> dict[str, ToolSpec]:
+                   granted_roots: Callable[[], list[str]] | None = None,
+                   is_tainted: Callable[[], bool] | None = None,
+                   find_tools: Callable[[str], dict] | None = None,
+                   bridge=None, bridge_tools: Callable[[], list[str]] | None = None
+                   ) -> dict[str, ToolSpec]:
     """Assemble the built-in tools that are actually enabled right now.
 
     A tool switched off in Admin is *absent* from the catalog the model sees, not present
@@ -120,16 +129,20 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                 "data": {"url": result["url"], "title": result["title"]}}
 
     async def h_run_python(code: str = "", **_: Any) -> dict:
+        callable_tools = bridge_tools() if bridge_tools else []
         result = await code_tool.run_python(code, workspace=workspace,
                                             timeout_s=settings.python_timeout_s,
-                                            memory_mb=settings.python_memory_mb)
+                                            memory_mb=settings.python_memory_mb,
+                                            bridge=bridge, bridge_tools=callable_tools)
         if not result.get("ok"):
             return {"ok": False, "error": result.get("error", "failed"),
                     "text": result.get("stdout", "")}
         out = result.get("stdout", "").strip()
+        used = result.get("bridge_calls") or []
         return {"ok": True,
                 "summary": (f"ran in {result['elapsed_ms']} ms — "
-                            + (f"{len(out.splitlines())} line(s) of output" if out else "no output")),
+                            + (f"{len(out.splitlines())} line(s) of output" if out else "no output")
+                            + (f", {len(used)} tool call(s)" if used else "")),
                 "text": out or "(the code ran and printed nothing — print() what you need to see)",
                 "data": {"elapsed_ms": result["elapsed_ms"]}}
 
@@ -187,10 +200,16 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                         f"{result['bytes']} bytes, byte for byte."}
 
     async def h_remember(fact: str = "", **_: Any) -> dict:
+        tainted = bool(is_tainted and is_tainted())
         try:
-            entry = memory.add(fact, source="agent")
+            entry = memory.add(fact, source="agent", tainted=tainted)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        if entry.get("status") == "quarantined":
+            return {"ok": True, "summary": "held for confirmation",
+                    "text": f"Stored, but held for the user to confirm: this run has read "
+                            f"content from outside, so a fact learned now could have been "
+                            f"suggested by it. It will not be recalled until they approve it."}
         return {"ok": True, "summary": "remembered", "text": entry["text"]}
 
     async def h_recall(query: str = "", **_: Any) -> dict:
@@ -214,6 +233,11 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                     f"{'✓' if s['status'] == 'done' else '▸' if s['status'] == 'active' else '·'} "
                     f"{s['title']}" for s in normalized)}
 
+    async def h_find_tools(need: str = "", **_: Any) -> dict:
+        if find_tools is None:
+            return {"ok": False, "error": "No tool catalogue is available."}
+        return find_tools(need)
+
     async def h_now(timezone_name: str = "", **_: Any) -> dict:
         local = datetime.now().astimezone()
         text = (f"Local time: {local.strftime('%A %d %B %Y, %H:%M:%S %Z')}\n"
@@ -234,6 +258,16 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                  h_plan, group="Planning"),
         ToolSpec("current_time", "The current date and time on this machine.",
                  _obj({}), h_now),
+        ToolSpec("find_tools",
+                 "Search every connected server for a tool you need but were not offered. "
+                 "Only the tools relevant to the question are listed each turn; this is how "
+                 "you reach the rest. Describe the capability in your own words — "
+                 "\"read a spreadsheet\", \"list git branches\" — and the matches become "
+                 "callable for the remainder of this task.",
+                 _obj({"need": {"type": "string",
+                                "description": "What you need to do, in a few words."}},
+                      ["need"]),
+                 h_find_tools, group="Planning"),
     ]
     if settings.enable_web_tools:
         specs += [
@@ -244,12 +278,12 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                      _obj({"query": {"type": "string", "description": "What to search for."},
                            "max_results": {"type": "integer",
                                            "description": "1-10, default 6."}}, ["query"]),
-                     h_web_search),
+                     h_web_search, capabilities=(trust.NET,)),
             ToolSpec("web_fetch",
                      "Fetch one URL and read it as text. Works on HTML pages, JSON, CSV and plain "
                      "text. Use it on search results, documentation, APIs and raw files.",
                      _obj({"url": {"type": "string", "description": "Full http(s) URL."}}, ["url"]),
-                     h_web_fetch),
+                     h_web_fetch, capabilities=(trust.NET,)),
         ]
     if settings.enable_python_tool:
         modules = ", ".join(code_tool.available_modules()) or "the standard library only"
@@ -260,25 +294,34 @@ def build_registry(settings, memory, workspace: Path, on_plan,
             f"documents. Never compute a number in your head when you can run it here. "
             f"print() everything you need to see — nothing else is returned. "
             f"Available beyond the standard library: {modules}. "
-            f"The working directory is the Agent workspace, so relative paths are shared with the "
-            f"file tools. Killed after {settings.python_timeout_s}s.",
+            f"The working directory is the workspace, so relative paths are shared with the "
+            f"file tools. Killed after {settings.python_timeout_s}s.\n\n"
+            f"**The other tools are callable from inside your code** as ordinary functions — "
+            f"`web_fetch(url=...)`, `sqlite__read_query(query=...)` — each returning the "
+            f"result as text and raising `ToolError` on failure. Prefer this whenever a task "
+            f"is several steps over the same data: one program that fetches, filters and "
+            f"writes is one turn, where the same work as separate tool calls is five. Loops "
+            f"and conditionals belong here too — asking the model to iterate is how iteration "
+            f"goes wrong.",
             _obj({"code": {"type": "string", "description": "The Python source to run."}}, ["code"]),
-            h_run_python, write=True, group="Compute"))
+            h_run_python, write=True, group="Compute",
+            capabilities=(trust.EXEC, trust.FS_READ, trust.FS_WRITE)))
     specs += [
         ToolSpec("workspace_list", "List what is in this app's own workspace directory — NOT a directory exposed by a "
                  "connected MCP server, which has its own tools.",
                  _obj({"path": {"type": "string",
                                 "description": "Sub-path inside the workspace. Empty for the root."}}),
-                 h_list_files, group="Workspace"),
+                 h_list_files, group="Workspace", capabilities=(trust.FS_READ,)),
         ToolSpec("workspace_read", "Read a text file from this app's own workspace directory. For a path under a "
                  "connected MCP server's root, use that server's own read tool instead.",
-                 _obj({"path": {"type": "string"}}, ["path"]), h_read_file, group="Workspace"),
+                 _obj({"path": {"type": "string"}}, ["path"]), h_read_file, group="Workspace", capabilities=(trust.FS_READ,)),
         ToolSpec("workspace_write",
                  "Write a text file into this app's own workspace, creating folders as needed. "
                  "For a path under a connected MCP server's root, use that server's write tool.",
                  _obj({"path": {"type": "string"}, "content": {"type": "string"}},
                       ["path", "content"]),
-                 h_write_file, write=True, group="Workspace"),
+                 h_write_file, write=True, group="Workspace",
+                 capabilities=(trust.FS_WRITE,)),
         ToolSpec("workspace_import",
                  "Copy a file into this app's workspace without its contents passing through "
                  "you. Use this — never read-then-write — whenever a file needs to be where "
@@ -289,14 +332,15 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                        "name": {"type": "string",
                                 "description": "Name to save it under. Defaults to the "
                                                "source's own filename."}}, ["source_path"]),
-                 h_import, write=True, group="Workspace"),
+                 h_import, write=True, group="Workspace",
+                 capabilities=(trust.FS_READ, trust.FS_WRITE)),
         ToolSpec("remember",
                  "Store one durable fact about the user or their work, so it is available in every "
                  "future conversation. Use it for stable preferences, names, and context worth "
                  "keeping — never for something true only inside this conversation.",
                  _obj({"fact": {"type": "string",
                                 "description": "One self-contained sentence."}}, ["fact"]),
-                 h_remember, group="Memory"),
+                 h_remember, group="Memory", capabilities=(trust.MEMORY_WRITE,)),
         ToolSpec("recall", "Search everything previously remembered about the user.",
                  _obj({"query": {"type": "string"}}, ["query"]), h_recall, group="Memory"),
     ]

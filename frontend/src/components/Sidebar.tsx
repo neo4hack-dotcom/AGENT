@@ -4,10 +4,11 @@
 // a list of past conversations sitting next to a single input makes it look like a chat
 // app, which is exactly the impression this interface is built to avoid.
 
-import { MessageSquare, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
+import { CornerDownLeft, MessageSquare, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ConversationSummary } from '../types';
-import { Button, Empty, IconButton, Input, cls, useConfirm } from './ui';
+import { api } from '../api';
+import type { ConversationSummary, SearchHit } from '../types';
+import { Button, Empty, IconButton, Input, Spinner, cls, useConfirm } from './ui';
 
 function relative(timestamp: number): string {
   const seconds = Date.now() / 1000 - timestamp;
@@ -51,6 +52,25 @@ export function Sidebar({
     return conversations.filter((c) => `${c.title} ${c.preview}`.toLowerCase().includes(needle));
   }, [conversations, query]);
 
+  // Titles and previews cover the first line of a conversation; what you actually remember
+  // is usually something said in the middle of one. When the cheap filter comes up short,
+  // ask the server to look inside the messages themselves.
+  const [deep, setDeep] = useState<SearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  useEffect(() => {
+    const needle = query.trim();
+    if (needle.length < 2) { setDeep([]); return; }
+    let cancelled = false;
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const hits = await api.search(needle);
+        if (!cancelled) setDeep(hits.filter((h) => !filtered.some((c) => c.id === h.conversation_id)));
+      } catch { if (!cancelled) setDeep([]); } finally { if (!cancelled) setSearching(false); }
+    }, 220);
+    return () => { cancelled = true; clearTimeout(timer); setSearching(false); };
+  }, [query, filtered]);
+
   return (
     <>
       <div onClick={onClose} aria-hidden
@@ -73,8 +93,9 @@ export function Sidebar({
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {filtered.length === 0 ? (
-            <Empty icon={MessageSquare} title={query ? 'No match' : 'No conversations yet'} />
+          {filtered.length === 0 && deep.length === 0 ? (
+            <Empty icon={MessageSquare}
+              title={searching ? 'Searching…' : query ? 'No match' : 'No conversations yet'} />
           ) : filtered.map((conversation) => (
             <div key={conversation.id}
               className={cls('group relative mb-0.5 rounded-lg transition-colors',
@@ -111,6 +132,28 @@ export function Sidebar({
               </div>
             </div>
           ))}
+
+          {deep.length > 0 && (
+            <div className="mt-3 border-t pt-2 hairline">
+              <div className="flex items-center gap-1.5 px-2.5 pb-1 text-2xs font-semibold uppercase tracking-wider dimmer">
+                Found inside {searching && <Spinner size={10} />}
+              </div>
+              {deep.map((hit) => (
+                <button key={hit.conversation_id} onClick={() => onSelect(hit.conversation_id)}
+                  className="focus-ring block w-full rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-white/[0.05]">
+                  <span className="flex items-center gap-1 truncate text-xs font-medium">
+                    <CornerDownLeft size={11} className="shrink-0 dimmer" />
+                    {hit.title || 'Untitled'}
+                  </span>
+                  {/* No `block` here: line-clamp needs its own -webkit-box display, and a
+                      display utility after it in the class list silently wins. */}
+                  <span className="mt-0.5 line-clamp-2 text-2xs leading-relaxed dimmer">
+                    {hit.excerpt}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </aside>
     </>
