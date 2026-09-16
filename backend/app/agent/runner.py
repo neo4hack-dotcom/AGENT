@@ -115,6 +115,8 @@ class RunContext:
         # Tool names a `run_python` program may call. Set per turn from what is offered, so
         # code can reach exactly what the model could have called directly — no more.
         self.bridge_names: list[str] = []
+        self._approvals: dict[str, asyncio.Future] = {}
+        self._finished = asyncio.Event()
 
     def next_ref(self) -> str:
         """A short, stable label for one piece of evidence.
@@ -125,8 +127,6 @@ class RunContext:
         """
         self._refs += 1
         return f"#{self._refs}"
-        self._approvals: dict[str, asyncio.Future] = {}
-        self._finished = asyncio.Event()
 
     def supersede_text(self) -> None:
         """Mark the draft answer as replaced.
@@ -716,8 +716,16 @@ class AgentRunner:
                   "name": name, "args": call.arguments, "server": block["server"],
                   "kind": block["kind"], "by": "code", "ref": block["ref"]})
 
-        refused = self._check_egress(ctx, call)
-        if refused:
+        action, reason, host = self._check_egress(ctx, call)
+        if action:
+            # A running program does not get to hold a prompt open while it decides what
+            # to ask for: a loop could raise the question as many times as it likes, and
+            # the tenth identical dialog is answered by reflex. Approval belongs to the
+            # turn, so the model asks for the host outside the program.
+            refused = (reason if action == "deny" else
+                       f"Not sent. {reason} Fetching {host} needs the user's approval, which "
+                       f"cannot be asked for from inside a running program — request it with "
+                       f"a plain tool call instead.")
             self._fail(ctx, block, refused, status="blocked")
             return {"ok": False, "error": refused}
         if spec is None and mcp_tool is None:
@@ -802,12 +810,34 @@ class AgentRunner:
             # Any tool call carrying a URL goes past the egress policy — built-in or MCP,
             # `web_fetch` or a browser server's `navigate`. The rule lives here rather than
             # inside one tool because the capability is the URL, not the tool.
-            blocked = self._check_egress(ctx, call)
-            if blocked:
+            action, reason, host = self._check_egress(ctx, call)
+            if action == "deny":
                 self.c.audit.record("egress.block", run_id=ctx.run_id, tool=call.name,
-                                    reason=blocked[:300])
-                immediate.append((call, self._fail(ctx, block, blocked, status="blocked")))
+                                    reason=reason[:300])
+                immediate.append((call, self._fail(ctx, block, reason, status="blocked")))
                 continue
+            if action == "ask":
+                block["status"] = "awaiting_approval"
+                verdict = await ctx.request_approval(block["id"], {
+                    "index": block["index"], "name": call.name, "args": call.arguments,
+                    "server": block["server"], "kind": block["kind"], "host": host,
+                    "reason": reason}, timeout_s=settings.approval_timeout_s)
+                self.c.audit.record("egress.approval", run_id=ctx.run_id, tool=call.name,
+                                    host=host, verdict=verdict)
+                if verdict != "approved":
+                    immediate.append((call, self._fail(ctx, block,
+                        (f"The user declined to fetch {host}. Do not retry it; use a source "
+                         f"they named, or say what cannot be established without it."
+                         if verdict == "denied" else
+                         f"Nobody answered within {settings.approval_timeout_s}s, so {host} "
+                         f"was not fetched. Say the decision is still pending — do not "
+                         f"report it as refused."),
+                        status="denied" if verdict == "denied" else "expired")))
+                    continue
+                # Said yes once, so the rest of this run may follow the same host without
+                # asking again — a site is rarely one page.
+                ctx.egress.grant(host)
+                block["status"] = "running"
 
             elided = elided_argument(call.arguments)
             if elided:
@@ -969,27 +999,34 @@ class AgentRunner:
                       else f"ERROR: {result.get('error', 'failed')}")
         return {"ok": ok, "error": result.get("error", ""), "model_text": model_text}
 
-    def _check_egress(self, ctx: RunContext, call: ToolCall) -> str:
-        """A refusal reason for any URL in this call's arguments, or "".
+    def _check_egress(self, ctx: RunContext, call: ToolCall) -> tuple[str, str, str]:
+        """`(action, reason, host)` for any URL in this call's arguments.
 
         Two questions, and the second is the one that matters. Does this host point back
         inside the machine — the shape of server-side request forgery, where an agent is
         used as a proxy for a network that trusts it. And whose idea was this host: one
         the user typed is theirs; one that first appeared inside a fetched page belongs to
         whoever wrote that page.
+
+        The second question has three answers, not two. A host that is merely *unvouched
+        for* is a question for the user, and returning "deny" for it told the agent to ask
+        them while giving it no way to — so it stalled, every time. That case comes back
+        as "ask", and the caller puts the decision in front of the user.
         """
         for value in _urls_in(call.arguments):
             verdict, reason = ctx.egress.verdict(value, ctx.taint.tainted)
             shape = trust.looks_like_exfiltration(value)
             if verdict == "deny":
-                return f"Blocked: {reason}"
+                return "deny", f"Blocked: {reason}", trust.host_of(value)
+            # An outbound request carrying a payload is not a fetch, and is never turned
+            # into a yes/no the model can talk its way through.
             if shape and verdict != "allow":
-                return (f"Blocked: this request would carry data outward — {shape}. If the "
-                        f"user asked you to send something, say so and let them approve it.")
+                return "deny", (f"Blocked: this request would carry data outward — {shape}. "
+                                f"If the user asked you to send something, say so and let "
+                                f"them approve it."), trust.host_of(value)
             if verdict == "ask":
-                return (f"Not sent. {reason} Ask the user whether to fetch {trust.host_of(value)}, "
-                        f"or use a source they named.")
-        return ""
+                return "ask", reason, trust.host_of(value)
+        return "", "", ""
 
     # --------------------------------------------------------------- trust pipeline
     def _launder(self, ctx: RunContext, call: ToolCall, block: dict, text: str,
@@ -1270,15 +1307,22 @@ class AgentRunner:
             sent = context.estimate_tokens(payload) + len(system) // 4
             ctx.usage["prompt_sent"] = ctx.usage.get("prompt_sent", 0) + sent
             ctx.usage["prompt_evaluated"] = ctx.usage.get("prompt_evaluated", 0) + result.tokens_in
-            if iteration == 0:
-                ctx.usage["ttft_ms"] = result.latency_ms
+            # There is no turn counter here — this pass runs once. It is the first token
+            # the reader waited for only when the turn loop produced none itself.
+            ctx.usage.setdefault("ttft_ms", result.latency_ms)
             ctx.emit({"type": "usage", **ctx.usage})
         except Exception as exc:  # noqa: BLE001
             failed = [b for b in ctx.blocks if b["type"] == "tool" and not b.get("ok")]
-            block["text"] = (
-                f"I could not produce an answer: {type(exc).__name__}: {exc}"
-                + (f"\n\n{len(failed)} tool call(s) had already failed before this." if failed else ""))
-            ctx.emit({"type": "text.delta", "index": block["index"], "text": block["text"]})
+            note = (f"I could not produce an answer: {type(exc).__name__}: {exc}"
+                    + (f"\n\n{len(failed)} tool call(s) had already failed before this."
+                       if failed else ""))
+            # Append, never replace. The model streams straight into this block, so by the
+            # time anything here can fail the answer is usually already written and on
+            # screen — and overwriting it turns a bookkeeping slip into a lost answer.
+            if block["text"].strip():
+                note = f"\n\n---\n\n{note}"
+            block["text"] += note
+            ctx.emit({"type": "text.delta", "index": block["index"], "text": note})
 
     def _evidence_digest(self, ctx: RunContext, budget: int = 14000) -> str:
         """What the tools returned, labelled, newest first, within a character budget.

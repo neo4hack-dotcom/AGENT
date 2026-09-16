@@ -347,7 +347,7 @@ export type StreamEvent =
       summary: string; ms: number; preview?: string; cached?: boolean }
   | { type: 'approval.request'; call_id: string; index: number; name: string;
       args: Record<string, unknown>; server: string; kind: string; reason: string;
-      expires_in_s: number }
+      expires_in_s: number; host?: string }
   | { type: 'approval.resolved'; call_id: string; approved: boolean; reason?: string }
   | { type: 'critic'; tool: string; status: string; reason: string; advice: string }
   | { type: 'taint'; source: string; sources: string[] }

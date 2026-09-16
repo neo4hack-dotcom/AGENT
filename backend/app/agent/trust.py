@@ -240,6 +240,16 @@ class Egress:
             if host and host not in self.approved:
                 self.seen_in_content.add(host)
 
+    def grant(self, host: str) -> None:
+        """Remember that the user said yes to this host, for the rest of this run.
+
+        Per-run, like the rest of the trust state: the next question starts from a clean
+        slate, because what made this one risky was read, not remembered.
+        """
+        if host:
+            self.approved.add(host)
+            self.seen_in_content.discard(host)
+
     def verdict(self, url: str, tainted: bool) -> tuple[str, str]:
         """`("allow"|"deny"|"ask", reason)` for one outbound request."""
         host = host_of(url)

@@ -293,6 +293,8 @@ export interface ApprovalRequest {
   server: string;
   reason: string;
   expires_in_s: number;
+  /** Set when the decision is about reaching a host, not about running a tool. */
+  host?: string;
 }
 
 export function ApprovalCard({
@@ -311,9 +313,13 @@ export function ApprovalCard({
       <div className="flex items-start gap-2.5 px-3.5 py-3">
         <ShieldQuestion size={15} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0 flex-1">
+          {/* Name the thing being decided. For a fetch that is the host, not the tool —
+              nobody weighs "allow web_fetch", they weigh "allow this site". */}
           <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">
-            Allow <span className="font-mono">{request.name}</span>
-            {request.server && <span className="font-normal opacity-70"> · {request.server}</span>} ?
+            {request.host ? <>Fetch <span className="font-mono">{request.host}</span>?</> : <>
+              Allow <span className="font-mono">{request.name}</span>
+              {request.server && <span className="font-normal opacity-70"> · {request.server}</span>} ?
+            </>}
           </p>
           <p className="mt-0.5 text-2xs leading-relaxed text-amber-800/80 dark:text-amber-200/70">
             {request.reason}
