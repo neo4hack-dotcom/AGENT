@@ -5,7 +5,7 @@
 // it is asked for.
 
 import {
-  AlertTriangle, Cloud, Command, MonitorSmartphone, Plus, Sparkles,
+  AlertTriangle, Cloud, Command, MonitorSmartphone, Moon, Plus, Sparkles, Sun,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, streamRun } from './api';
@@ -53,7 +53,7 @@ const emptyLive = (runId: string, conversationId: string, messageId: string): Li
 
 export default function App() {
   const toast = useToast();
-  const [, toggleTheme] = useTheme();
+  const [dark, toggleTheme] = useTheme();
   const [boot, setBoot] = useState<Bootstrap | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -381,6 +381,13 @@ export default function App() {
             {boot && boot.mcp.servers_connected > 0 && (
               <Badge tone="brand">{boot.mcp.tools_available} tools</Badge>
             )}
+          </button>
+          {/* Back in the header after a spell in the palette only: light and dark is a
+              setting people flip on a whim, several times a day, and two keystrokes is
+              two too many for something the eye asks for rather than the mind. */}
+          <button onClick={toggleTheme} title={dark ? 'Light theme' : 'Dark theme'}
+            className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
+            {dark ? <Sun size={15} strokeWidth={1.9} /> : <Moon size={15} strokeWidth={1.9} />}
           </button>
           {(boot?.admin.local || boot?.admin.mode === 'password') && (
             <AdminDoor onOpen={() => setAdmin('model')} warn={!modelOk || !toolsCapable} />
