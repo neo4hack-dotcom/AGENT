@@ -105,6 +105,7 @@ class RunContext:
         self.taint = trust.Taint()
         self.egress = trust.Egress()
         self.injections: list[dict] = []
+        self.notices: list[dict] = []
         # Progressive tool disclosure: what has been used, and what the model asked for by
         # name. Both survive the turn that established them — a task that needed a tool
         # once usually needs it again, and making it search twice is a wasted turn.
@@ -146,6 +147,12 @@ class RunContext:
                    for b in self.blocks)
 
     def emit(self, event: dict) -> None:
+        # Notices are kept with the run, not just streamed past it. Reopening an answer
+        # used to lose them all — including "your attachment was not sent", which is the
+        # one the reader most needs to find later.
+        if event.get("type") == "notice":
+            self.notices.append({"text": event.get("message", ""),
+                                 "quiet": bool(event.get("quiet"))})
         event = {**event, "run_id": self.run_id, "seq": len(self.buffer)}
         self.buffer.append(event)
         if len(self.buffer) > 4000:
@@ -335,6 +342,7 @@ class AgentRunner:
             # What the answer rests on, kept with the answer: which outside sources were
             # read, whether any tried to give orders, and whether the transcript had to be
             # compressed to fit. Reading an old answer without those is reading it blind.
+            message["notices"] = ctx.notices
             message["trust"] = {"sources": ctx.taint.sources,
                                 "injections": ctx.injections,
                                 "compactions": ctx.compactions}
@@ -535,7 +543,10 @@ class AgentRunner:
             ctx.bridge_names = ([n for n in tools if n != "run_python"]
                                 + [t["qualified_name"] for t in offered])
             if omitted and iteration == 0:
-                ctx.emit({"type": "notice", "message":
+                # Bookkeeping, not news: nothing here asks anything of the reader, and it
+                # fires on nearly every turn once a few servers are connected. `quiet`
+                # sends it to the log rather than the answer.
+                ctx.emit({"type": "notice", "quiet": True, "message":
                           f"{omitted} of {len(mcp_tools)} MCP tools are not offered this turn; "
                           f"the agent can reach them with find_tools."})
 

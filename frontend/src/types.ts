@@ -99,6 +99,8 @@ export interface Message {
   error?: string | null;
   model?: string;
   images?: { name: string; mime: string }[];
+  /** Remarks the run made about itself; `quiet` ones belong in the log, not the answer. */
+  notices?: { text: string; quiet?: boolean }[];
   /** What this answer rests on: outside sources read, manipulation attempts, compactions. */
   trust?: { sources: string[]; injections: { tool: string; patterns: string[] }[];
             compactions: number };
@@ -355,6 +357,6 @@ export type StreamEvent =
   | { type: 'offload'; index: number; handle: string; bytes: number }
   | { type: 'compaction'; turns: number; digest_chars: number; count: number }
   | ({ type: 'usage' } & Usage)
-  | { type: 'notice'; message: string }
+  | { type: 'notice'; message: string; quiet?: boolean }
   | { type: 'error'; message: string; kind: string }
   | { type: 'done'; status: string; usage: Usage; message_id: string };

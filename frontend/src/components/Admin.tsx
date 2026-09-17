@@ -37,9 +37,15 @@ const TABS: { id: Tab; label: string; icon: typeof Cpu }[] = [
 ];
 
 export function Admin({
-  state, onClose, onChanged,
-}: { state: AdminState; onClose: () => void; onChanged: () => void }) {
-  const [tab, setTab] = useState<Tab>('model');
+  state, onClose, onChanged, initialTab,
+}: { state: AdminState; onClose: () => void; onChanged: () => void; initialTab?: string }) {
+  const [tab, setTab] = useState<Tab>(
+    (TABS.some((t) => t.id === initialTab) ? initialTab : 'model') as Tab);
+  // Follow the prop when it changes, not only on mount: the palette can name a tab while
+  // this panel is already open, and an initial-value-only state would silently ignore it.
+  useEffect(() => {
+    if (initialTab && TABS.some((t) => t.id === initialTab)) setTab(initialTab as Tab);
+  }, [initialTab]);
   const [authenticated, setAuthenticated] = useState(state.authenticated);
 
   useEffect(() => {

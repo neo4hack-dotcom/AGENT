@@ -30,8 +30,11 @@ function withBreaks(text: string, key: string): ReactNode[] {
 let citePrefix = '';
 
 function Citation({ label }: { label: string }) {
-  // `label` arrives as `[#2]`; the anchor is built from the number alone.
-  const target = `${citePrefix}${label.replace(/[[\]#]/g, '')}`;
+  // The label arrives in whatever brackets the model reached for — `[#2]`, `【#2】`, or
+  // bare `#2` out of a code span. Only the number addresses the evidence, and a citation
+  // that does not resolve is worse than none: it promises a source and goes nowhere.
+  const number = (label.match(/\d{1,3}/) ?? [''])[0];
+  const target = `${citePrefix}${number}`;
   return (
     <a
       href={`#${target}`}
@@ -42,13 +45,19 @@ function Citation({ label }: { label: string }) {
         const node = document.getElementById(target);
         if (!node) return;
         event.preventDefault();
+        // The evidence lives inside the folded work section by default. Open every
+        // <details> above it first, or the scroll lands on nothing.
+        for (let parent = node.closest('details'); parent;
+             parent = parent.parentElement?.closest('details') ?? null) {
+          parent.open = true;
+        }
         node.scrollIntoView({ behavior: 'smooth', block: 'center' });
         node.classList.add('evidence-flash');
         setTimeout(() => node.classList.remove('evidence-flash'), 1400);
       }}
       className="mx-0.5 inline-flex -translate-y-[0.15em] items-center rounded px-1 align-baseline font-mono text-[0.62em] font-medium text-brand-800 no-underline ring-1 ring-brand-500/25 transition-colors hover:bg-brand-100 dark:text-brand-300 dark:ring-brand-400/25 dark:hover:bg-brand-500/15"
     >
-      {label.slice(1, -1)}
+      #{number}
     </a>
   );
 }
@@ -68,6 +77,13 @@ function renderInline(text: string, key: string): ReactNode[] {
       return <s key={k} className="dim">{part.slice(2, -2)}</s>;
     }
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      // Models routinely put their own citations in backticks. Rendering that as code
+      // leaves a dead label where a link to the evidence should be — which matters more
+      // now that the evidence is folded away and the label is the only route to it.
+      const quoted = part.slice(1, -1).trim();
+      if (/^[[【]?#\d{1,3}[\]】]?$/.test(quoted)) {
+        return <Citation key={k} label={quoted} />;
+      }
       return (
         <code key={k} className="rounded-[5px] bg-zinc-100 px-1.5 py-0.5 font-mono text-[0.86em] text-brand-800 dark:bg-white/[0.08] dark:text-brand-300">
           {part.slice(1, -1)}
