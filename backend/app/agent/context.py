@@ -237,23 +237,35 @@ def render_for_compaction(messages: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def compress_schema(function: dict, aggressive: bool) -> dict:
-    """Trim a tool definition down to what actually drives selection.
+DESCRIPTION_CAP = 600
 
-    Measured work on long-horizon tool-using agents puts schema overhead among the cheapest
-    tokens to recover: the model picks a tool from its name and first sentence, and reads
-    the parameter prose almost never. Under pressure the prose goes and the shapes stay —
-    a parameter without a description is still a parameter the model can fill, while a
-    parameter that was dropped is one it cannot.
+
+def compress_schema(function: dict, aggressive: bool) -> dict:
+    """Trim a tool definition down to what actually drives selection and the call.
+
+    Schema overhead is among the cheapest tokens to recover on a long-horizon agent, but
+    only the *parameter* prose is genuinely dead weight: a parameter without a description
+    is still a parameter the model can fill, while a parameter that was dropped is one it
+    cannot.
+
+    The tool description is not dead weight, and cutting it to one sentence was a mistake.
+    The first sentence answers "should I pick this"; the lines after it are often the only
+    place the *calling convention* is written down — the namespace an expression evaluates
+    in, the grammar of a query, a worked example. Cut those and the model guesses, and a
+    guess costs a whole turn: a malformed call, an error, a retry. Over this catalogue the
+    difference between the two policies is about six hundred tokens; one wasted turn is
+    worth many times that.
     """
     if not aggressive:
         return function
     fn = dict(function.get("function") or {})
-    description = fn.get("description") or ""
-    # First sentence, or the first line — whichever comes first.
-    cut = min([i for i in (description.find(". "), description.find("\n")) if i > 0]
-              or [len(description)])
-    fn["description"] = description[:cut + 1].strip()[:220]
+    description = (fn.get("description") or "").strip()
+    if len(description) > DESCRIPTION_CAP:
+        # Cut on a line boundary: half an example teaches the wrong thing.
+        head = description[:DESCRIPTION_CAP]
+        fn["description"] = (head.rsplit("\n", 1)[0] if "\n" in head else head).rstrip() + "\n…"
+    else:
+        fn["description"] = description
     params = dict(fn.get("parameters") or {})
     properties = {}
     for name, spec in (params.get("properties") or {}).items():

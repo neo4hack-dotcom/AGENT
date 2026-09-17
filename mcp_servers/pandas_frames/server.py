@@ -565,7 +565,7 @@ def list_frames() -> dict:
     "Shape, dtypes, null counts, summary statistics and the first rows of one dataframe.",
     {
         "type": "object",
-        "properties": {"name": {"type": "string"}},
+        "properties": {"name": {"type": "string", "description": "The dataframe's name, as list_frames reports it — not a file path."}},
         "required": ["name"],
         "additionalProperties": False,
     },
@@ -590,7 +590,10 @@ def describe(name: str) -> dict:
     {
         "type": "object",
         "properties": {
-            "expression": {"type": "string"},
+            "expression": {"type": "string",
+                           "description": "One pandas expression. Refer to a loaded frame "
+                                          "by the name it was stored under, e.g. "
+                                          "orders.head() — there is no implicit `df`."},
             "store_as": {"type": "string", "description": "Keep a dataframe result under this name."},
             "preview": {"type": "integer", "description": "Rows returned (default 20, max 100)."},
             "timeout_s": {"type": "number", "description": "Override the operation timeout."},
@@ -618,7 +621,12 @@ def run(expression: str, store_as: str = "", preview: int = 20, timeout_s: float
     "Write a dataframe to CSV, Excel or Parquet inside the workspace.",
     {
         "type": "object",
-        "properties": {"name": {"type": "string"}, "path": {"type": "string"}},
+        "properties": {
+            "name": {"type": "string", "description": "The dataframe's name, as list_frames reports it — not a file path."},
+            "path": {"type": "string",
+                     "description": "Destination path inside the workspace; the extension "
+                                    "picks the format (.csv, .xlsx, .parquet)."},
+        },
         "required": ["name", "path"],
         "additionalProperties": False,
     },
@@ -634,7 +642,7 @@ def export(name: str, path: str) -> dict:
     "Release one dataframe from memory.",
     {
         "type": "object",
-        "properties": {"name": {"type": "string"}},
+        "properties": {"name": {"type": "string", "description": "The dataframe's name, as list_frames reports it — not a file path."}},
         "required": ["name"],
         "additionalProperties": False,
     },
@@ -649,7 +657,8 @@ def drop_frame(name: str) -> dict:
     "Every operation this session, newest first, with status, duration and peak memory.",
     {
         "type": "object",
-        "properties": {"limit": {"type": "integer"}},
+        "properties": {"limit": {"type": "integer",
+                                 "description": "Most recent jobs (default 50)."}},
         "additionalProperties": False,
     },
     read_only=True,
