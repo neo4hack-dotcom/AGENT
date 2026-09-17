@@ -58,6 +58,10 @@ def slugify(text: str) -> str:
     return slug[:24] or "server"
 
 
+# A ceiling that exists so one runaway tool cannot exhaust memory, not to trim for
+# the context window — that happens later, after the full result is on disk.
+MAX_RESULT_CHARS = 2_000_000
+
 class Connection:
     """One live server: its client, what it exposes, and why it is (or is not) up."""
 
@@ -440,7 +444,14 @@ class McpRegistry:
             "tool": tool["qualified_name"],
             "server": tool["server_name"],
             "summary": (text[:300] + "…") if len(text) > 300 else (text or "(empty result)"),
-            "text": text[:24000],
+            # The whole thing. Cutting here was invisible and lossy in the worst way: a
+            # 400-row query came back as 24,000 characters of half a JSON array, which the
+            # caller then parked on disk as the "full result". Nothing downstream could
+            # parse it, and the agent — with no error anywhere — retyped a fragment by hand
+            # and answered from a twentieth of the data. Trimming for the model's context
+            # is the caller's job, and it parks the original first.
+            "text": text[:MAX_RESULT_CHARS],
+            "truncated": len(text) > MAX_RESULT_CHARS,
             "data": structured,
             "elapsed_ms": elapsed_ms,
         }

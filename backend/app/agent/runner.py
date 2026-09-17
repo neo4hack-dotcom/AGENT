@@ -982,11 +982,16 @@ class AgentRunner:
         ok = bool(result.get("ok"))
         if not ok and spec is None:
             result = self._enrich_error(call, result)
+        elif ok and spec is None:
+            result = self._note_ignored_arguments(call, result)
+            result = self._note_whole_table_aggregate(call, result)
         text = result.get("text") or result.get("error") or ""
         text, model_body = self._launder(ctx, call, block, text, spec)
         summary = result.get("summary") or (result.get("error") or "")[:200]
         block.update({"status": "done" if ok else "error", "ok": ok, "summary": summary,
                       "text": text[:40000], "ms": elapsed, "data": result.get("data")})
+        if result.get("truncated"):
+            block["summary"] = f"[result truncated] {block['summary']}"[:300]
         ctx.usage["tool_calls"] += 1
         ctx.guard.record(call.name, call.arguments, ok)
         # Arguments are recorded as a preview with secrets stripped: enough to see what was
@@ -1129,6 +1134,59 @@ class AgentRunner:
                                        f"That path does not exist. Do NOT guess a different "
                                        f"one — a second guess fails the same way. {recovery}"}
         return result
+
+    def _note_whole_table_aggregate(self, call: ToolCall, result: dict) -> dict:
+        """Say what a bare total actually counts, where the total lands.
+
+        `SELECT SUM(amount) FROM orders` answers a question nobody quite asked: it includes
+        the cancelled rows, the refunds, the duplicates and the negative corrections. Asked
+        leadingly — "that's just the sum of that column, right?" — the agent ran exactly
+        that query and agreed, having never looked at what else was in the table. The rule
+        in the system prompt did not survive the distance to the moment it was needed; this
+        note arrives attached to the number itself.
+        """
+        query = " ".join(str(v) for v in call.arguments.values() if isinstance(v, str)).lower()
+        if not query or "select" not in query:
+            return result
+        aggregate = any(f"{fn}(" in query for fn in ("sum", "count", "avg", "min", "max"))
+        if not aggregate or " where " in query or " group by " in query:
+            return result
+        try:
+            rows = json.loads((result.get("text") or "").strip())
+        except (ValueError, TypeError):
+            return result
+        if not (isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict)):
+            return result
+        note = ("[This aggregates every row in the table — no WHERE, no GROUP BY. If the "
+                "table holds statuses, reversals, duplicates or negative corrections, they "
+                "are all in this number. Before reporting it as the answer, look at what "
+                "the table actually contains and say which rows your figure includes.]")
+        return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+
+    def _note_ignored_arguments(self, call: ToolCall, result: dict) -> dict:
+        """Say so when a server quietly dropped an argument the model meant.
+
+        A tool whose schema declares no `path` still answers a call carrying one — it
+        ignores it, succeeds, and returns data about whatever it was configured for. The
+        agent then reports that data as the answer to a question about somewhere else,
+        with no error anywhere in the run. A silently dropped argument is the most
+        expensive kind of wrong, because everything downstream looks right.
+        """
+        tool = self.c.mcp.resolve(call.name)
+        declared = ((tool or {}).get("input_schema") or {}).get("properties")
+        if not declared or not call.arguments:
+            return result
+        ignored = [k for k in call.arguments if k not in declared]
+        if not ignored:
+            return result
+        note = (f"[{call.name} does not accept {', '.join(sorted(ignored))} — "
+                f"{'it was' if len(ignored) == 1 else 'they were'} ignored, and this result "
+                f"is whatever the server was configured for, not what you asked it to "
+                f"target. It accepts only: {', '.join(sorted(declared)) or 'no arguments'}. "
+                f"If you needed a different target, this tool cannot reach it.]")
+        return {**result,
+                "text": f"{note}\n\n{result.get('text', '')}",
+                "summary": f"{note[:150]} {result.get('summary', '')}"[:300]}
 
     def _in_workspace(self, call: ToolCall) -> str:
         """The path an MCP server just refused is one the built-in tools can open.
@@ -1376,6 +1434,21 @@ class AgentRunner:
             return "(no tool was called — answer from your own knowledge, and say so.)"
         chunks: list[str] = []
         spent = 0
+        # A superseded draft is still the agent's own working, and sometimes the only place
+        # a finding exists: a figure computed inside a dataframe never appears in any tool
+        # result, only in the prose the agent wrote about it. Composing from tool output
+        # alone, this pass replaced a correct answer — the right month, the right total,
+        # the right percentage — with "cannot be determined". It is offered as working,
+        # not as truth, because a draft can also be the mistake the agent then corrected.
+        drafts = [b for b in ctx.blocks
+                  if b["type"] == "text" and b.get("superseded") and (b.get("text") or "").strip()]
+        if drafts:
+            working = "\n\n".join((b["text"] or "").strip() for b in drafts[-2:])[:3000]
+            chunks.append(f"## Your earlier working on this question\n{working}\n"
+                          f"(Written by you mid-run, before more evidence arrived. Anything "
+                          f"here that the results below confirm is yours to reuse; anything "
+                          f"they contradict, drop.)")
+            spent += len(working)
         for block in reversed(tools):
             args = json.dumps(block.get("args") or {}, ensure_ascii=False, default=str)[:300]
             head = f"## {block.get('ref', '')} {block['name']}({args})"
