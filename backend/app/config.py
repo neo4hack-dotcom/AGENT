@@ -44,7 +44,12 @@ class Settings(BaseSettings):
     session_ttl_s: int = 604800
 
     # --- Agent guardrails: sane defaults, all overridable per deployment ---
-    max_iterations: int = 14      # tool-calling turns in one answer
+    # Tool-calling turns in one answer. 14 was a budget, not a limit, and it cut off the
+    # class of work this app exists for: a cross-source question — query a database, read
+    # two files, recompute a second way, write the report — spends four turns just finding
+    # its inputs and needs about 28. The wall clock below is the real safety net, and the
+    # loop guard stops a repeating agent long before this number does.
+    max_iterations: int = 30
     max_retries: int = 2          # attempts on one failing tool before escalating
     stagnation_limit: int = 2     # identical structural failures before the guard fires
     run_timeout_s: int = 1200     # wall clock for one answer

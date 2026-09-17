@@ -368,6 +368,15 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
     a tool belongs to, so the model can reason about capability in groups.
     """
     lines = [f"Built-in: {', '.join(tools)}"]
+    # Where "the workspace" actually is. Every MCP server below states the directory it was
+    # configured for, and the built-in tools stated none — so a question about "the file in
+    # the workspace" sent the agent to the only path it had been given, which belongs to
+    # some other server. It then searched there, found nothing, and reported the file
+    # missing. A path is the one fact that settles it.
+    if workspace:
+        lines.append(f"    ↳ workspace_* tools read and write: {workspace}"
+                     f" — this is what \"the workspace\" means, and it is not any MCP "
+                     f"server's directory unless one is listed with the same path below.")
     scope_by_server = {s["server"]: s for s in (scopes or [])}
     if mcp_tools:
         by_server: dict[str, list[str]] = {}
