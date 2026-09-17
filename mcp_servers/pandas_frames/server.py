@@ -147,7 +147,17 @@ def _dispatch(op: str, args: dict, frames: dict, pd, np, guard_size, describe, m
         elif suffix in (".json", ".ndjson"):
             frame = pd.read_json(path, lines=suffix == ".ndjson", **options)
         else:
-            frame = pd.read_csv(path, **options)
+            # Trust the bytes over the name. A .txt holding one long line of JSON — which
+            # is what a tool result parked on disk looks like — fed to the CSV parser does
+            # not fail: it splits on every comma inside every string and builds tens of
+            # thousands of columns, taking minutes and then dying. Reading the first
+            # character costs nothing and turns that into a normal load.
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                lead = handle.read(1024).lstrip()[:1]
+            if lead in ("[", "{"):
+                frame = pd.read_json(path, **options)
+            else:
+                frame = pd.read_csv(path, **options)
         guard_size(name, frame)
         frames[name] = frame
         return describe(name, frame)

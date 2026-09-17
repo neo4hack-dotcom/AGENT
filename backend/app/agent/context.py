@@ -148,10 +148,32 @@ def offload(result_text: str, directory, call_id: str, tool: str,
         return None
     directory.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{tool}-{call_id}")[:60]
-    target = directory / f"{safe}.txt"
+    target = directory / f"{safe}.{_offload_extension(result_text)}"
     target.write_text(result_text, encoding="utf-8")
     return Offload(handle=f".results/{target.name}", path=str(target),
                    bytes=len(result_text), excerpt=result_text[:excerpt])
+
+
+def _offload_extension(text: str) -> str:
+    """Name the parked file for what it holds.
+
+    A query that returns four hundred rows is exactly the result someone wants a dataframe
+    for — and every dataframe loader picks its reader from the extension. Parked as `.txt`,
+    the rows could not be loaded at all: the agent fell back to retyping them through the
+    model, silently truncated them, and answered with numbers seven times too small and no
+    error anywhere in the run.
+    """
+    head = text.lstrip()[:1]
+    if head in "[{":
+        try:
+            json.loads(text)
+        except ValueError:
+            return "txt"
+        return "json"
+    first = text.lstrip().splitlines()[:2]
+    if len(first) == 2 and first[0].count(",") >= 1 and first[0].count(",") == first[1].count(","):
+        return "csv"
+    return "txt"
 
 
 def offload_note(off: Offload, tool: str) -> str:
@@ -159,7 +181,16 @@ def offload_note(off: Offload, tool: str) -> str:
             f"[…{off.bytes - len(off.excerpt)} more characters. The full result of `{tool}` "
             f"is saved at `{off.handle}` in the workspace. Read it with "
             f"`workspace_read(path=\"{off.handle}\")`, or compute over it with `run_python` "
-            f"— do not ask for it again, it will not have changed.]")
+            f"{_loadable_note(off.handle)}— do not ask for it again, it will not have "
+            f"changed.]")
+
+
+def _loadable_note(handle: str) -> str:
+    """Say when the parked file is one a dataframe tool can open as it stands."""
+    if handle.endswith((".json", ".csv")):
+        return (f"— a dataframe tool can also load `{handle}` directly, which is usually "
+                f"what a result this size was wanted for ")
+    return ""
 
 
 # ----------------------------------------------------- compaction with pinned invariants

@@ -982,11 +982,15 @@ class AgentRunner:
         ok = bool(result.get("ok"))
         if not ok and spec is None:
             result = self._enrich_error(call, result)
+        elif ok and spec is None:
+            result = self._note_ignored_arguments(call, result)
         text = result.get("text") or result.get("error") or ""
         text, model_body = self._launder(ctx, call, block, text, spec)
         summary = result.get("summary") or (result.get("error") or "")[:200]
         block.update({"status": "done" if ok else "error", "ok": ok, "summary": summary,
                       "text": text[:40000], "ms": elapsed, "data": result.get("data")})
+        if result.get("truncated"):
+            block["summary"] = f"[result truncated] {block['summary']}"[:300]
         ctx.usage["tool_calls"] += 1
         ctx.guard.record(call.name, call.arguments, ok)
         # Arguments are recorded as a preview with secrets stripped: enough to see what was
@@ -1129,6 +1133,31 @@ class AgentRunner:
                                        f"That path does not exist. Do NOT guess a different "
                                        f"one — a second guess fails the same way. {recovery}"}
         return result
+
+    def _note_ignored_arguments(self, call: ToolCall, result: dict) -> dict:
+        """Say so when a server quietly dropped an argument the model meant.
+
+        A tool whose schema declares no `path` still answers a call carrying one — it
+        ignores it, succeeds, and returns data about whatever it was configured for. The
+        agent then reports that data as the answer to a question about somewhere else,
+        with no error anywhere in the run. A silently dropped argument is the most
+        expensive kind of wrong, because everything downstream looks right.
+        """
+        tool = self.c.mcp.resolve(call.name)
+        declared = ((tool or {}).get("input_schema") or {}).get("properties")
+        if not declared or not call.arguments:
+            return result
+        ignored = [k for k in call.arguments if k not in declared]
+        if not ignored:
+            return result
+        note = (f"[{call.name} does not accept {', '.join(sorted(ignored))} — "
+                f"{'it was' if len(ignored) == 1 else 'they were'} ignored, and this result "
+                f"is whatever the server was configured for, not what you asked it to "
+                f"target. It accepts only: {', '.join(sorted(declared)) or 'no arguments'}. "
+                f"If you needed a different target, this tool cannot reach it.]")
+        return {**result,
+                "text": f"{note}\n\n{result.get('text', '')}",
+                "summary": f"{note[:150]} {result.get('summary', '')}"[:300]}
 
     def _in_workspace(self, call: ToolCall) -> str:
         """The path an MCP server just refused is one the built-in tools can open.
@@ -1376,6 +1405,21 @@ class AgentRunner:
             return "(no tool was called — answer from your own knowledge, and say so.)"
         chunks: list[str] = []
         spent = 0
+        # A superseded draft is still the agent's own working, and sometimes the only place
+        # a finding exists: a figure computed inside a dataframe never appears in any tool
+        # result, only in the prose the agent wrote about it. Composing from tool output
+        # alone, this pass replaced a correct answer — the right month, the right total,
+        # the right percentage — with "cannot be determined". It is offered as working,
+        # not as truth, because a draft can also be the mistake the agent then corrected.
+        drafts = [b for b in ctx.blocks
+                  if b["type"] == "text" and b.get("superseded") and (b.get("text") or "").strip()]
+        if drafts:
+            working = "\n\n".join((b["text"] or "").strip() for b in drafts[-2:])[:3000]
+            chunks.append(f"## Your earlier working on this question\n{working}\n"
+                          f"(Written by you mid-run, before more evidence arrived. Anything "
+                          f"here that the results below confirm is yours to reuse; anything "
+                          f"they contradict, drop.)")
+            spent += len(working)
         for block in reversed(tools):
             args = json.dumps(block.get("args") or {}, ensure_ascii=False, default=str)[:300]
             head = f"## {block.get('ref', '')} {block['name']}({args})"
