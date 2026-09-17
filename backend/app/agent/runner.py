@@ -984,6 +984,7 @@ class AgentRunner:
             result = self._enrich_error(call, result)
         elif ok and spec is None:
             result = self._note_ignored_arguments(call, result)
+            result = self._note_whole_table_aggregate(call, result)
         text = result.get("text") or result.get("error") or ""
         text, model_body = self._launder(ctx, call, block, text, spec)
         summary = result.get("summary") or (result.get("error") or "")[:200]
@@ -1133,6 +1134,34 @@ class AgentRunner:
                                        f"That path does not exist. Do NOT guess a different "
                                        f"one — a second guess fails the same way. {recovery}"}
         return result
+
+    def _note_whole_table_aggregate(self, call: ToolCall, result: dict) -> dict:
+        """Say what a bare total actually counts, where the total lands.
+
+        `SELECT SUM(amount) FROM orders` answers a question nobody quite asked: it includes
+        the cancelled rows, the refunds, the duplicates and the negative corrections. Asked
+        leadingly — "that's just the sum of that column, right?" — the agent ran exactly
+        that query and agreed, having never looked at what else was in the table. The rule
+        in the system prompt did not survive the distance to the moment it was needed; this
+        note arrives attached to the number itself.
+        """
+        query = " ".join(str(v) for v in call.arguments.values() if isinstance(v, str)).lower()
+        if not query or "select" not in query:
+            return result
+        aggregate = any(f"{fn}(" in query for fn in ("sum", "count", "avg", "min", "max"))
+        if not aggregate or " where " in query or " group by " in query:
+            return result
+        try:
+            rows = json.loads((result.get("text") or "").strip())
+        except (ValueError, TypeError):
+            return result
+        if not (isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict)):
+            return result
+        note = ("[This aggregates every row in the table — no WHERE, no GROUP BY. If the "
+                "table holds statuses, reversals, duplicates or negative corrections, they "
+                "are all in this number. Before reporting it as the answer, look at what "
+                "the table actually contains and say which rows your figure includes.]")
+        return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
 
     def _note_ignored_arguments(self, call: ToolCall, result: dict) -> dict:
         """Say so when a server quietly dropped an argument the model meant.

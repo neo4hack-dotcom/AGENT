@@ -377,15 +377,22 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
         lines.append(f"    ↳ workspace_* tools read and write: {workspace}"
                      f" — this is what \"the workspace\" means, and it is not any MCP "
                      f"server's directory unless one is listed with the same path below.")
-    scope_by_server = {s["server"]: s for s in (scopes or [])}
+    # Keyed by slug, not name. Two servers of the same kind carry the same name — two
+    # "SQLite", two "Filesystem" — and keying by it merged them into one entry whose scope
+    # was whichever happened to win. The agent then read one database while believing it
+    # was reading the other. The slug is what the tool names are built from, so it is also
+    # what distinguishes them here.
+    scope_by_slug = {s["slug"]: s for s in (scopes or []) if s.get("slug")}
     if mcp_tools:
-        by_server: dict[str, list[str]] = {}
+        by_server: dict[str, tuple[str, list[str]]] = {}
         for tool in mcp_tools:
-            by_server.setdefault(tool["server_name"], []).append(tool["qualified_name"])
-        for server, names in by_server.items():
+            slug = tool.get("server_slug") or tool["server_name"]
+            by_server.setdefault(slug, (tool["server_name"], []))[1].append(tool["qualified_name"])
+        for slug, (name, names) in by_server.items():
+            server = f"{name} ({slug})" if slug and slug != name else name
             shown = ", ".join(names[:40])
             more = f" (+{len(names) - 40} more)" if len(names) > 40 else ""
-            scope = scope_by_server.get(server)
+            scope = scope_by_slug.get(slug)
             where = ""
             if scope:
                 target = ", ".join(scope["paths"]) or scope["url"]
