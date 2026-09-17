@@ -1123,11 +1123,35 @@ class AgentRunner:
                                        f"Send arguments matching it exactly — do not guess field "
                                        f"names, and do not retry the shape that just failed."}
         if any(hint in error for hint in self._MISSING_HINTS):
+            recovery = (self._in_workspace(call) or self._bridge(tool)
+                        or self._how_to_list(tool))
             return {**result, "error": f"{result.get('error', '')}\n\n"
                                        f"That path does not exist. Do NOT guess a different "
-                                       f"one — a second guess fails the same way. "
-                                       f"{self._bridge(tool) or self._how_to_list(tool)}"}
+                                       f"one — a second guess fails the same way. {recovery}"}
         return result
+
+    def _in_workspace(self, call: ToolCall) -> str:
+        """The path an MCP server just refused is one the built-in tools can open.
+
+        With a filesystem server connected, "read that file" reads as its tool, and a path
+        under the app's own workspace comes back "outside allowed directories" — true of
+        that server, and useless, because the file is right there for `workspace_read`.
+        Left unsaid, the agent searches the server's root instead, finds nothing, and
+        reports the file missing when nothing was missing at all.
+        """
+        workspace = Path(self.c.settings.workspace_dir).expanduser().resolve()
+        for value in call.arguments.values():
+            if not isinstance(value, str) or not value.startswith("/"):
+                continue
+            try:
+                candidate = Path(value).resolve()
+            except (OSError, ValueError):
+                continue
+            if candidate == workspace or workspace in candidate.parents:
+                return (f"{value} is inside this app's own workspace, which that server "
+                        f"cannot see. Use `workspace_list` and `workspace_read` for it — "
+                        f"they read exactly this directory.")
+        return ""
 
     def _bridge(self, tool: dict | None) -> str:
         """How to get a file *into* a server that can only see its own directory.

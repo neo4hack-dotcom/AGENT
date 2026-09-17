@@ -20,7 +20,19 @@ class OutsideWorkspace(ValueError):
 
 def resolve(workspace: Path, path: str) -> Path:
     workspace = workspace.resolve()
-    candidate = (workspace / (path or "").lstrip("/")).resolve()
+    raw = (path or "").strip()
+    # The catalogue advertises the workspace by its full path, so the agent naturally hands
+    # that path straight back. Joining it turned it into <workspace>/Users/…/workspace — a
+    # directory that does not exist — and the tool answered "no such file" instead of
+    # listing the workspace it was pointed at. An absolute path that already points inside
+    # is taken as given; everything else is still read as relative, so a leading slash on
+    # "/report.md" keeps meaning the workspace root.
+    given = Path(raw)
+    if given.is_absolute():
+        inside = given.resolve()
+        if inside == workspace or workspace in inside.parents:
+            return inside
+    candidate = (workspace / raw.lstrip("/")).resolve()
     if candidate != workspace and workspace not in candidate.parents:
         raise OutsideWorkspace(
             f"'{path}' resolves outside the workspace. Files live under {workspace}; "
