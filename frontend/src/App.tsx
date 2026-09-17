@@ -630,7 +630,7 @@ function applyEvent(live: Live, event: StreamEvent): void {
     case 'approval.request':
       live.approval = {
         call_id: event.call_id, name: event.name, args: event.args,
-        server: event.server, reason: event.reason,
+        server: event.server, reason: event.reason, host: event.host,
         expires_in_s: event.expires_in_s ?? 0,
       };
       break;
