@@ -416,6 +416,69 @@ function TrustLine({ trust }: { trust: NonNullable<Message['trust']> }) {
   );
 }
 
+/**
+ * Everything the agent did, folded into one line.
+ *
+ * The work is not the answer. A run that read three tables to report four numbers used to
+ * render as three tool cards, three reasoning strips and a plan above the four numbers —
+ * so the thing that was asked for arrived last, below its own scaffolding. It is all still
+ * here, in full, one disclosure triangle away.
+ *
+ * A <details> rather than React state on purpose: a citation in the answer can open its
+ * own evidence with node.closest('details'), which needs no wiring between the two.
+ */
+function Work({ message, live, phase, cite, log }: {
+  message: Message; live: boolean; phase?: string; cite: string;
+  /** Bookkeeping the run emitted: kept in full, shown only to whoever opens this. */
+  log?: string[];
+}) {
+  const blocks = message.blocks ?? [];
+  const work = blocks.filter((b) => b.type !== 'text');
+  const steps = work.filter((b) => b.type === 'tool');
+  const plan = message.plan ?? [];
+  if (!work.length && !plan.length && !live && !(log ?? []).length) return null;
+
+  const running = steps.find((b) => b.status === 'running' || b.status === 'awaiting_approval');
+  const failed = steps.filter((b) => b.ok === false).length;
+  const ms = steps.reduce((total, b) => total + (b.ms ?? 0), 0);
+  const names = [...new Set(steps.map((b) => (b.name ?? '').split('__')[0]))].filter(Boolean);
+
+  return (
+    <details className="group/work my-1.5">
+      <summary className="focus-ring flex cursor-pointer list-none items-center gap-2 rounded-lg py-1 text-2xs dimmer transition-colors hover:text-zinc-600 dark:hover:text-zinc-300">
+        <ChevronRight size={12} className="shrink-0 transition-transform group-open/work:rotate-90" />
+        {live ? (
+          <>
+            <Spinner size={11} className="text-brand-500" />
+            <span className="text-zinc-600 dark:text-zinc-300">
+              {running?.name ?? PHASES[phase ?? 'starting'] ?? 'Working'}
+            </span>
+            {steps.length > 0 && <span>· step {steps.length}</span>}
+          </>
+        ) : (
+          <>
+            <span>{steps.length || plan.length} {steps.length === 1 ? 'step' : 'steps'}</span>
+            {ms > 0 && <span>· {duration(ms)}</span>}
+            {names.length > 0 && <span className="truncate font-mono">· {names.join(' ')}</span>}
+            {failed > 0 && (
+              <span className="text-amber-600 dark:text-amber-400">
+                · {failed} failed
+              </span>
+            )}
+          </>
+        )}
+      </summary>
+      <div className="mt-1 border-l pl-3 hairline animate-fade-in">
+        {plan.length > 0 && <PlanCard steps={plan} live={live} />}
+        <Blocks blocks={work} live={live} cite={cite} />
+        {(log ?? []).map((line, i) => (
+          <p key={i} className="my-1 text-2xs leading-relaxed dimmer">{line}</p>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 export function AssistantTurn({
   message, live, phase, approval, onApprove, approving, notices, error,
 }: {
@@ -425,30 +488,30 @@ export function AssistantTurn({
   approval?: ApprovalRequest | null;
   onApprove?: (approved: boolean) => void;
   approving?: boolean;
-  notices?: string[];
+  notices?: { text: string; quiet?: boolean }[];
   error?: string | null;
 }) {
   const blocks = message.blocks ?? [];
+  const answer = blocks.filter((b) => b.type === 'text');
+  const cite = `ev-${message.id}-`;
   return (
     <div className="animate-fade-up">
-      {(message.plan?.length ?? 0) > 0 && <PlanCard steps={message.plan!} live={live} />}
-      <Blocks blocks={blocks} live={!!live} cite={`ev-${message.id}-`} />
+      <Work message={message} live={!!live} phase={phase} cite={cite}
+        log={(notices ?? []).filter((n) => n.quiet).map((n) => n.text)} />
+      <Blocks blocks={answer} live={!!live} cite={cite} />
 
-      {live && !blocks.length && (
-        <div className="flex items-center gap-2 py-2 text-xs dim">
-          <Spinner size={13} className="text-brand-500" />
-          <span className="animate-pulse">{PHASES[phase ?? 'starting'] ?? 'Working'}…</span>
-        </div>
-      )}
-
+      {/* Never folded away: a question waiting on the reader, and a failure, are the two
+          things that must not need a click to be seen. */}
       {approval && onApprove && (
         <ApprovalCard request={approval} onResolve={onApprove} busy={approving} />
       )}
 
-      {(notices ?? []).map((notice, i) => (
+      {/* Only what asks something of the reader: a dropped attachment, a truncated
+          answer, a secret that was stripped. The rest is in the log above. */}
+      {(notices ?? []).filter((n) => !n.quiet).map((notice, i) => (
         <p key={i} className="my-2 flex items-start gap-1.5 text-2xs leading-relaxed dim">
           <AlertTriangle size={12} className="mt-px shrink-0 text-amber-500" />
-          {notice}
+          {notice.text}
         </p>
       ))}
 

@@ -5,13 +5,13 @@
 // it is asked for.
 
 import {
-  AlertTriangle, Cloud, Download, FolderOpen, MonitorSmartphone, Moon, PanelLeft, Plus,
-  Sparkles, Sun,
+  AlertTriangle, Cloud, Command, MonitorSmartphone, Plus, Sparkles,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, streamRun } from './api';
 import { Admin, AdminDoor } from './components/Admin';
 import { Artifacts } from './components/Artifacts';
+import { Palette } from './components/Palette';
 import { Composer } from './components/Composer';
 import { Sidebar } from './components/Sidebar';
 import { AssistantTurn, UserTurn, useStickToBottom, type ApprovalRequest } from './components/Thread';
@@ -28,7 +28,7 @@ interface Live {
   plan: PlanStep[];
   usage: Usage;
   phase: string;
-  notices: string[];
+  notices: { text: string; quiet?: boolean }[];
   approval: ApprovalRequest | null;
   error: string | null;
   trust: { sources: string[]; injections: { tool: string; patterns: string[] }[];
@@ -53,14 +53,15 @@ const emptyLive = (runId: string, conversationId: string, messageId: string): Li
 
 export default function App() {
   const toast = useToast();
-  const [dark, toggleTheme] = useTheme();
+  const [, toggleTheme] = useTheme();
   const [boot, setBoot] = useState<Bootstrap | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [live, setLive] = useState<Live | null>(null);
   const [sidebar, setSidebar] = useState(false);
-  const [admin, setAdmin] = useState(false);
+  const [admin, setAdmin] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState(false);
+  const [palette, setPalette] = useState(false);
   const [approving, setApproving] = useState(false);
   const stopStream = useRef<(() => void) | null>(null);
   const liveRef = useRef<Live | null>(null);
@@ -304,8 +305,13 @@ export default function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const meta = event.metaKey || event.ctrlKey;
-      if (meta && event.key === ',') { event.preventDefault(); setAdmin(true); }
-      if (meta && event.key.toLowerCase() === 'k') { event.preventDefault(); setSidebar((v) => !v); }
+      if (meta && event.key === ',') { event.preventDefault(); setAdmin('model'); }
+      // ⌘K is the one key worth remembering: it reaches every action, every setting and
+      // every past conversation. The drawer moved to ⌘⇧K, where managing them belongs.
+      if (meta && event.shiftKey && event.key.toLowerCase() === 'k') {
+        event.preventDefault(); setSidebar((v) => !v); return;
+      }
+      if (meta && event.key.toLowerCase() === 'k') { event.preventDefault(); setPalette((v) => !v); }
       if (meta && event.shiftKey && event.key.toLowerCase() === 'o') {
         event.preventDefault(); newConversation();
       }
@@ -348,9 +354,9 @@ export default function App() {
 
       <header className={cls('z-20 flex shrink-0 items-center gap-1 px-3 py-2.5 transition-[padding] duration-200',
         sidebar && 'sm:pl-[19rem]')}>
-        <button onClick={() => setSidebar((v) => !v)} title="Conversations (⌘K)"
+        <button onClick={() => setPalette(true)} title="Everything (⌘K)"
           className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
-          <PanelLeft size={16} strokeWidth={1.9} />
+          <Command size={15} strokeWidth={1.9} />
         </button>
         {!empty && (
           <button onClick={newConversation} title="New chat (⌘⇧O)"
@@ -360,17 +366,7 @@ export default function App() {
         )}
 
         <div className="ml-auto flex items-center gap-1">
-          {!empty && conversation && (
-            <button onClick={() => void exportConversation()} title="Export as Markdown"
-              className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
-              <Download size={15} strokeWidth={1.9} />
-            </button>
-          )}
-          <button onClick={() => setArtifacts(true)} title="Workspace files"
-            className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
-            <FolderOpen size={15} strokeWidth={1.9} />
-          </button>
-          <button onClick={() => (canSeeAdmin || boot?.admin.local ? setAdmin(true) : undefined)}
+          <button onClick={() => (canSeeAdmin || boot?.admin.local ? setAdmin('model') : undefined)}
             title={boot?.model.error
               ?? (boot?.model.local === false
                 ? `${boot.model.model} is hosted by Ollama, not by this machine — prompts leave it.`
@@ -386,12 +382,8 @@ export default function App() {
               <Badge tone="brand">{boot.mcp.tools_available} tools</Badge>
             )}
           </button>
-          <button onClick={toggleTheme} title="Theme"
-            className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
-            {dark ? <Sun size={15} strokeWidth={1.9} /> : <Moon size={15} strokeWidth={1.9} />}
-          </button>
           {(boot?.admin.local || boot?.admin.mode === 'password') && (
-            <AdminDoor onOpen={() => setAdmin(true)} warn={!modelOk || !toolsCapable} />
+            <AdminDoor onOpen={() => setAdmin('model')} warn={!modelOk || !toolsCapable} />
           )}
         </div>
       </header>
@@ -421,7 +413,7 @@ export default function App() {
                       approval={isLive ? live!.approval : null}
                       onApprove={(approved) => void resolveApproval(approved)}
                       approving={approving}
-                      notices={isLive ? live!.notices : undefined}
+                      notices={isLive ? live!.notices : message.notices}
                       error={isLive ? live!.error : message.error}
                     />
                   </div>
@@ -448,8 +440,23 @@ export default function App() {
 
       <Artifacts open={artifacts} onClose={() => setArtifacts(false)} />
 
+      <Palette
+        open={palette}
+        onClose={() => setPalette(false)}
+        conversations={conversations}
+        onOpenConversation={(id) => void openConversation(id)}
+        onNew={newConversation}
+        onSend={(text) => void send(text, [])}
+        onAdmin={(tab) => setAdmin(tab)}
+        onArtifacts={() => setArtifacts(true)}
+        onExport={() => void exportConversation()}
+        onTheme={toggleTheme}
+        onSidebar={() => setSidebar(true)}
+        canExport={!!conversation && messages.length > 0}
+      />
+
       {admin && boot && (
-        <Admin state={boot.admin} onClose={() => setAdmin(false)}
+        <Admin state={boot.admin} initialTab={admin} onClose={() => setAdmin(null)}
           onChanged={() => { void refreshBoot(); }} />
       )}
     </div>
@@ -643,7 +650,7 @@ function applyEvent(live: Live, event: StreamEvent): void {
       break;
     }
     case 'notice':
-      live.notices = [...live.notices, event.message];
+      live.notices = [...live.notices, { text: event.message, quiet: event.quiet }];
       break;
     case 'error':
       live.error = event.message;
