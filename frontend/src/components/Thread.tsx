@@ -11,8 +11,10 @@ import {
   Sparkles, Terminal, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Block, Message, PlanStep, Usage } from '../types';
+import type { AskRequest, Block, Message, PlanStep, Usage } from '../types';
+import { ChartView } from './Chart';
 import { Markdown } from './Markdown';
+import { AskCard, FileCard } from './Outputs';
 import { Badge, Button, Spinner, cls } from './ui';
 
 const TOOL_ICONS: Record<string, LucideIcon> = {
@@ -479,8 +481,18 @@ function Work({ message, live, phase, cite, log }: {
   );
 }
 
+/**
+ * What this turn handed over, in the order it was made: the latest version of each chart
+ * and every file. A chart revised twice in one turn shows once, as its final version.
+ */
+function outputsOf(blocks: Block[]): Block[] {
+  const lastVersion = new Map<string, number>();
+  blocks.forEach((b, i) => { if (b.chart) lastVersion.set(b.chart.id, i); });
+  return blocks.filter((b, i) => b.file || (b.chart && lastVersion.get(b.chart.id) === i));
+}
+
 export function AssistantTurn({
-  message, live, phase, approval, onApprove, approving, notices, error,
+  message, live, phase, approval, onApprove, approving, ask, onAnswer, answering, notices, error,
 }: {
   message: Message;
   live?: boolean;
@@ -488,11 +500,15 @@ export function AssistantTurn({
   approval?: ApprovalRequest | null;
   onApprove?: (approved: boolean) => void;
   approving?: boolean;
+  ask?: AskRequest | null;
+  onAnswer?: (answer: string) => void;
+  answering?: boolean;
   notices?: { text: string; quiet?: boolean }[];
   error?: string | null;
 }) {
   const blocks = message.blocks ?? [];
   const answer = blocks.filter((b) => b.type === 'text');
+  const outputs = outputsOf(blocks);
   const cite = `ev-${message.id}-`;
   return (
     <div className="animate-fade-up">
@@ -500,8 +516,15 @@ export function AssistantTurn({
         log={(notices ?? []).filter((n) => n.quiet).map((n) => n.text)} />
       <Blocks blocks={answer} live={!!live} cite={cite} />
 
-      {/* Never folded away: a question waiting on the reader, and a failure, are the two
+      {/* Charts and files are part of the answer, not of the work that produced it. */}
+      {outputs.map((b) => (b.chart
+        ? <ChartView key={`c-${b.index}`} chart={b.chart} />
+        : <FileCard key={`f-${b.index}`} file={b.file!} />))}
+      {(message.files ?? []).map((file) => <FileCard key={`w-${file.path}`} file={file} />)}
+
+      {/* Never folded away: a question waiting on the reader, and a failure, are the
           things that must not need a click to be seen. */}
+      {ask && onAnswer && <AskCard request={ask} onAnswer={onAnswer} busy={answering} />}
       {approval && onApprove && (
         <ApprovalCard request={approval} onResolve={onApprove} busy={approving} />
       )}

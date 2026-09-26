@@ -7,7 +7,7 @@
 // people stop trusting.
 
 import {
-  Activity, Brain, Check, Cpu, Eye, FileLock2, GraduationCap, KeyRound, Plug, Settings2,
+  Activity, Brain, Check, Cpu, Database, Eye, FileLock2, GraduationCap, KeyRound, Plug, Settings2,
   ShieldAlert, ShieldCheck, Sparkles, Trash2, Wrench, X, Zap,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -17,17 +17,19 @@ import type {
   SkillStats, ToolInfo,
 } from '../types';
 import { McpLibrary } from './McpLibrary';
+import { SourcesPanel } from './Sources';
 import {
   Badge, Button, Dot, Empty, Field, IconButton, Input, Switch, cls, useConfirm,
   useToast,
 } from './ui';
 
-type Tab = 'model' | 'mcp' | 'tools' | 'guardrails' | 'identity' | 'memory' | 'audit'
-  | 'diagnostics';
+type Tab = 'model' | 'mcp' | 'sources' | 'tools' | 'guardrails' | 'identity' | 'memory'
+  | 'audit' | 'diagnostics';
 
 const TABS: { id: Tab; label: string; icon: typeof Cpu }[] = [
   { id: 'model', label: 'Model', icon: Cpu },
   { id: 'mcp', label: 'MCP servers', icon: Plug },
+  { id: 'sources', label: 'Data sources', icon: Database },
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'guardrails', label: 'Guardrails', icon: ShieldCheck },
   { id: 'identity', label: 'Identity', icon: Sparkles },
@@ -84,6 +86,7 @@ export function Admin({
             <div className="mx-auto max-w-3xl p-6">
               {tab === 'model' && <ModelPanel onChanged={onChanged} />}
               {tab === 'mcp' && <McpLibrary onChanged={onChanged} />}
+              {tab === 'sources' && <SourcesPanel />}
               {tab === 'tools' && <ToolsPanel />}
               {tab === 'guardrails' && <GuardrailsPanel onChanged={onChanged} />}
               {tab === 'identity' && <IdentityPanel />}

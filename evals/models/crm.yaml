@@ -1,0 +1,22 @@
+metrics:
+  - name: conversion_rate
+    synonyms: [taux de conversion, lead conversion, conversion]
+    definition: AVG(leads.converted), per campaign
+  - name: campaign_budget
+    synonyms: [budget, coût de campagne, campaign cost, spend]
+    definition: SUM(campaigns.budget_eur)
+    description: Planned budget, not measured spend.
+  - name: campaign_roi
+    synonyms: [ROI, retour sur investissement, return on investment]
+    definition: campaign revenue / campaigns.budget_eur, where campaign revenue = Sales DB revenue of the customers whose converted lead came from that campaign
+    description: Needs both sources — revenue from Sales DB, attribution and budget from CRM.
+caveats:
+  - Each customer has exactly one converted lead; unconverted leads have customer_id NULL and are identical rows, legitimately.
+  - Revenue is not in CRM. Fetch it from Sales DB per customer and join on leads.customer_id = customers.id.
+verified_queries:
+  - question: Converted customers per campaign
+    sql: SELECT k.id, k.name, k.channel, k.budget_eur, l.customer_id FROM leads l JOIN campaigns k ON k.id = l.campaign_id WHERE l.converted = 1 ORDER BY k.id
+  - question: Conversion rate by campaign
+    sql: SELECT k.name, COUNT(*) AS leads, SUM(l.converted) AS converted, ROUND(AVG(l.converted), 3) AS conversion_rate FROM leads l JOIN campaigns k ON k.id = l.campaign_id GROUP BY k.id ORDER BY conversion_rate DESC
+  - question: Customers per account manager
+    sql: SELECT manager, tier, COUNT(*) AS customers FROM account_managers GROUP BY manager, tier ORDER BY manager

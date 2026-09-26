@@ -128,12 +128,13 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                 "text": text[:24000] + ("\n\n[truncated at 24k characters]" if len(text) > 24000 else ""),
                 "data": {"url": result["url"], "title": result["title"]}}
 
-    async def h_run_python(code: str = "", **_: Any) -> dict:
+    async def h_run_python(code: str = "", _setup: str = "", **_: Any) -> dict:
         callable_tools = bridge_tools() if bridge_tools else []
         result = await code_tool.run_python(code, workspace=workspace,
                                             timeout_s=settings.python_timeout_s,
                                             memory_mb=settings.python_memory_mb,
-                                            bridge=bridge, bridge_tools=callable_tools)
+                                            bridge=bridge, bridge_tools=callable_tools,
+                                            setup=_setup)
         if not result.get("ok"):
             return {"ok": False, "error": result.get("error", "failed"),
                     "text": result.get("stdout", "")}
@@ -358,7 +359,8 @@ _PLAN_DESC = (
 
 
 def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
-                 scopes: list[dict] | None = None, workspace: str = "") -> str:
+                 scopes: list[dict] | None = None, workspace: str = "",
+                 notes: dict[str, list[str]] | None = None) -> str:
     """A compact index of the live tool surface for the system prompt.
 
     Names only, grouped. The full descriptions and JSON schemas already travel in the
@@ -409,7 +411,11 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
                 if workspace and workspace in scope["paths"]:
                     where += (" — the same directory workspace_write writes to, so anything "
                               "you save there is immediately loadable here")
-            lines.append(f"{server}: {shown}{more}{where}")
+            # What someone wrote about this source in Admin: what it holds, its tables and
+            # their values, the metrics as they are meant to be computed, what is tricky.
+            # This is the part that replaces five describe calls per question.
+            known = "".join(f"\n    ↳ {line}" for line in (notes or {}).get(slug, []))
+            lines.append(f"{server}: {shown}{more}{where}{known}")
     return "\n".join(lines)
 
 

@@ -5,7 +5,7 @@
 // three letters, press Enter.
 
 import {
-  Activity, Brain, ChevronRight, Cpu, Download, FileLock2, FolderOpen, GraduationCap,
+  Activity, Brain, ChevronRight, Cpu, Database, Download, FileLock2, FolderOpen, GraduationCap,
   MessageSquare, Plug, Plus, Search, ShieldCheck, Sparkles, Sun, Wrench,
   type LucideIcon,
 } from 'lucide-react';
@@ -89,7 +89,8 @@ export function Palette({
       });
     }
     const tabs: [string, string, LucideIcon][] = [
-      ['model', 'Model', Cpu], ['mcp', 'MCP servers', Plug], ['tools', 'Tools', Wrench],
+      ['model', 'Model', Cpu], ['mcp', 'MCP servers', Plug], ['sources', 'Data sources', Database],
+      ['tools', 'Tools', Wrench],
       ['guardrails', 'Guardrails', ShieldCheck], ['identity', 'Identity & skills', Sparkles],
       ['memory', 'Memory', Brain], ['audit', 'Audit log', FileLock2],
       ['diagnostics', 'Diagnostics', Activity],

@@ -6,3 +6,4 @@ backend/data/
 __pycache__/
 *.pyc
 .DS_Store
+evals/results/

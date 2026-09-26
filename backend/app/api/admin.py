@@ -283,6 +283,105 @@ async def delete_skill(skill_id: str) -> dict:
     return {"ok": True}
 
 
+# -------------------------------------------------------------- data sources
+def _queryable(server: dict) -> bool:
+    from app.data.profiler import Profiler
+    tools = [t for t in c.mcp.tools() if t["server_id"] == server["id"]]
+    return bool(tools) and bool(Profiler(c.mcp)._detect(tools)["query"])
+
+
+def _source_summary(server: dict) -> dict:
+    knowledge = c.knowledge.get(server["id"])
+    model = knowledge["model"]
+    conn = c.mcp.connections.get(server["id"])
+    queryable = _queryable(server)
+    return {
+        "id": server["id"], "name": server["name"], "slug": server.get("slug") or "",
+        "connected": bool(conn and conn.status == "connected"),
+        "description": knowledge["description"],
+        "counts": {"tables": len(model.get("tables") or []),
+                   "metrics": len(model.get("metrics") or []),
+                   "caveats": len(model.get("caveats") or []),
+                   "verified": len(model.get("verified_queries") or [])},
+        "queryable": queryable,
+        "readiness": c.knowledge.readiness(server["id"], queryable),
+        "profiled_at": knowledge["profiled_at"], "updated_at": knowledge["updated_at"],
+    }
+
+
+@guarded.get("/sources")
+async def list_sources() -> list[dict]:
+    """Every connected server with what has been written about it, and how ready it is."""
+    return [_source_summary(s) for s in c.store.mcp_servers().values()]
+
+
+def _source_or_404(server_id: str) -> dict:
+    server = c.store.mcp_servers().get(server_id)
+    if server is None:
+        raise HTTPException(404, "No such server.")
+    return server
+
+
+@guarded.get("/sources/{server_id}")
+async def get_source(server_id: str) -> dict:
+    from app.data.knowledge import EXAMPLE_YAML
+    server = _source_or_404(server_id)
+    knowledge = c.knowledge.get(server_id)
+    return {**_source_summary(server), "model_yaml": knowledge["model_yaml"],
+            "profile": knowledge["profile"], "example_yaml": EXAMPLE_YAML, "errors": []}
+
+
+class SourceBody(BaseModel):
+    description: str | None = Field(default=None, max_length=4000)
+    model_yaml: str | None = Field(default=None, max_length=200_000)
+
+
+@guarded.put("/sources/{server_id}")
+async def put_source(server_id: str, body: SourceBody) -> dict:
+    server = _source_or_404(server_id)
+    knowledge, errors = c.knowledge.update(server_id, description=body.description,
+                                           model_yaml=body.model_yaml)
+    await c.store.save()
+    return {**_source_summary(server), "model_yaml": knowledge["model_yaml"],
+            "profile": knowledge["profile"], "errors": errors}
+
+
+@guarded.post("/sources/{server_id}/profile")
+async def profile_source(server_id: str) -> dict:
+    """Measure the source through its own tools and fold the facts into its model."""
+    from app.data.profiler import Profiler, ProfileError
+    server = _source_or_404(server_id)
+    try:
+        profile, model = await Profiler(c.mcp).profile(server)
+    except ProfileError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    knowledge = c.knowledge.set_profile(server_id, profile, model)
+    await c.store.save()
+    c.audit.record("source.profile", server=server["name"], queries=profile["queries"],
+                   tables=profile.get("tables_measured"))
+    return {**_source_summary(server), "model_yaml": knowledge["model_yaml"],
+            "profile": profile, "errors": []}
+
+
+@guarded.post("/sources/{server_id}/draft")
+async def draft_source(server_id: str) -> dict:
+    """Propose descriptions, metrics and checked queries. Returned, never saved: a person
+    reads a draft before the agent trusts it."""
+    from app.data.drafting import draft
+    from app.data.profiler import Profiler, ProfileError
+    server = _source_or_404(server_id)
+    current = c.knowledge.get(server_id)
+    try:
+        if not current["model"].get("tables"):
+            profile, model = await Profiler(c.mcp).profile(server)
+            current = c.knowledge.set_profile(server_id, profile, model)
+            await c.store.save()
+        proposal = await draft(c.llm, c.mcp, server, current, current["model"])
+    except ProfileError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {**_source_summary(server), **proposal}
+
+
 # --------------------------------------------------------------- diagnostics
 def run_metrics(sample: int = 60) -> dict:
     """What the last runs actually cost, read back from what was saved.
