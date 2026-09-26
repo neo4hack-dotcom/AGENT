@@ -134,3 +134,52 @@ harness runs each case in a fresh conversation and records the full event stream
 vary run to run — the model is sampled, not deterministic — so the mechanics (calls, failed
 calls, artefacts, fabrications) are the signal, not any single score. Numbers here are from
 one full run of each, not a best-of.
+
+---
+
+# CIB campaign: eighteen servers, ten questions
+
+`evals/finance/` builds a small investment-banking world and connects it next to the rest of
+an estate: market data, reference data and risk as tool servers (bond prices in % of par,
+FX fixed EURxxx, no fixing on TARGET holidays, VaR at month ends only), a versioned trade
+store over SQL (amendments, cancellations), eight look-alike corporate servers (HR
+"positions", facilities "desks", procurement "ratings" and "limits"), plus files,
+dataframes, memory, time, sales and CRM — 18 servers, 89 tools. Ten graded questions cross
+them. Model: `gpt-oss:120b-cloud` for both lanes; runs that hit a model-host 5xx are rerun.
+
+| Pass | What changed | Passed |
+|---|---|---|
+| Baseline | tool names in the prompt, lexical tool selection | 6/10 |
+| Routed | source map, routing by meaning, atlas, notes on empty results | 6/10 |
+| + fixes | batch_call, tolerant rows(), evidence digest, Critic for data traps, read fence | 6/10 |
+| Prepared | the four markets sources drafted with AI and saved unread | **8/10** |
+
+What moved, and why:
+- **Distractors never chosen**, in any pass: job vacancies, office desks, supplier ratings
+  and spending limits stayed out of every markets answer.
+- **F1** (market value of the Credit desk's BBB+-or-lower bonds, in EUR) failed every bare
+  pass and passed prepared, to the euro: the drafted descriptions say what `list_instruments`
+  returns and that bond prices are in % of par, which is most of the question.
+- **F5** (DV01 of the Rates desk) failed the baseline — `book="Rates"` returned nothing and
+  the answer said the data did not exist. The empty-result note, with the book ids already
+  observed, fixed it for good.
+- **F7** (EQC-EU equities down >10 %) went from 78 s and 24 calls to 24 s, once `batch_call`
+  fetched every price in one call.
+- **F4** (a close on 1 May) exposed a reasoning error — the 30 April close presented as the
+  1 May close — now a rule: a date with no value is an answer.
+- **F3** computes the right figures to the cent but still names counterparties by id in
+  some runs; **F8** (Société Générale: counterparty, issuer and share) still covers one role
+  without saying so. Both are prompt-level; both remain open.
+
+Found on the way, and fixed: run events stopped reaching the client once a long run
+trimmed its buffer (sequence numbers went backwards; the UI waited forever); `run_python`
+results were read as a one-row table of `elapsed_ms`; the model once opened the trade
+store's SQLite file directly from code — reads outside the workspace are now refused by
+the sandbox.
+
+```bash
+python evals/finance/data.py
+python evals/finance/setup.py --base http://localhost:3045 --estate
+python evals/finance/run.py --base http://localhost:3045 --label cib
+python evals/finance/prepare.py --base http://localhost:3045     # then run again
+```
