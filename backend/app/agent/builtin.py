@@ -122,8 +122,10 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                 "summary": (f"ran in {result['elapsed_ms']} ms — "
                             + (f"{len(out.splitlines())} line(s) of output" if out else "no output")
                             + (f", {len(used)} tool call(s)" if used else "")),
-                "text": out or "(the code ran and printed nothing — print() what you need to see)",
-                "data": {"elapsed_ms": result["elapsed_ms"]}}
+                # No structured `data`: what the code printed is the result. A metadata
+                # object here was read as a one-row table, and every chart or export that
+                # named this call got a table of `elapsed_ms` instead of the printed rows.
+                "text": out or "(the code ran and printed nothing — print() what you need to see)"}
 
     def elsewhere(result: dict) -> dict:
         """Turn "not here" into "here is where it is".

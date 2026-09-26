@@ -113,6 +113,8 @@ class RunContext:
         self.notices: list[dict] = []
         self.started_at = time.time()
         self.produced: list[dict] = []
+        # The workspace as the run found it, so what the run made can be told apart.
+        self.workspace_before: dict[str, tuple[int, float]] = {}
         # Progressive tool disclosure: what has been used, and what the model asked for by
         # name. Both survive the turn that established them — a task that needed a tool
         # once usually needs it again, and making it search twice is a wasted turn.
@@ -364,6 +366,10 @@ class AgentRunner:
     # ----------------------------------------------------------------- driving
     async def _drive(self, ctx: RunContext, text: str, images: list[dict]) -> None:
         try:
+            ctx.workspace_before = self._workspace_state()
+        except OSError:
+            ctx.workspace_before = {}
+        try:
             await self._run(ctx, text, images)
             ctx.status = "completed" if not ctx.error else "failed"
         except RunCancelled:
@@ -415,29 +421,49 @@ class AgentRunner:
         await asyncio.sleep(delay)
         self.runs.pop(run_id, None)
 
+    _SKIP_DIRS = {".results", ".charts", "uploads"}
+    # What servers keep for themselves: their logs and audit trails. Written on every call,
+    # never something the reader asked for.
+    _HOUSEKEEPING = re.compile(r"(audit|\.log$|_log\.|\.lock$|\.tmp$|~$)", re.I)
+
+    def _workspace_state(self) -> dict[str, tuple[int, float]]:
+        workspace = self.c.workspace().resolve()
+        state = {}
+        for path in workspace.rglob("*"):
+            relative = path.relative_to(workspace)
+            if not path.is_file() or relative.parts[0] in self._SKIP_DIRS or path.name.startswith("."):
+                continue
+            stat = path.stat()
+            state[str(relative)] = (stat.st_size, stat.st_mtime)
+        return state
+
     def _collect_files(self, ctx: RunContext) -> None:
-        """Every file this run left in the workspace, whichever tool wrote it.
+        """Every file this run made for the reader, whichever tool wrote it.
 
         export_data and create_report hand back a download card themselves. But a file
         written by the pandas server, or by run_python, is just as much the reader's — and
         without a card it existed only for someone who knew to look in the workspace.
+
+        Made for the reader means new in this run, or rewritten by a call that names it. A
+        server's own audit log changes on every call too; it is not an answer.
         """
-        workspace = self.c.workspace().resolve()
         reported = {b["file"]["path"] for b in ctx.blocks if b.get("file")}
-        skip = {".results", ".charts", "uploads"}
+        before = ctx.workspace_before
+        named = " ".join(json.dumps(b.get("args") or {}, ensure_ascii=False, default=str)
+                         for b in ctx.blocks if b.get("type") == "tool")
         found = []
-        for path in workspace.rglob("*"):
-            try:
-                relative = path.relative_to(workspace)
-            except ValueError:
+        for relative, (size, mtime) in self._workspace_state().items():
+            name = Path(relative).name
+            if relative in reported or self._HOUSEKEEPING.search(name):
                 continue
-            if not path.is_file() or relative.parts[0] in skip or path.name.startswith("."):
+            if mtime < ctx.started_at - 1:
                 continue
-            stat = path.stat()
-            if stat.st_mtime < ctx.started_at - 1 or str(relative) in reported:
+            if relative in before and before[relative] == (size, mtime):
                 continue
-            found.append({"path": str(relative), "name": path.name, "bytes": stat.st_size,
-                          "format": path.suffix.lstrip(".").lower() or "file"})
+            if relative in before and name not in named:
+                continue      # changed, but by no call that asked for it
+            found.append({"path": relative, "name": name, "bytes": size,
+                          "format": Path(relative).suffix.lstrip(".").lower() or "file"})
         ctx.produced = sorted(found, key=lambda f: f["name"])[:12]
         if ctx.produced:
             ctx.emit({"type": "files", "files": ctx.produced})

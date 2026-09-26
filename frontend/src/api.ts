@@ -70,8 +70,10 @@ export const api = {
   answer: (runId: string, callId: string, answer: string) =>
     request<{ ok: boolean }>(`/runs/${runId}/answer`,
       { method: 'POST', body: body({ call_id: callId, answer }) }),
-  chartTheme: () => request<{ light: Record<string, unknown>; dark: Record<string, unknown> }>(
-    '/charts/theme'),
+  chartTheme: () => request<{
+    light: Record<string, unknown>; dark: Record<string, unknown>;
+    locale?: { name: string; format: Record<string, unknown>; time: Record<string, unknown> };
+  }>('/charts/theme'),
   approve: (runId: string, callId: string, approved: boolean) =>
     request<{ ok: boolean }>(`/runs/${runId}/approve`,
       { method: 'POST', body: body({ call_id: callId, approved }) }),

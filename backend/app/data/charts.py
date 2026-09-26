@@ -241,80 +241,271 @@ def validate_fields(spec: dict, columns: list[str]) -> None:
 
 # ------------------------------------------------------------------ building
 
-_MONTH = re.compile(r"^\d{4}-\d{2}$")
-_QUARTER = re.compile(r"^\d{4}-?Q[1-4]$", re.I)
+# ------------------------------------------------------------------ locales
+
+# d3 locale definitions, inline: a locale named rather than defined is fetched from a CDN
+# by the browser, and nothing here may be fetched from anywhere.
+LOCALES: dict[str, dict] = {
+    "fr-FR": {
+        "format": {"decimal": ",", "thousands": " ", "grouping": [3],
+                   "currency": ["", " €"], "percent": " %"},
+        "time": {"dateTime": "%A %e %B %Y à %X", "date": "%d/%m/%Y", "time": "%H:%M:%S",
+                 "periods": ["AM", "PM"],
+                 "days": ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"],
+                 "shortDays": ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."],
+                 "months": ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
+                            "août", "septembre", "octobre", "novembre", "décembre"],
+                 "shortMonths": ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.",
+                                 "août", "sept.", "oct.", "nov.", "déc."]},
+        "currency": "EUR", "billion": "Md",
+    },
+    "en-US": {
+        "format": {"decimal": ".", "thousands": ",", "grouping": [3], "currency": ["$", ""]},
+        "time": {"dateTime": "%x, %X %p", "date": "%-m/%-d/%Y", "time": "%-I:%M:%S %p",
+                 "periods": ["AM", "PM"],
+                 "days": ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+                 "shortDays": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+                 "months": ["January", "February", "March", "April", "May", "June", "July",
+                            "August", "September", "October", "November", "December"],
+                 "shortMonths": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep",
+                                 "Oct", "Nov", "Dec"]},
+        "currency": "USD", "billion": "B",
+    },
+    "en-GB": {
+        "format": {"decimal": ".", "thousands": ",", "grouping": [3], "currency": ["£", ""]},
+        "time": {"dateTime": "%a %e %b %X %Y", "date": "%d/%m/%Y", "time": "%H:%M:%S",
+                 "periods": ["AM", "PM"],
+                 "days": ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+                 "shortDays": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+                 "months": ["January", "February", "March", "April", "May", "June", "July",
+                            "August", "September", "October", "November", "December"],
+                 "shortMonths": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep",
+                                 "Oct", "Nov", "Dec"]},
+        "currency": "GBP", "billion": "bn",
+    },
+}
 
 
-def polish(spec: dict, rows: list[dict]) -> dict:
-    """Small corrections a careful analyst would make, applied so the model need not.
+def locale_of(name: str) -> dict:
+    return LOCALES.get(name) or LOCALES["fr-FR"]
 
-    "2026-01" is a month. Encoded as a plain temporal field it is parsed as the first of
-    the month and ticked every fortnight — "Jan 04, Jan 18, February…" — which reads as
-    noise. So a field whose values are all year-months gets a yearmonth time unit, and on
-    bars an ordinal scale, so each month is one clean band with one clean label.
+
+# ------------------------------------------------------------------ building
+
+_POSITION = ("x", "y", "xOffset", "yOffset", "column", "row", "facet")
+_TOOLTIP_CHANNELS = ("x", "y", "color", "theta", "size", "xOffset", "column", "row", "shape",
+                     "opacity", "detail")
+_TEMPORAL_KINDS = ("year", "quarter", "month", "month_name", "weekday", "date")
+
+
+def compact_expr(locale: str) -> str:
+    """Axis labels a reader of financial figures expects: 850, 12 k, 1,5 M, 2 Md."""
+    billion = locale_of(locale)["billion"]
+    return ("abs(datum.value) >= 1e9 ? format(datum.value / 1e9, ',.1~f') + ' " + billion + "' : "
+            "abs(datum.value) >= 1e6 ? format(datum.value / 1e6, ',.1~f') + ' M' : "
+            "abs(datum.value) >= 1e4 ? format(datum.value / 1e3, ',.0f') + ' k' : "
+            "format(datum.value, ',.2~f')")
+
+
+def titled(info: dict) -> str:
+    label = info.get("label") or ""
+    unit = (info.get("unit") or "").strip()
+    if info.get("kind") == "percent" and "%" not in label:
+        return f"{label} (%)"
+    if unit and unit != "%" and unit.lower() not in label.lower():
+        return f"{label} ({unit})"
+    return label
+
+
+def _tooltip_format(info: dict, definition: dict, locale: str) -> dict:
+    kind = info.get("kind")
+    if definition.get("timeUnit") == "yearmonth" or kind == "month" and definition.get("type") == "temporal":
+        return {"format": "%B %Y"}
+    if definition.get("type") == "temporal":
+        return {"format": "%d %B %Y"}
+    if definition.get("type") != "quantitative" or kind in _TEMPORAL_KINDS:
+        return {}
+    if definition.get("aggregate") == "count":
+        return {"format": ",.0f"}
+    if kind == "percent":
+        return {"format": ".1%" if info.get("fraction") else ",.1f"}
+    if kind == "currency":
+        same = (info.get("unit") or "").upper() == locale_of(locale)["currency"]
+        return {"format": "$,.2f" if same else ",.2f"}
+    if kind == "count" or (info.get("integer") and definition.get("aggregate") in (None, "sum", "max", "min")):
+        return {"format": ",.0f"}
+    return {"format": ",.2~f"}
+
+
+def polish(spec: dict, rows: list[dict], fields: dict[str, dict] | None = None,
+           locale: str = "fr-FR") -> dict:
+    """The corrections a careful analyst makes by hand, applied so the model need not.
+
+    Years are categories on an axis, not quantities: 2021 as a number is drawn "2.021k",
+    and as a date it is read as 2021 milliseconds after 1970. Quarters and month names sort
+    in calendar order, not alphabetically. "2026-01" is a month, one clean band per month.
+    Axes are titled the way a reader would say them, with the unit; amounts read 12 k,
+    1,5 M; and every mark answers a hover — or a click — with what it is, formatted.
     """
-    samples: dict[str, list] = {}
-    for row in rows[:200]:
+    from app.data import chart_sense as sense
+
+    fields = fields or sense.infer(rows)
+    values_of: dict[str, list] = {}
+    for row in rows[:2000]:
         for key, value in row.items():
-            samples.setdefault(key, []).append(value)
+            if value is not None:
+                values_of.setdefault(key, []).append(value)
 
-    def monthly(field: str) -> bool:
-        values = [v for v in samples.get(field, []) if v is not None]
-        return bool(values) and all(isinstance(v, str) and _MONTH.match(v) for v in values)
+    def calendar_sort(field: str, kind: str, info: dict) -> list | None:
+        distinct = list(dict.fromkeys(values_of.get(field, [])))
+        if kind == "quarter":
+            return sorted(distinct, key=lambda v: sense.quarter_key(v) or (0, 0))
+        if kind == "month_name" and not info.get("month_numbers"):
+            return sorted(distinct, key=lambda v: sense._position(v, sense.MONTHS) or 0)
+        if kind == "weekday":
+            return sorted(distinct, key=lambda v: sense._position(v, sense.WEEKDAYS) or 0)
+        return None
 
-    def walk(node: Any, mark: str) -> None:
-        if not isinstance(node, dict):
+    def fix_channel(channel: str, d: dict, mark: str) -> None:
+        field = d.get("field")
+        info = fields.get(field) if isinstance(field, str) else None
+        if info is None:
             return
+        kind = info.get("kind")
+        derived = d.get("aggregate") or d.get("bin")
+        if kind == "month" and not d.get("timeUnit") and not derived \
+                and d.get("type") in ("temporal", "ordinal", "nominal", None):
+            d["timeUnit"] = "yearmonth"
+            d["type"] = "ordinal" if mark in ("bar", "rect", "boxplot") and channel in ("x", "y") else "temporal"
+            axis = d.setdefault("axis", {}) if channel in ("x", "y") else None
+            if isinstance(axis, dict):
+                axis.setdefault("format", "%b %Y")
+                if d["type"] == "temporal":
+                    axis.setdefault("tickCount", {"interval": "month", "step": 1})
+        elif kind in ("year", "quarter", "month_name", "weekday") and not derived:
+            # A category with an order: never a quantity, never a timestamp.
+            d.pop("timeUnit", None)
+            if d.get("type") in ("quantitative", "temporal"):
+                d.pop("scale", None)      # a zero-based or time scale means nothing on bands
+            d["type"] = "ordinal"
+            order = calendar_sort(field, kind, info)
+            if order and "sort" not in d:
+                d["sort"] = order
+            if kind == "month_name" and info.get("month_numbers") and channel in ("x", "y"):
+                months = locale_of(locale)["time"]["shortMonths"]
+                d.setdefault("axis", {}).setdefault(
+                    "labelExpr", f"{json.dumps(months, ensure_ascii=False)}[datum.value - 1]")
+        elif kind == "date" and d.get("type") in ("nominal", "ordinal") and channel == "x" \
+                and mark in ("line", "area", "point", "trail", "circle"):
+            d["type"] = "temporal"
+        # The reader's name for it, with the unit — unless the analyst named it on purpose.
+        current = d.get("title")
+        if current is None or (isinstance(current, str)
+                               and current.strip().lower().replace(" ", "_") == field.lower()):
+            d["title"] = titled(info)
+        if d.get("type") == "quantitative" and kind not in _TEMPORAL_KINDS and channel in ("x", "y"):
+            axis = d.get("axis")
+            if axis is None:
+                axis = d["axis"] = {}
+            if isinstance(axis, dict) and "format" not in axis and "labelExpr" not in axis \
+                    and not d.get("stack") == "normalize":
+                if kind == "percent" and info.get("fraction"):
+                    axis["format"] = ".0%"
+                elif kind == "percent":
+                    axis["labelExpr"] = "format(datum.value, ',.0~f') + ' %'"
+                else:
+                    axis["labelExpr"] = compact_expr(locale)
+
+    def tooltip_for(encoding: dict) -> list[dict]:
+        entries, seen = [], set()
+        for channel in _TOOLTIP_CHANNELS:
+            d = encoding.get(channel)
+            if not isinstance(d, dict) or not (d.get("field") or d.get("aggregate") == "count"):
+                continue
+            key = (d.get("field"), d.get("aggregate"), json.dumps(d.get("timeUnit")), json.dumps(d.get("bin")))
+            if key in seen:
+                continue
+            seen.add(key)
+            entry = {k: d[k] for k in ("field", "type", "aggregate", "timeUnit", "bin") if k in d}
+            info = fields.get(d.get("field") or "", {})
+            entry["title"] = d.get("title") or (titled(info) if info else
+                                                ("Count" if d.get("aggregate") == "count" else d.get("field")))
+            entry.update(_tooltip_format(info, d, locale))
+            if d.get("stack") == "normalize" and channel in ("x", "y"):
+                entry.pop("format", None)
+            entries.append(entry)
+        return entries
+
+    def mark_of(node: dict, inherited: str) -> str:
         own = node.get("mark")
-        kind = (own.get("type") if isinstance(own, dict) else own) or mark
+        kind = (own.get("type") if isinstance(own, dict) else own) or inherited
         if not own and node.get("layer"):
             # A shared encoding above layers serves every layer; if any of them is a bar,
             # the axis must be bands, or the bars slide off the points drawn on them.
             kinds = [(l.get("mark", {}).get("type") if isinstance(l.get("mark"), dict)
                       else l.get("mark")) for l in node["layer"] if isinstance(l, dict)]
             kind = "bar" if any(k in ("bar", "rect", "boxplot") for k in kinds) else (kinds[0] if kinds else kind)
+        return kind or ""
+
+    def series_length(encoding: dict) -> int:
+        color = encoding.get("color") if isinstance(encoding, dict) else None
+        field = color.get("field") if isinstance(color, dict) else None
+        groups = len({row.get(field) for row in rows}) if field else 1
+        return len(rows) // max(1, groups)
+
+    def walk(node: Any, inherited: str, has_tooltip_above: bool) -> None:
+        if not isinstance(node, dict):
+            return
+        kind = mark_of(node, inherited)
+        own = node.get("mark")
+        if kind == "line" and own and "point" not in (own if isinstance(own, dict) else {}) \
+                and series_length(node.get("encoding") or {}) <= 60:
+            # A line is one shape: clicking or hovering it can only ever report its first
+            # point. A dot per value is what makes each value readable, and clickable.
+            node["mark"] = {**(own if isinstance(own, dict) else {"type": own}),
+                            "point": {"filled": True, "size": 42}}
+            own = node["mark"]
         if isinstance(own, dict) and own.get("type") in ("line", "area") and own.get("color") \
                 and own.get("point") is True:
             # The points on a coloured line otherwise take the theme's default colour.
             own["point"] = {"color": own["color"], "filled": True}
         encoding = node.get("encoding")
+        tooltip_here = has_tooltip_above
         if isinstance(encoding, dict):
-            for channel in ("x", "y", "x2", "y2", "color", "column", "row", "xOffset"):
-                spec_ = encoding.get(channel)
-                if not isinstance(spec_, dict) or not isinstance(spec_.get("field"), str):
-                    continue
-                if not monthly(spec_["field"]) or spec_.get("timeUnit"):
-                    continue
-                if spec_.get("type") in ("temporal", "ordinal", None):
-                    spec_["timeUnit"] = "yearmonth"
-                    # Otherwise Vega titles the axis "month (year-month)".
-                    spec_.setdefault("title", spec_["field"].replace("_", " ").capitalize())
-                    if kind in ("bar", "rect", "boxplot") and channel in ("x", "y"):
-                        spec_["type"] = "ordinal"
-                    else:
-                        spec_["type"] = "temporal"
-                    axis = spec_.setdefault("axis", {}) if channel in ("x", "y") else None
-                    if isinstance(axis, dict):
-                        axis.setdefault("format", "%b %Y")
-                        if spec_["type"] == "temporal":
-                            axis.setdefault("tickCount", {"interval": "month", "step": 1})
+            for channel, d in list(encoding.items()):
+                if isinstance(d, dict) and channel not in ("tooltip",):
+                    fix_channel(channel, d, kind)
+            if "tooltip" not in encoding and not has_tooltip_above and kind not in ("rule", "text"):
+                entries = tooltip_for(encoding)
+                if entries:
+                    encoding["tooltip"] = entries
+            tooltip_here = tooltip_here or "tooltip" in encoding
+        if isinstance(own, dict) and own.get("tooltip") is not None:
+            tooltip_here = True
         for key in ("layer", "hconcat", "vconcat", "concat"):
             for child in node.get(key) or []:
-                walk(child, kind)
+                walk(child, kind, tooltip_here)
         if isinstance(node.get("spec"), dict):
-            walk(node["spec"], kind)
+            walk(node["spec"], kind, tooltip_here)
+        facet = node.get("facet")
+        if isinstance(facet, dict):
+            for d in ([facet] if "field" in facet else [v for v in facet.values() if isinstance(v, dict)]):
+                fix_channel("facet", d, kind)
 
-    walk(spec, "")
+    walk(spec, "", False)
+    spec["usermeta"] = {"fields": {k: {kk: vv for kk, vv in v.items() if kk in ("label", "unit", "kind", "fraction", "month_numbers")}
+                                   for k, v in fields.items()}}
     return spec
 
 
-def assemble(spec: dict, rows: list[dict], title: str = "", subtitle: str = "") -> dict:
+def assemble(spec: dict, rows: list[dict], title: str = "", subtitle: str = "",
+             fields: dict[str, dict] | None = None, locale: str = "fr-FR") -> dict:
     """The stored chart: the model's spec, the real rows, a title — and no theme.
 
     Theme is applied when drawn, so the same chart follows the reader into dark mode on
     screen and prints on white in the PDF.
     """
-    full = polish(sanitize(spec), rows)
+    full = polish(sanitize(spec), rows, fields, locale)
     if title or subtitle:
         current = full.get("title")
         block = current if isinstance(current, dict) else ({"text": current} if current else {})
@@ -329,6 +520,13 @@ def assemble(spec: dict, rows: list[dict], title: str = "", subtitle: str = "") 
                                    "facet", "repeat")):
         raise ChartError("The spec has no mark. Give it at least a 'mark' and an 'encoding'.")
     return full
+
+
+def fields_used(spec: dict) -> list[str]:
+    """The columns the chart encodes, in the order a reader meets them."""
+    used: set[str] = set()
+    _fields_used({k: v for k, v in spec.items() if k != "data"}, used)
+    return sorted(f for f in used if f)
 
 
 def themed(spec: dict, *, dark: bool = False, width: int | None = None) -> dict:
@@ -351,21 +549,27 @@ def themed(spec: dict, *, dark: bool = False, width: int | None = None) -> dict:
 NO_NETWORK: list[str] = []
 
 
-def _render_svg(spec: dict) -> str:
+def _locale_args(locale: str) -> dict:
+    defined = locale_of(locale)
+    return {"format_locale": defined["format"], "time_format_locale": defined["time"]}
+
+
+def _render_svg(spec: dict, locale: str = "fr-FR") -> str:
     import vl_convert as vlc
-    return vlc.vegalite_to_svg(spec, allowed_base_urls=NO_NETWORK)
+    return vlc.vegalite_to_svg(spec, allowed_base_urls=NO_NETWORK, **_locale_args(locale))
 
 
-def render_png(spec: dict, width: int = 900, scale: float = 2.0) -> bytes:
+def render_png(spec: dict, width: int = 900, scale: float = 2.0, locale: str = "fr-FR") -> bytes:
     import vl_convert as vlc
-    return vlc.vegalite_to_png(themed(spec, width=width), scale=scale, allowed_base_urls=NO_NETWORK)
+    return vlc.vegalite_to_png(themed(spec, width=width), scale=scale, allowed_base_urls=NO_NETWORK,
+                               **_locale_args(locale))
 
 
-async def check_renders(spec: dict) -> None:
+async def check_renders(spec: dict, locale: str = "fr-FR") -> None:
     """Compile and draw it once, off-screen, so a broken spec fails here, with its message,
     instead of as an empty box in front of the reader."""
     try:
-        await asyncio.to_thread(_render_svg, themed(spec, width=640))
+        await asyncio.to_thread(_render_svg, themed(spec, width=640), locale)
     except Exception as exc:  # noqa: BLE001 - vl-convert raises plain exceptions
         text = " ".join(l.strip() for l in str(exc).splitlines() if l.strip())
         # Keep the error, drop the JavaScript stack frames after it.

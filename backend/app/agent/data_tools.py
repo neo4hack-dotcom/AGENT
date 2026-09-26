@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agent import builtin, trust
-from app.data import charts as chart_lib
+from app.data import chart_sense as sense, charts as chart_lib
 from app.data import exports as export_lib
 from app.data import report as report_lib
 from app.data import rows as rows_lib
@@ -100,6 +100,32 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         except ValueError:
             return path
 
+    def question() -> str:
+        conv = c.store.conversation(ctx.conversation_id) or {}
+        return next((m.get("content", "") for m in reversed(conv.get("messages") or [])
+                     if m.get("role") == "user"), "")
+
+    async def meaning(spec: dict, rows: list[dict], title: str,
+                      previous: dict | None) -> tuple[dict[str, dict], dict]:
+        """What each charted column means — from the data, then from the local model.
+
+        A revision keeps the reading it already had for the columns it still uses; the
+        model is asked only about columns it has not seen, so "make it stacked" costs no
+        second opinion.
+        """
+        inferred = sense.infer(rows)
+        known = ((previous or {}).get("spec", {}).get("usermeta") or {}).get("fields") or {}
+        used = chart_lib.fields_used(spec)
+        fresh = [f for f in used if f in inferred and f not in known]
+        reviewed: dict = {}
+        if fresh:
+            ctx.emit({"type": "status", "phase": "labelling"})
+            reviewed = await sense.review(c.fast_llm, question(), spec, rows, inferred,
+                                          used, title)
+        fields = sense.merge(inferred, {**{k: v for k, v in known.items() if k in inferred},
+                                        **(reviewed.get("fields") or {})})
+        return fields, reviewed
+
     def revision_target() -> dict | None:
         """The chart the reader is pointing at, when they plainly point at one.
 
@@ -153,7 +179,8 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
             else:
                 return {"ok": False, "error": "Say where the rows come from: data='#4' for the "
                                               "result of call #4, 'chart:c1', or a workspace "
-                                              "file. Do not paste the rows."}
+                                              "file. Only values the reader typed may be passed "
+                                              "as a JSON array of objects."}
         except rows_lib.SourceError as exc:
             return {"ok": False, "error": str(exc)}
         if typed and len(rows) > 60:
@@ -165,11 +192,22 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                                           f"Aggregate first (GROUP BY in the query, or an "
                                           f"'aggregate' transform) and chart the result."}
         columns = rows_lib.columns_of(rows)
+        locale = str(c.get("chart_locale") or "fr-FR")
         try:
-            full = chart_lib.assemble(spec, rows, title or (previous or {}).get("title", ""),
-                                      subtitle)
+            # Fields first, on the model's own spec: a column that does not exist is
+            # refused before anyone is asked what it means.
+            chart_lib.validate_fields(chart_lib.sanitize(spec), columns)
+            fields, reviewed = await meaning(spec, rows, title, previous)
+            # The editor's title for a new chart; a revision keeps the one it has unless
+            # the analyst gives another.
+            if previous:
+                final_title, final_subtitle = title or previous.get("title", ""), subtitle
+            else:
+                final_title = (reviewed.get("title") or "").strip()[:140] or title
+                final_subtitle = subtitle or (reviewed.get("subtitle") or "").strip()[:160]
+            full = chart_lib.assemble(spec, rows, final_title, final_subtitle, fields, locale)
             chart_lib.validate_fields(full, columns)
-            await chart_lib.check_renders(full)
+            await chart_lib.check_renders(full, locale)
         except chart_lib.ChartError as exc:
             return {"ok": False, "error": str(exc)}
         chart_id = chart_id or store.next_id(ctx.conversation_id)
@@ -382,13 +420,14 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         "Draw a chart for the reader from rows that already exist. `data` names the rows — "
         "'#4' for the result of call #4 (any call in this conversation), 'chart:c1' for another "
         "chart's rows, or a workspace file — never paste rows you could name. If you computed the "
-        "rows yourself (run_python, pandas), have that call output them as JSON or CSV, then chart "
-        "its #ref. `spec` is a Vega-Lite spec without data. To change a chart the reader asked "
+        "rows yourself (run_python, pandas), have that call print them as JSON or CSV, then chart "
+        "its #ref. Values the reader typed in the question have no call to name: pass them "
+        "directly as a JSON array of objects in `data`. `spec` is a Vega-Lite spec without data. To change a chart the reader asked "
         "about, pass its chart_id with the complete revised spec (omit data to keep its rows); "
         "every version is kept. The chart appears under your answer.\n" + chart_lib.COOKBOOK,
         {"type": "object",
          "properties": {
-             "data": {"type": "string", "description": "Where the rows come from: '#4', 'chart:c1', or a workspace file path."},
+             "data": {"description": "Where the rows come from: '#4', 'chart:c1', a workspace file path — or, only for values the reader typed, the rows as a JSON array of objects."},
              "spec": {"type": "object", "description": "Vega-Lite spec without data: mark, encoding, and optionally transform, layer, facet, resolve."},
              "title": {"type": "string", "description": "What the chart shows, as a reader would say it."},
              "subtitle": {"type": "string", "description": "Scope and units, e.g. 'H1 2026, EUR, VAT included'."},

@@ -177,8 +177,11 @@ async def approve_call(run_id: str, body: ApprovalBody) -> dict:
 async def chart_theme() -> dict:
     """The house chart style, from the one place it is defined — so the chart on screen and
     the chart in the PDF can never drift apart."""
-    from app.data.charts import theme
-    return {"light": theme(False), "dark": theme(True)}
+    from app.data.charts import locale_of, theme
+    name = str(c.get("chart_locale") or "fr-FR")
+    defined = locale_of(name)
+    return {"light": theme(False), "dark": theme(True),
+            "locale": {"name": name, "format": defined["format"], "time": defined["time"]}}
 
 
 class AnswerBody(BaseModel):

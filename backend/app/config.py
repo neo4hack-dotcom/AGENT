@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     # The quarantined reader's own ceilings, separate from the parent run's.
     critic_min_tools: int = 1     # tool calls before the pre-answer reflection runs
 
+    # Numbers and dates in charts and reports: "fr-FR" (1 234,56 · janv. 2026), "en-US",
+    # "en-GB". Labels themselves follow the language of the question.
+    chart_locale: str = "fr-FR"
+
     # --- Built-in tools ---
     workspace_dir: str = "data/workspace"   # the only directory file tools may touch
     enable_python_tool: bool = True
