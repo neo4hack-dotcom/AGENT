@@ -147,6 +147,7 @@ class InstallBody(BaseModel):
     cwd: str = ""
     description: str = ""
     network: str = ""
+    role: str = ""
     connect: bool = True
 
 
@@ -168,7 +169,7 @@ async def add_server(body: InstallBody) -> dict:
         cfg = {"name": body.name, "transport": body.transport, "command": body.command,
                "args": body.args, "env": body.env, "url": body.url, "headers": body.headers,
                "cwd": body.cwd, "description": body.description, "category": "Custom",
-               "network": body.network}
+               "network": body.network, "role": body.role}
     server = await c.mcp.add_server(cfg)
     await c.store.save()
     snapshot = {}
@@ -189,6 +190,7 @@ class PatchBody(BaseModel):
     cwd: str | None = None
     description: str | None = None
     network: str | None = None
+    role: str | None = None
 
 
 @guarded.patch("/servers/{server_id}")
@@ -326,8 +328,53 @@ def _source_summary(server: dict) -> dict:
 
 @guarded.get("/sources")
 async def list_sources() -> list[dict]:
-    """Every connected server with what has been written about it, and how ready it is."""
-    return [_source_summary(s) for s in c.store.mcp_servers().values()]
+    """Every data source with what has been written about it, and how ready it is. A data
+    catalog is not a source: it is listed by /catalog."""
+    return [_source_summary(s) for s in c.store.mcp_servers().values() if s.get("role") != "catalog"]
+
+
+@guarded.get("/data-catalog")
+async def catalog_state() -> dict:
+    """The data catalog(s): which servers have the role, which are connected, what they can do."""
+    from app.data import catalog as catalog_lib
+    out = []
+    for server in c.store.mcp_servers().values():
+        if server.get("role") != "catalog":
+            continue
+        conn = c.mcp.connections.get(server["id"])
+        tools = [t for t in c.mcp.tools() if t["server_id"] == server["id"]]
+        out.append({"id": server["id"], "name": server["name"], "slug": server.get("slug") or "",
+                    "connected": bool(conn and conn.status == "connected"),
+                    "detected": bool(server.get("role_detected")),
+                    "families": sorted(catalog_lib.tool_families(tools)),
+                    "tools": [t["name"] for t in tools]})
+    return {"catalogs": out, "connected": any(x["connected"] for x in out)}
+
+
+@guarded.post("/sources/{server_id}/from-catalog")
+async def import_from_catalog(server_id: str) -> dict:
+    """Definitions for this source's tables and columns, from the connected catalog(s),
+    merged into its model under what is already written. Returned, never saved."""
+    from app.data import catalog as catalog_lib
+    from app.data.knowledge import dump_model
+    server = _source_or_404(server_id)
+    catalogs = catalog_lib.connected(c.mcp)
+    if not catalogs:
+        raise HTTPException(409, "No data catalog is connected.")
+    tools = [t for t in c.mcp.tools() if t["server_id"] == server_id]
+    tables = await c.runner._source_tables(server_id, tools)
+    if not tables:
+        raise HTTPException(422, "This source's tables are not known yet: profile it first.")
+    current = c.knowledge.get(server_id)
+    model, added, found = current["model"], 0, 0
+    for item in catalogs:
+        docs = await item.document(tables, limit=40)
+        found += len(docs)
+        model, count = catalog_lib.merge_into_model(model, docs)
+        added += count
+    return {**_source_summary(server), "model_yaml": dump_model(model) if added else current["model_yaml"],
+            "catalog_tables": found, "catalog_added": added, "errors": []}
+
 
 
 def _source_or_404(server_id: str) -> dict:
@@ -387,11 +434,14 @@ async def draft_source(server_id: str) -> dict:
     from app.data.drafting import draft_tools
     server = _source_or_404(server_id)
     current = c.knowledge.get(server_id)
+    tools = [t for t in c.mcp.tools() if t["server_id"] == server_id]
+    # What the enterprise's catalog already says about this source, when one is connected.
+    catalog_notes = await c.runner._catalog_notes({"id": server_id, "tools": tools})
     if not _queryable(server):
         # A service of tools rather than tables: described from its schemas, from what
         # the atlas saw, and from the few calls that cannot change anything.
         try:
-            proposal = await draft_tools(c.llm, c.mcp, c.atlas, server)
+            proposal = await draft_tools(c.llm, c.mcp, c.atlas, server, catalog_notes=catalog_notes)
         except ProfileError as exc:
             raise HTTPException(422, str(exc)) from exc
         await c.store.save()
@@ -401,7 +451,7 @@ async def draft_source(server_id: str) -> dict:
             profile, model = await Profiler(c.mcp).profile(server)
             current = c.knowledge.set_profile(server_id, profile, model)
             await c.store.save()
-        proposal = await draft(c.llm, c.mcp, server, current, current["model"])
+        proposal = await draft(c.llm, c.mcp, server, current, current["model"], catalog_notes=catalog_notes)
     except ProfileError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {**_source_summary(server), **proposal}

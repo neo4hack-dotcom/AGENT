@@ -746,6 +746,8 @@ class AgentRunner:
         data_tools.register(tools, self, ctx)
         connected: dict[str, dict] = {}
         for tool in self.c.mcp.tools():
+            if tool.get("server_role") == "catalog":
+                continue      # documentation about sources, not a source: see app/data/catalog.py
             entry = connected.setdefault(tool["server_slug"], {"id": tool["server_id"],
                                                                "name": tool["server_name"], "tools": []})
             entry["tools"].append(tool)
@@ -758,6 +760,9 @@ class AgentRunner:
                     return {"ok": False, "error": f"No source '{source}'. Sources: {', '.join(connected)}."}
                 declared = self.c.knowledge.full_text(entry["id"], entry["name"])
                 observed = self.c.atlas.full_text(entry["id"], entry["tools"])
+                documented = await self._catalog_notes(entry)
+                if documented:
+                    observed = f"{documented}\n\n{observed}"
                 tools_line = "Tools: " + "; ".join(
                     f"{t['name']} — {' '.join((t['description'] or '').split())[:160]}" for t in entry["tools"])
                 return {"ok": True, "summary": f"notes for {entry['name']}",
@@ -876,11 +881,21 @@ class AgentRunner:
         tools, mcp_tools, _all_functions = self._tool_surface(ctx)
         self._turn_tools = tools
         observed, unexplored = self._atlas_lines(mcp_tools)
-        catalog = builtin.catalog_text(tools, mcp_tools, self.c.mcp.scopes(),
+        # A data catalog, if one is connected, sits beside the sources, not among them: its
+        # tools are always offered, and it gets its own paragraph. With none connected,
+        # nothing about catalogs appears anywhere.
+        from app.data import catalog as catalog_lib
+        catalogs = catalog_lib.connected(self.c.mcp)
+        for item in catalogs:
+            ctx.pinned_tools.update(t["qualified_name"] for t in item.tools)
+        sources_only = [t for t in mcp_tools if t.get("server_role") != "catalog"]
+        catalog = builtin.catalog_text(tools, sources_only, self.c.mcp.scopes(),
                                        str(Path(self.c.settings.workspace_dir)
                                            .expanduser().resolve()),
                                        notes=self._source_notes(),
                                        observed=observed, unexplored=unexplored)
+        if catalogs:
+            catalog += "\n\n" + "\n\n".join(catalog_lib.describe_for_prompt(item) for item in catalogs)
         # Stable first, volatile last — see prompts.system_prompt. The nonce notice is the
         # most volatile thing in the prompt, so it goes at the very end.
         volatile = (self._data_block(text)
@@ -1305,6 +1320,8 @@ class AgentRunner:
         ctx.emit({"type": "status", "phase": "routing"})
         servers: dict[str, tuple[str, list[dict]]] = {}
         for tool in mcp_tools:
+            if tool.get("server_role") == "catalog":
+                continue      # always offered; never a routing choice
             servers.setdefault(tool.get("server_slug") or tool["server_name"],
                                (tool["server_name"], []))[1].append(tool)
         notes = self._source_notes()
@@ -1469,6 +1486,45 @@ class AgentRunner:
         return {"ok": True, "summary": f"{len(calls)} calls to {target['name']}: "
                                        f"{len(calls) - failed} ok, {failed} failed",
                 "text": json.dumps({"rows": rows}, ensure_ascii=False, default=str)}
+
+    async def _catalog_notes(self, entry: dict) -> str:
+        """What the connected catalogs say about one source's tables — empty with no catalog."""
+        from app.data import catalog as catalog_lib
+        catalogs = catalog_lib.connected(self.c.mcp)
+        if not catalogs:
+            return ""
+        tables = await self._source_tables(entry["id"], entry["tools"])
+        if not tables:
+            return ""
+        parts = []
+        for item in catalogs:
+            docs = await item.document(tables)
+            text = catalog_lib.notes_text(docs, item.name)
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
+
+    async def _source_tables(self, server_id: str, tools: list[dict]) -> list[str]:
+        """A source's table names: from its model, else from its own list tool."""
+        model = self.c.knowledge.get(server_id)["model"]
+        names = [str(t.get("name")) for t in model.get("tables") or [] if t.get("name")]
+        if names:
+            return names
+        from app.data.profiler import Profiler
+        plan = Profiler(self.c.mcp)._detect(tools)
+        if not plan.get("list"):
+            return []
+        try:
+            result = await asyncio.wait_for(self.c.mcp.call(plan["list"], {}), 20)
+        except Exception:  # noqa: BLE001
+            return []
+        from app.data.rows import SourceError, rows_from_text
+        try:
+            rows = rows_from_text(result.get("text") or "") or []
+        except (SourceError, ValueError):
+            return []
+        return [str(r.get("name") or r.get("table_name") or r.get("table")) for r in rows
+                if r.get("name") or r.get("table_name") or r.get("table")][:40]
 
     def _atlas_lines(self, mcp_tools: list[dict]) -> tuple[dict[str, str], dict[str, list[str]]]:
         """Per source: the fields its tools were seen returning, and the tools never seen working."""

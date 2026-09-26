@@ -76,6 +76,22 @@ CATALOG: list[dict[str, Any]] = [
         "tags": ["pandas", "data", "bundled"],
     },
     {
+        "id": "data-catalog", "name": "Data catalog", "vendor": "Your catalog, e.g. DataLoom",
+        "category": "Catalog", "accent": "violet",
+        "description": "Connect the enterprise data catalog over MCP (HTTP, inside the network). It "
+                       "is not queried for figures: the agent reads it to understand the sources — "
+                       "dataset and column definitions, calculations, glossary, lineage — and Admin "
+                       "can import its definitions into each source's notes.",
+        "transport": "http", "url": "{url}",
+        "headers": {"Authorization": "Bearer {token}"},
+        "params": [_p("url", "MCP endpoint", placeholder="http://dataloom.corp.internal:3001/mcp",
+                      help="The catalog's MCP URL, inside the private network."),
+                   _p("token", "Access token", secret=True,
+                      help="Issued by the catalog's admin (DataLoom: Admin → MCP → token).")],
+        "role": "catalog",
+        "tags": ["catalog", "metadata", "glossary", "lineage"],
+    },
+    {
         "id": "time", "name": "Time & time zones", "vendor": "Bundled with this app",
         "category": "Reasoning", "accent": "violet",
         "description": "Current time in any time zone, and conversions between them — from the "
@@ -138,7 +154,7 @@ def downloads_at_start(servers: dict[str, dict]) -> list[str]:
 
 CATALOG_BY_ID: dict[str, dict[str, Any]] = {entry["id"]: entry for entry in CATALOG}
 
-CATEGORIES = ["Files", "Data", "Reasoning"]
+CATEGORIES = ["Files", "Data", "Catalog", "Reasoning"]
 
 
 def instantiate(catalog_id: str, values: dict[str, str],
@@ -183,4 +199,5 @@ def instantiate(catalog_id: str, values: dict[str, str],
         "url": fill(entry.get("url", "")),
         "headers": {k: fill(v) for k, v in (entry.get("headers") or {}).items()},
         "docs": entry.get("docs", ""),
+        "role": entry.get("role", ""),
     }

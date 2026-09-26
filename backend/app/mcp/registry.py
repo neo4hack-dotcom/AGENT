@@ -62,6 +62,25 @@ def slugify(text: str) -> str:
 # the context window — that happens later, after the full result is on disk.
 MAX_RESULT_CHARS = 2_000_000
 
+# Tool names only a data catalog uses. Two or more of these families, and a server is a
+# catalog: documentation about data (datasets, definitions, glossary, lineage), not data.
+_CATALOG_FAMILIES = (
+    r"search_(catalog|datasets?|assets?|metadata)|catalog_search",
+    r"(get|describe)_(dataset|asset|table)(_schema|_metadata)?$|dataset_schema",
+    r"glossary",
+    r"lineage",
+    r"list_(datasets|assets|datamarts|data_products)",
+    r"(get_)?column_definition|business_definition",
+)
+
+
+def looks_like_catalog(tools: list[dict]) -> bool:
+    import re as _re
+    names = [str(t.get("name") or "").lower() for t in tools]
+    families = sum(1 for pattern in _CATALOG_FAMILIES if any(_re.search(pattern, n) for n in names))
+    return families >= 2
+
+
 class Connection:
     """One live server: its client, what it exposes, and why it is (or is not) up."""
 
@@ -143,6 +162,10 @@ class McpRegistry:
             # "" = decided from the configuration, "local" = loopback only, "internal" = may
             # reach hosts inside the private network. See app/network.py.
             "network": cfg.get("network") if cfg.get("network") in ("local", "internal") else "",
+            # "source" (data the agent queries) or "catalog" (documentation about that data).
+            # Empty until someone decides — or until the server's tools make it plain.
+            "role": cfg.get("role") if cfg.get("role") in ("source", "catalog") else "",
+            "role_detected": False,
             "created_at": now(),
         }
         self.store.mcp_servers()[server_id] = server
@@ -156,9 +179,14 @@ class McpRegistry:
         if server is None:
             return None
         editable = {"name", "args", "env", "headers", "url", "command", "cwd", "enabled",
-                    "description", "auto_approve", "network"}
+                    "description", "auto_approve", "network", "role"}
         if "network" in patch and patch["network"] not in ("", "local", "internal"):
             patch.pop("network")
+        if "role" in patch:
+            if patch["role"] not in ("", "source", "catalog"):
+                patch.pop("role")
+            else:
+                server["role_detected"] = False     # a person decided
         # A masked value coming back from the browser means "unchanged", never "set it to
         # bullets" — without this, opening the edit form and saving would destroy a token.
         for field in ("env", "headers"):
@@ -226,6 +254,10 @@ class McpRegistry:
                 conn.status = "connected"
                 conn.connected_at = time.time()
                 conn.error = None
+                if not server.get("role") and looks_like_catalog(conn.tools):
+                    # Recognised, not assumed: only tool names no data server would use.
+                    server["role"], server["role_detected"] = "catalog", True
+                    self.store.touch()
             except Exception as exc:
                 conn.status = "error"
                 conn.error = str(exc) if isinstance(exc, McpError) else f"{type(exc).__name__}: {exc}"
@@ -308,6 +340,7 @@ class McpRegistry:
                     "server_id": server["id"],
                     "server_name": server["name"],
                     "server_slug": slug,
+                    "server_role": server.get("role") or "source",
                     "accent": server.get("accent", "sky"),
                     "auto_approve": bool(server.get("auto_approve")),
                     # Only the server can know whether a second call is the same as one.
@@ -324,6 +357,15 @@ class McpRegistry:
                                              and is_write_tool(name)))
                                      else [trust.FS_READ]),
                 })
+        return out
+
+    def catalogs(self) -> list[dict]:
+        """Connected servers whose role is the data catalog — usually none, at most a few."""
+        out = []
+        for server in self.store.mcp_servers().values():
+            conn = self.connections.get(server["id"])
+            if server.get("role") == "catalog" and conn is not None and conn.status == "connected":
+                out.append(server)
         return out
 
     def resolve(self, name: str) -> dict | None:

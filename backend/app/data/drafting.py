@@ -42,14 +42,16 @@ answered by ONE read-only SELECT in the dialect of this source, using only the t
 columns in the profile. They will be executed; ones that fail are discarded.
 
 Use only names that appear in the profile. Invent nothing about the business beyond what the \
-data shows."""
+data shows. When a "data_catalog" section is given, it is the enterprise's own documentation: \
+reuse its table and column definitions and its calculations, and say where the data disagrees."""
 
 
 _WRITES = re.compile(r"\b(insert|update|delete|drop|alter|create|truncate|merge|grant|revoke|"
                      r"replace|attach|detach|pragma|vacuum|copy|call|exec|execute)\b", re.IGNORECASE)
 
 
-async def draft(llm, registry, server: dict, current: dict, profile_model: dict) -> dict:
+async def draft(llm, registry, server: dict, current: dict, profile_model: dict,
+                catalog_notes: str = "") -> dict:
     """A proposal: description, model YAML, and which drafted queries ran or failed."""
     tools = [t for t in registry.tools() if t["server_id"] == server["id"]]
     profiler = Profiler(registry)
@@ -67,6 +69,10 @@ async def draft(llm, registry, server: dict, current: dict, profile_model: dict)
             samples[table["name"]] = rows
     brief = {"source": server["name"], "profile": profile_model, "samples": samples,
              "existing_description": current.get("description", "")}
+    if catalog_notes:
+        # The enterprise's own definitions come first: a metric the catalog defines is
+        # drafted the catalog's way, not re-invented from column names.
+        brief["data_catalog"] = catalog_notes
     result = await llm.chat(
         [{"role": "user", "content": json.dumps(brief, ensure_ascii=False, default=str)[:24000]}],
         system=DRAFT_SYSTEM, temperature=0.2)
@@ -204,7 +210,8 @@ State only what the tools, observations and outputs show. Where something is unc
 say "appears to". Return only the description."""
 
 
-async def draft_tools(llm, registry, atlas, server: dict, probe_timeout_s: float = 20.0) -> dict:
+async def draft_tools(llm, registry, atlas, server: dict, probe_timeout_s: float = 20.0,
+                      catalog_notes: str = "") -> dict:
     """A functional description of a tool-based source, from its schemas, from what the atlas
     has observed, and from a few calls that cannot change anything."""
     import asyncio
@@ -238,7 +245,8 @@ async def draft_tools(llm, registry, atlas, server: dict, probe_timeout_s: float
     observed = atlas.full_text(server["id"], tools)
     prompt = (f"# Service: {server['name']}\n\n## Tools (* = required)\n" + "\n".join(listing)
               + f"\n\n## Observed\n{observed}"
-              + ("\n\n## Outputs of safe calls\n" + "\n\n".join(samples) if samples else ""))
+              + ("\n\n## Outputs of safe calls\n" + "\n\n".join(samples) if samples else "")
+              + (f"\n\n## What the enterprise data catalog says\n{catalog_notes}" if catalog_notes else ""))
     result = await llm.chat([{"role": "user", "content": prompt[:24000]}], system=TOOLS_DRAFT_SYSTEM,
                             temperature=0.2, think=False)
     description = (result.content or "").strip()

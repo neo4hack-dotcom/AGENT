@@ -285,8 +285,77 @@ def distractor(server: McpServer, role: str) -> None:
         server.tool(name, description, _obj(props), read_only=name != "report_incident")(handler)
 
 
+# ------------------------------------------------------------------- catalog
+CATALOG_DOCS = {
+    "trades": {"domain": "Trading", "definition": "Every trade ticket booked by the front office, one row per "
+               "version: an amendment adds version 2, a cancellation adds a CANCELLED version. The latest "
+               "version of each trade_id is the trade.",
+               "columns": {"trade_id": "Front-office ticket id; stable across versions.",
+                           "version": "Revision number; the highest version is the current state of the trade.",
+                           "quantity": "Nominal for bonds, number of shares for equities, in the trade currency.",
+                           "price": "Execution price: percent of par for bonds, per share for equities.",
+                           "status": "NEW, AMENDED or CANCELLED (upper case). A CANCELLED last version means the trade never happened.",
+                           "counterparty_id": "Counterparty code, as in the reference data (CPnnn)."}},
+    "positions_eod": {"domain": "Trading", "definition": "Net end-of-day position per book and instrument, at "
+                      "month-end dates only, derived from live trades.",
+                      "columns": {"quantity": "Net nominal (bonds) or shares (equities); negative is short.",
+                                  "asof_date": "Month-end business day of the snapshot."}},
+    "books": {"domain": "Organisation", "definition": "Trading books and the desk that owns each.",
+              "columns": {"desk": "Owning desk: Rates, Credit, Cash Equities, Equity Derivatives."}},
+    "desks": {"domain": "Organisation", "definition": "Trading desks with their head and region.", "columns": {}},
+}
+GLOSSARY = {"exposure": "Market value of positions, in EUR, at the valuation date's closing prices and fixings.",
+            "notional": "Face value of a bond position (quantity), converted to EUR at the relevant fixing.",
+            "live trade": "The latest version of a trade whose status is not CANCELLED."}
+
+
+def catalog(server: McpServer) -> None:
+    @server.tool("list_datasets", "List every dataset documented in the catalog, with domain and definition.",
+                 _obj({}), read_only=True)
+    def list_datasets() -> dict:
+        return {"datasets": [{"id": f"trades_db::{name}", "name": name, "domain": doc["domain"],
+                              "definition": doc["definition"]} for name, doc in CATALOG_DOCS.items()]}
+
+    @server.tool("get_dataset_schema", "Columns of one dataset with their business definitions.",
+                 _obj({"dataset_id": S}, ["dataset_id"]), read_only=True)
+    def get_dataset_schema(dataset_id: str) -> dict:
+        name = dataset_id.split("::")[-1]
+        doc = CATALOG_DOCS.get(name)
+        if doc is None:
+            return {"error": f"dataset not found: {dataset_id}"}
+        return {"id": dataset_id, "name": name, "domain": doc["domain"], "definition": doc["definition"],
+                "columns": [{"name": c, "definition": d} for c, d in doc["columns"].items()]}
+
+    @server.tool("search_catalog", "Search dataset and column names and definitions.", _obj({"query": S}, ["query"]),
+                 read_only=True)
+    def search_catalog(query: str) -> dict:
+        q = query.lower()
+        hits = []
+        for name, doc in CATALOG_DOCS.items():
+            if q in name or q in doc["definition"].lower():
+                hits.append({"dataset_id": f"trades_db::{name}", "dataset": name, "definition": doc["definition"]})
+            for column, text in doc["columns"].items():
+                if q in column or q in text.lower():
+                    hits.append({"dataset_id": f"trades_db::{name}", "dataset": name, "column": column,
+                                 "definition": text})
+        return {"hits": hits[:25]}
+
+    @server.tool("get_glossary_term", "Business definition of a glossary term.", _obj({"term": S}, ["term"]),
+                 read_only=True)
+    def get_glossary_term(term: str) -> dict:
+        text = GLOSSARY.get(term.lower())
+        return {"term": term, "definition": text} if text else {"error": f"term not found: {term}"}
+
+    @server.tool("get_lineage", "Upstream and downstream datasets of one dataset.", _obj({"dataset_id": S}, ["dataset_id"]),
+                 read_only=True)
+    def get_lineage(dataset_id: str) -> dict:
+        name = dataset_id.split("::")[-1]
+        edges = {"positions_eod": [{"from": "trades_db::trades", "to": "trades_db::positions_eod"}]}
+        return {"dataset_id": dataset_id, "edges": edges.get(name, [])}
+
+
 ROLES = {"market": ("Market data", market), "refdata": ("Reference data", refdata),
-         "risk": ("Market risk", risk_server)}
+         "risk": ("Market risk", risk_server), "catalog": ("Data catalog", catalog)}
 
 
 def main() -> None:

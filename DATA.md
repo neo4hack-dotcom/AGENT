@@ -125,6 +125,23 @@ that FX is fixed as EURxxx, that VaR exists at month ends only, that `book` mean
   had to investigate. Confirm the true ones — they then reach every question; discard the
   rest. Unconfirmed notes are only offered inside `source_info`, marked as such.
 
+## When the enterprise already has a data catalog
+
+A catalog holds what the organisation wrote about its data — what a table is for, what a
+column means and how it is calculated, the glossary, the lineage. Connect it (Library →
+*Data catalog*, or tick *data catalog* on a server) and it becomes the first place the
+agent and Admin look for meaning, without ever being mistaken for a source of figures:
+
+- **Import from catalog** on a SQL source brings its table and column definitions into the
+  model, under anything already written — nothing a person wrote is replaced.
+- **Draft with AI** gives the catalog's definitions to the model first, so a metric the
+  catalog defines is drafted its way.
+- At question time, `source_info` includes the catalog's notes on the source's tables, and
+  the catalog's own tools (glossary, lineage, definitions) are always within reach.
+
+Disconnect it and the agent works exactly as before: the catalog is an addition, never a
+dependency.
+
 ## The atlas: what the agent remembers between questions
 
 Every MCP call teaches something about the tool: its fields, their kinds and units, the
