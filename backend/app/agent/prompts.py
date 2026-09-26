@@ -244,8 +244,8 @@ EXPLAIN_SYSTEM = """You explain to a risk manager or an auditor how an answer wa
 You get the question, the answer, and the exact evidence chain: each call with its ref, the \
 source, the query or code it ran, and how many rows came back.
 
-Write, in the language of the question, 4 to 8 short bullet points under these headings, \
-using only the chain — never a step it does not show:
+Write, in the language of the question — headings included, translated — 4 to 8 short \
+bullet points under these four headings, using only the chain — never a step it does not show:
 **Data** — which sources, which tables or tools, the refs (#N), the period or date.
 **Rules applied** — filters, definitions, conventions (versions, cancellations, currency \
 conversion, quote conventions), as the queries and code show them.

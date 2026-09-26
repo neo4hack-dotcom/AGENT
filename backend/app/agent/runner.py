@@ -121,6 +121,44 @@ def _literal_filters(sql: str) -> list[tuple[str, str, str]]:
     return out
 
 
+def _learn_code_names(text: str, names: dict[str, str]) -> None:
+    """Remember instrument names seen next to their ISIN in a result."""
+    if "isin" not in text.lower() and not _ISIN.search(text):
+        return
+    from app.data.rows import SourceError, rows_from_text
+    try:
+        rows = rows_from_text(text) or []
+    except (SourceError, ValueError):
+        return
+    for row in rows[:2000]:
+        code = row.get("isin") or row.get("instrument_id") or row.get("identifier")
+        name = row.get("name") or row.get("issuer") or row.get("instrument_name")
+        if isinstance(code, str) and _ISIN.fullmatch(code) and isinstance(name, str) and name.strip():
+            names.setdefault(code, name.strip())
+
+
+def name_codes(text: str, names: dict[str, str]) -> str:
+    """Show an instrument by name, its ISIN in brackets — where the answer gave only the code.
+
+    Deterministic, and only for codes whose name a result of this run gave: nothing is
+    looked up, nothing guessed. A code already standing next to its name is left alone.
+    """
+    if not names or not text:
+        return text
+
+    def swap(match: re.Match) -> str:
+        code = match.group(0)
+        name = names.get(code)
+        if not name:
+            return code
+        around = text[max(0, match.start() - 80): match.end() + 80].lower()
+        if name.split()[0].lower() in around:
+            return code
+        return f"{name} ({code})"
+
+    return _ISIN.sub(swap, text)
+
+
 def strip_leaked_reasoning(text: str) -> str:
     """The answer without the model's own leading plan ("We need to call get_price…")."""
     out = text
@@ -211,6 +249,8 @@ class RunContext:
         self.route_plan: list[str] = []
         # What was verified along the way, kept with the answer for whoever audits it.
         self.checks: list[dict] = []
+        # ISIN → name, learned from this run's results; answers show "Name (ISIN)".
+        self.code_names: dict[str, str] = {}
         # Results a check found to be wrong, by ref, with the reason.
         self.flagged_refs: dict[str, str] = {}
         # Progressive tool disclosure: what has been used, and what the model asked for by
@@ -269,7 +309,7 @@ class RunContext:
         released = False
         for b in ([block] if block is not None else self.blocks):
             if b["type"] == "text" and not b.get("superseded") and b.pop("held", False):
-                b["text"] = strip_leaked_reasoning(b.get("text") or "")
+                b["text"] = name_codes(strip_leaked_reasoning(b.get("text") or ""), self.code_names)
                 released = True
                 self.emit({"type": "block.open", "kind": "text", "index": b["index"]})
                 if b.get("text"):
@@ -1303,6 +1343,13 @@ class AgentRunner:
         if not isinstance(picked, list):
             picked = next((v for v in data.values() if isinstance(v, list)), []) if isinstance(data, dict) else []
         chosen = {str(p).strip() for p in picked if str(p).strip() in servers}
+        # The agent computes on results itself (run_python, profile_data); a dataframe or file
+        # server is only for questions about files, not an engine to route every analysis to.
+        if not re.search(r"(fichier|file|csv|excel|xlsx|parquet|dossier|folder|document)", question, re.I):
+            compute_only = {slug for slug, (_name, tools_of) in servers.items()
+                            if (self.c.store.mcp_servers().get(tools_of[0]["server_id"]) or {}).get("catalog_id")
+                            in ("pandas-frames", "filesystem")}
+            chosen -= compute_only
         # Continuity: a follow-up keeps the sources that answered the question before it.
         chosen |= {slug for slug in used if slug in servers and last_user}
         reason = str(data.get("reason") or "")[:240] if isinstance(data, dict) else ""
@@ -1376,7 +1423,7 @@ class AgentRunner:
                      and set(c) <= {"arguments", "tool", "name"} else c for c in calls]
         if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) for c in calls):
             return {"ok": False, "error": "calls must be a list of argument objects, e.g. [{\"identifier\": \"FR0000120271\", \"date\": \"2026-06-30\"}]."}
-        if len(calls) > 250:
+        if len(calls) > (500 if rows_from else 250):
             return {"ok": False, "error": f"{len(calls)} calls is more than 250. Use a history or list tool "
                                           f"(one call per item for all its dates), or split the batch."}
         for arguments in calls:
@@ -1503,6 +1550,19 @@ class AgentRunner:
         if wants_file and not produced_file:
             return ("The reader asked for a file and none has been produced. Call `export_data` "
                     "(extract, Excel, CSV) or `create_report` (PDF) now, from the #ref of the rows.")
+        used = {b.get("name") for b in ctx.blocks if b.get("type") == "tool" and b.get("ok")}
+        if re.search(r"(qualit|anomal|aberran|incoh[ée]ren|outlier|quality|contr[ôo]le des donn|suspect)", lowered) \
+                and "profile_data" not in used:
+            return ("This is a data-quality or anomaly question and the rows have not been profiled. Call "
+                    "`profile_data` on the rows now — with reference={column: '#M'} for every id that has a "
+                    "reference list (counterparties, instruments) and holidays= the market calendar — then "
+                    "judge what it reports.")
+        if re.search(r"(segment|cluster|regroupe|classe les|classify|group(e|s)? de)", lowered):
+            draft = next((b.get("text") or "" for b in reversed(ctx.blocks)
+                          if b.get("type") == "text" and not b.get("superseded")), "")
+            if draft and sum(1 for line in draft.splitlines() if line.strip().startswith("|")) < 6:
+                return ("A segmentation names its members. Add a table listing every member — its name, "
+                        "its group, and the measures that placed it there — after the groups' profiles.")
         return ""
 
     def _versioned_tables(self, ctx: RunContext) -> set[str]:
@@ -1798,9 +1858,12 @@ class AgentRunner:
             result = self._note_metric_filters(call, result)
             result = await self._note_filter_values(ctx, call, result)
             result = self._note_conventions(result)
+            _learn_code_names(result.get("text") or "", ctx.code_names)
             if result.get("_flagged"):
                 ctx.flagged_refs[block.get("ref", "")] = result.pop("_flagged")
         text = result.get("text") or result.get("error") or ""
+        if ok and spec is not None and call.name in ("batch_call", "run_python"):
+            _learn_code_names(text, ctx.code_names)
         text, model_body = self._launder(ctx, call, block, text, spec)
         if spec is None:
             # What this call taught about the tool, kept for the next question. Structure
@@ -1950,8 +2013,24 @@ class AgentRunner:
     _MISSING_HINTS = ("enoent", "no such file", "not found", "does not exist",
                       "cannot find", "outside allowed", "access denied")
 
+    @staticmethod
+    def _today_note(call: ToolCall) -> str:
+        """A call for today's date that failed or came back empty: the usual misreading."""
+        import datetime as _dt
+        today = _dt.date.today()
+        recent = {(today - _dt.timedelta(days=d)).isoformat() for d in range(0, 4)}
+        values = " ".join(str(v) for v in (call.arguments or {}).values())
+        if not any(day in values for day in recent):
+            return ""
+        return (f" You asked for today's date ({today.isoformat()}); the source may not cover it. If the "
+                f"question's date is relative to the records — the day's close of a trade, the end of the "
+                f"period — use the records' own dates instead.")
+
     def _enrich_error(self, call: ToolCall, result: dict) -> dict:
         """Attach to a failure the one thing that makes the next attempt succeed."""
+        today = self._today_note(call)
+        if today:
+            result = {**result, "error": f"{result.get('error') or 'failed'}{today}"}
         error = (result.get("error") or "").lower()
         tool = self.c.mcp.resolve(call.name)
         if any(hint in error for hint in self._VALIDATION_HINTS):
@@ -2210,7 +2289,7 @@ class AgentRunner:
                         if info.get("values") and (arg.lower() in column.lower() or column.lower() in arg.lower()):
                             known.append(f"{column} ∈ {{{', '.join(map(str, info['values'][:10]))}}}")
         passed = ", ".join(f"{k}={v!r}" for k, v in filters.items())
-        note = (f"[No rows for {passed}. That is not yet evidence the data does not exist: the "
+        note = (f"[No rows for {passed}.{self._today_note(call)} That is not yet evidence the data does not exist: the "
                 f"value may not be one this tool uses (a desk instead of a book, a name instead "
                 f"of a code)."
                 + (f" Values seen from this source before: {'; '.join(dict.fromkeys(known))}." if known else
@@ -2461,13 +2540,14 @@ class AgentRunner:
         # empty digest told one user "no data was provided" about a file they had just
         # downloaded — so when this run gathered nothing, fall back to the conversation.
         from_history = not evidence.strip() or evidence.startswith("(no tool")
-        block = {"type": "text", "text": "", "index": len(ctx.blocks)}
+        # Held like any other draft and released whole: the answer is checked (instruments
+        # named, not just coded) before anyone reads it, and it appears once.
+        block = {"type": "text", "text": "", "index": len(ctx.blocks), "held": True}
         ctx.blocks.append(block)
-        ctx.emit({"type": "block.open", "kind": "text", "index": block["index"]})
 
         def on_text(piece: str) -> None:
             block["text"] += piece
-            ctx.emit({"type": "text.delta", "index": block["index"], "text": piece})
+            ctx.emit({"type": "draft.delta", "text": piece})
 
         try:
             payload = ((messages or []) + [{"role": "user", "content": prompts.note(
@@ -2502,7 +2582,7 @@ class AgentRunner:
             if block["text"].strip():
                 note = f"\n\n---\n\n{note}"
             block["text"] += note
-            ctx.emit({"type": "text.delta", "index": block["index"], "text": note})
+        ctx.release_text(block)
 
     def _evidence_digest(self, ctx: RunContext, budget: int = 14000) -> str:
         """What the tools returned, labelled, newest first, within a character budget.

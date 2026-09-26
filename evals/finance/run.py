@@ -28,7 +28,15 @@ MINING = compute_mining()
 
 
 def servers_used(turns: list[dict]) -> set[str]:
-    return {(c.get("name") or "").split("__")[0] for t in turns for c in t["calls"] if "__" in (c.get("name") or "")}
+    names = []
+    for t in turns:
+        for c in t["calls"]:
+            name = c.get("name") or ""
+            if name == "batch_call":
+                name = str((c.get("args") or {}).get("tool") or "")
+            if "__" in name:
+                names.append(name.split("__")[0])
+    return set(names)
 
 
 def millions(text: str, value: float, tolerance: float = 0.02) -> bool:
