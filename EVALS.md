@@ -183,3 +183,63 @@ python evals/finance/setup.py --base http://localhost:3045 --estate
 python evals/finance/run.py --base http://localhost:3045 --label cib
 python evals/finance/prepare.py --base http://localhost:3045     # then run again
 ```
+
+---
+
+# Data-mining campaign: ten analyst questions on the CIB world
+
+The world now has what data mining needs: execution prices on trades with five executed
+far from the close, a trade booked on a TARGET holiday, a counterparty id missing from
+reference data, a fat-finger quantity, sector-correlated equities (French banks, European
+tech), traders with different amendment rates. Ten questions (`--suite mining`), each
+graded against ground truth *and* required to cite its evidence:
+
+| | Question | Needs |
+|---|---|---|
+| M1 | trades executed > 3 % away from the day's close | versions, enrichment of 375 rows, a threshold |
+| M2 | data-quality audit | holiday, orphan counterparty, fat finger |
+| M3 | most correlated pair of shares | returns, a correlation matrix |
+| M4 | shares ranked by annualised volatility, charted | whole universe, a chart |
+| M5 | trader with the highest amendment/cancellation rate | count trades, not versions |
+| M6 | top-3 issuer concentration of long bond nominal in EUR | FX direction (GBP ÷ EURGBP) |
+| M7 | monthly trades per desk, charted | latest version, then status |
+| M8 | counterparty segmentation in 3 groups | members named |
+| M9 | Excel extract of the off-market trades | a file with its provenance sheet |
+| M10 | +50 bp on the Rates desk, with method | DV01, stated assumptions |
+
+| Pass | What changed before it | Mining | CIB (bare sources) |
+|---|---|---|---|
+| 1 | — | 4/10 | — |
+| 2 | prompt rules (case, versions, members, dates, ask), deliverable check | 4/10 | — |
+| 3 | SQL filter-value probe, `batch_call rows_from`, `profile_data`, valid parked JSON, ISIN names | 5/10 | — |
+| 4 | flagged results blocked, version counts, FX/par conventions, router knows the built-ins | 4/10 | 6/10 |
+| 5 | deterministic names, intent checks (quality → profile, segmentation → members), no routing to dataframe servers, today's-date note | **8/10** | **8/10** |
+| 6 | (interrupted: the hosted model's monthly usage limit was reached) | — | — |
+
+What the failures taught, in the order they were fixed:
+
+- **A filter in the wrong case is silent.** `status <> 'cancelled'` against 'CANCELLED'
+  excludes nothing; two different questions counted 392 trades instead of 375. Each quoted
+  filter value is now checked against the source, and a result found wrong cannot feed a
+  chart, an export or a computation — after the first fix, the agent re-ran the right
+  query and then charted the wrong one.
+- **Filtering before taking the latest version** resurrects cancelled trades; **COUNT(*)
+  on a versioned table** counts versions (29.5 % instead of 41.9 %). Both are flagged.
+- **Enriching every row by hand fails.** Asked for the close of 375 trade dates, the model
+  typed 27 argument sets. `batch_call(rows_from='#N', arguments={param: column})` builds
+  the calls from the rows; M1 then found all five off-market trades.
+- **Data-quality reviews need the measurements done for them.** Improvised pandas found
+  one defect in three; `profile_data` finds all three on its own.
+- **Runner notes were corrupting parked JSON** (a .txt the model could not parse), and
+  **the stdio reader died on any reply over 64 KB**, leaving the call to time out.
+- **ISIN instead of names** survived every prompt rule; a deterministic "Name (ISIN)" at
+  release, and name labels on chart axes, ended it.
+- **"The day's close" read as today** — twice, then as "the last day in the data". M1
+  tests that reading; M9's wording now states the trade date, so it tests the export.
+
+Still open: F3 (right figures, names out of order or missing), F8 (a counterparty that is
+also an issuer and a share, answered in one role, once with an absurd magnitude).
+
+```bash
+python evals/finance/run.py --suite mining --label mining   # or --suite all
+```

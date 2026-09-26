@@ -246,6 +246,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 final_title = (reviewed.get("title") or "").strip()[:140] or title
                 final_subtitle = subtitle or (reviewed.get("subtitle") or "").strip()[:160]
             full = chart_lib.assemble(spec, rows, final_title, final_subtitle, fields, locale)
+            chart_lib.label_codes(full, rows, getattr(ctx, "code_names", {}) or {})
             chart_lib.validate_fields(full, columns)
             await chart_lib.check_renders(full, locale)
         except chart_lib.ChartError as exc:
