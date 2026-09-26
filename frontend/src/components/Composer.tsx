@@ -52,6 +52,23 @@ export function Composer({
     if (!running && !submitting) area.current?.focus();
   }, [running, submitting]);
 
+  // "Modify this chart" and similar shortcuts put a starter sentence here rather than
+  // sending anything: the reader finishes the instruction, which is the part only they know.
+  useEffect(() => {
+    const onPrefill = (event: Event) => {
+      const value = (event as CustomEvent<string>).detail ?? '';
+      setText(value);
+      requestAnimationFrame(() => {
+        const node = area.current;
+        if (!node) return;
+        node.focus();
+        node.setSelectionRange(value.length, value.length);
+      });
+    };
+    window.addEventListener('agent:prefill', onPrefill);
+    return () => window.removeEventListener('agent:prefill', onPrefill);
+  }, []);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // "/" focuses the input the way it does in a search-first product, but never while

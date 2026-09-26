@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from app.agent import builtin, context, prompts, skills, subagent, trust
+from app.agent import builtin, data_tools, context, prompts, skills, subagent, trust
 from app.agent.guard import LoopGuard, signature
 from app.errors import NotConfigured, RunCancelled
 from app.llm.provider import ToolCall
@@ -106,6 +106,8 @@ class RunContext:
         self.egress = trust.Egress()
         self.injections: list[dict] = []
         self.notices: list[dict] = []
+        self.started_at = time.time()
+        self.produced: list[dict] = []
         # Progressive tool disclosure: what has been used, and what the model asked for by
         # name. Both survive the turn that established them — a task that needed a tool
         # once usually needs it again, and making it search twice is a wasted turn.
@@ -117,6 +119,7 @@ class RunContext:
         # code can reach exactly what the model could have called directly — no more.
         self.bridge_names: list[str] = []
         self._approvals: dict[str, asyncio.Future] = {}
+        self._inputs: dict[str, asyncio.Future] = {}
         self._finished = asyncio.Event()
 
     def next_ref(self) -> str:
@@ -196,11 +199,44 @@ class RunContext:
         self.emit({"type": "approval.resolved", "call_id": call_id, "approved": approved})
         return True
 
+    async def request_input(self, call_id: str, payload: dict, timeout_s: float) -> str | None:
+        """Block until the reader answers a clarifying question. None if nobody did.
+
+        The same pause as an approval, with a string instead of a yes/no: the run's own
+        clock stops while it waits, because a person reading options is not the agent
+        being slow.
+        """
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._inputs[call_id] = future
+        self.emit({"type": "ask.request", "call_id": call_id,
+                   "expires_in_s": int(timeout_s), **payload})
+        self.guard.pause()
+        try:
+            return await asyncio.wait_for(future, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            self.emit({"type": "ask.resolved", "call_id": call_id, "answer": None,
+                       "reason": "expired"})
+            return None
+        finally:
+            self.guard.resume()
+            self._inputs.pop(call_id, None)
+
+    def resolve_input(self, call_id: str, answer: str) -> bool:
+        future = self._inputs.get(call_id)
+        if future is None or future.done():
+            return False
+        future.set_result(answer)
+        self.emit({"type": "ask.resolved", "call_id": call_id, "answer": answer})
+        return True
+
     def cancel(self) -> None:
         self.cancelled = True
         for future in self._approvals.values():
             if not future.done():
                 future.set_result(False)
+        for future in self._inputs.values():
+            if not future.done():
+                future.set_result(None)
 
     def finish(self) -> None:
         self._finished.set()
@@ -208,6 +244,17 @@ class RunContext:
     async def wait_finished(self, timeout: float | None = None) -> None:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._finished.wait(), timeout=timeout)
+
+
+_METRIC = re.compile(r"(sum|avg|count)\s*\(\s*(?:distinct\s+)?([\w.]+)\s*\)\s*where\s+(.+)$",
+                     re.IGNORECASE | re.DOTALL)
+_NAME_FILTER = re.compile(r"\b(\w*(?:name|nom|customer|client|company|account|raison)\w*)\s+"
+                          r"(?:i?like|=)\s+'([^']{2,60})'", re.IGNORECASE)
+_VISUAL = re.compile(r"\b(montre|montrez|affiche|graph|graphique|chart|courbe|visuali|"
+                     r"évolution|evolution|tendance|trend|répartition|repartition|camembert|"
+                     r"donut|histogram|diagramme|barres|plot|show me)")
+_FILE = re.compile(r"\b(extract|extrait|export|excel|xlsx|csv|télécharg|fichier|pdf|rapport|"
+                   r"report|download)")
 
 
 class AgentRunner:
@@ -275,6 +322,10 @@ class AgentRunner:
         ctx.cancel()
         return True
 
+    def answer(self, run_id: str, call_id: str, answer: str) -> bool:
+        ctx = self.runs.get(run_id)
+        return bool(ctx and ctx.resolve_input(call_id, answer))
+
     def approve(self, run_id: str, call_id: str, approved: bool) -> bool:
         ctx = self.runs.get(run_id)
         return bool(ctx and ctx.resolve_approval(call_id, approved))
@@ -298,6 +349,10 @@ class AgentRunner:
             ctx.emit({"type": "error", "message": ctx.error, "kind": "internal"})
             await self._rescue(ctx, text)
         finally:
+            try:
+                self._collect_files(ctx)
+            except OSError:
+                pass  # a workspace that cannot be listed costs a card, not the answer
             await self._persist(ctx)
             self.c.audit.record("run.end", run_id=ctx.run_id, status=ctx.status,
                                 tainted=ctx.taint.tainted, taint_sources=ctx.taint.sources,
@@ -329,6 +384,33 @@ class AgentRunner:
         await asyncio.sleep(delay)
         self.runs.pop(run_id, None)
 
+    def _collect_files(self, ctx: RunContext) -> None:
+        """Every file this run left in the workspace, whichever tool wrote it.
+
+        export_data and create_report hand back a download card themselves. But a file
+        written by the pandas server, or by run_python, is just as much the reader's — and
+        without a card it existed only for someone who knew to look in the workspace.
+        """
+        workspace = self.c.workspace().resolve()
+        reported = {b["file"]["path"] for b in ctx.blocks if b.get("file")}
+        skip = {".results", ".charts", "uploads"}
+        found = []
+        for path in workspace.rglob("*"):
+            try:
+                relative = path.relative_to(workspace)
+            except ValueError:
+                continue
+            if not path.is_file() or relative.parts[0] in skip or path.name.startswith("."):
+                continue
+            stat = path.stat()
+            if stat.st_mtime < ctx.started_at - 1 or str(relative) in reported:
+                continue
+            found.append({"path": str(relative), "name": path.name, "bytes": stat.st_size,
+                          "format": path.suffix.lstrip(".").lower() or "file"})
+        ctx.produced = sorted(found, key=lambda f: f["name"])[:12]
+        if ctx.produced:
+            ctx.emit({"type": "files", "files": ctx.produced})
+
     async def _persist(self, ctx: RunContext) -> None:
         conv = self.c.store.conversation(ctx.conversation_id)
         if conv is None:
@@ -343,6 +425,7 @@ class AgentRunner:
             # read, whether any tried to give orders, and whether the transcript had to be
             # compressed to fit. Reading an old answer without those is reading it blind.
             message["notices"] = ctx.notices
+            message["files"] = ctx.produced
             message["trust"] = {"sources": ctx.taint.sources,
                                 "injections": ctx.injections,
                                 "compactions": ctx.compactions}
@@ -430,6 +513,31 @@ class AgentRunner:
                                          "description": "One precise, self-contained question."}},
              "required": ["question"]},
             research, group="Planning", capabilities=(trust.NET, trust.FS_READ))
+        data_tools.register(tools, self, ctx)
+        documented = self._data_sources()
+        if documented:
+            by_slug = {(s.get("slug") or s["name"]): s for s in documented}
+
+            async def source_info(source: str = "", **_: Any) -> dict:
+                server = by_slug.get(source) or next(
+                    (s for s in documented if s["name"].lower() == source.lower()), None)
+                if server is None:
+                    return {"ok": False, "error": f"No notes for '{source}'. Documented sources: "
+                                                  f"{', '.join(by_slug)}."}
+                text = self.c.knowledge.full_text(server["id"], server["name"])
+                return {"ok": True, "summary": f"notes for {server['name']}", "text": text}
+
+            tools["source_info"] = builtin.ToolSpec(
+                "source_info",
+                "Everything written about one data source: its tables with every column's "
+                "values and ranges, joins, metric definitions, caveats and checked queries. "
+                "One call replaces describing tables one by one. Sources with notes: "
+                + ", ".join(by_slug) + ".",
+                {"type": "object",
+                 "properties": {"source": {"type": "string",
+                                           "description": "The source's slug, as in the tool names."}},
+                 "required": ["source"]},
+                source_info, group="Data", capabilities=(trust.FS_READ,))
         mcp_tools = self.c.mcp.tools()
         functions = [spec.as_function() for spec in tools.values()] + self.c.mcp.ollama_tools()
         return tools, mcp_tools, functions
@@ -480,10 +588,12 @@ class AgentRunner:
         self._turn_tools = tools
         catalog = builtin.catalog_text(tools, mcp_tools, self.c.mcp.scopes(),
                                        str(Path(self.c.settings.workspace_dir)
-                                           .expanduser().resolve()))
+                                           .expanduser().resolve()),
+                                       notes=self._source_notes())
         # Stable first, volatile last — see prompts.system_prompt. The nonce notice is the
         # most volatile thing in the prompt, so it goes at the very end.
-        volatile = (self.c.skills.prompt_block(text, nonce=ctx.nonce)
+        volatile = (self._data_block(text)
+                    + self.c.skills.prompt_block(text, nonce=ctx.nonce)
                     + self.c.memory.prompt_block(text, nonce=ctx.nonce))
         system = (prompts.system_prompt(getattr(self.c.llm, "model", ""), catalog, volatile,
                                         identity=self.c.skills.soul())
@@ -514,6 +624,7 @@ class AgentRunner:
         # failure, and not much else. On a local model it is most of the wall clock, so
         # it is spent deliberately rather than on every turn.
         deep_think = True
+        turn_temperature = 0.35
 
         for iteration in range(settings.max_iterations):
             ctx.check_cancelled()
@@ -583,7 +694,7 @@ class AgentRunner:
                 messages,
                 system=system,
                 tools=None if last_turn else functions,
-                temperature=0.35,
+                temperature=turn_temperature,
                 think=deep_think,
                 on_text=on_text,
                 on_thinking=on_thinking,
@@ -623,21 +734,33 @@ class AgentRunner:
                     # spending its whole budget on a model that could not answer.
                     empty_turns += 1
                     truncated = result.stop_reason == "length"
+                    ctx.emit({"type": "notice", "quiet": True,
+                              "message": f"Empty model turn (stop: {result.stop_reason or 'none'}, "
+                                         f"{result.tokens_out} tokens out"
+                                         + (f", server said: {result.error}" if result.error else "")
+                                         + f"). Thinking ended: …{(result.thinking or '')[-160:]}"})
                     if truncated:
                         window = await self._context_window()
                         ctx.emit({"type": "notice", "message":
                                   f"The model was cut off mid-turn: the prompt takes "
                                   f"{result.tokens_in} tokens of a {window}-token window. Connect "
                                   f"fewer MCP servers, or raise the context window in Admin."})
-                    if truncated or empty_turns >= 2:
+                    if truncated or empty_turns >= 3:
                         must_compose = True
                         break
+                    # gpt-oss sometimes ends a turn right after deciding which tool to call,
+                    # without calling it — the reasoning says "let's list the files" and then
+                    # stops. More thinking makes that more likely, not less, so a retry here
+                    # thinks *less* and runs a little warmer: the same request, asked again,
+                    # nearly always comes back with the call it meant to make.
                     pending_hint = prompts.note(
-                        "Your last turn produced nothing at all. Either call a tool or write "
-                        "the answer to the user's question now.")
-                    deep_think = True
+                        "Your last turn ended without a tool call or an answer. If you decided "
+                        "to call a tool, call it now, in this turn. Otherwise write the answer.")
+                    deep_think = False
+                    turn_temperature = min(0.85, 0.35 + 0.2 * empty_turns)
                     continue
                 empty_turns = 0
+                turn_temperature = 0.35
                 if tools_used >= settings.critic_min_tools and not reflected and not last_turn:
                     reflected = True
                     gap = await self._reflect(ctx, text, tools)
@@ -660,6 +783,7 @@ class AgentRunner:
                 ]
             messages.append(assistant_entry)
 
+            empty_turns, turn_temperature = 0, 0.35
             outcomes = await self._execute_calls(ctx, result.tool_calls, tools)
             tools_used += len(outcomes)
             for call, outcome in outcomes:
@@ -699,6 +823,13 @@ class AgentRunner:
         if not ctx.has_answer():
             # Every run ends with something readable, even a run that only failed.
             await self._final_answer(ctx, text, messages, system)
+        if not ctx.has_answer() and not ctx.error:
+            # The last resort: the model returned nothing even when asked to compose. An
+            # empty answer with a green tick is the worst thing this screen can show, so
+            # it says what happened instead — and the Retry under the question is one click.
+            ctx.error = ("The model returned no answer for this question — several turns came "
+                         "back empty. This is usually transient: retry the question.")
+            ctx.emit({"type": "error", "message": ctx.error, "kind": "empty"})
 
         ctx.emit({"type": "status", "phase": "done"})
         asyncio.create_task(self._maybe_title(ctx.conversation_id))
@@ -782,6 +913,65 @@ class AgentRunner:
                   f"{pinned}\n\n<digest of {end - start} earlier turns>\n{digest}\n</digest>"}
         return [*messages[:start], folded, *messages[end:]]
 
+    def _earlier_blocks(self, ctx: RunContext) -> list[dict]:
+        conv = self.c.store.conversation(ctx.conversation_id) or {}
+        return [b for m in conv.get("messages") or []
+                if m.get("role") == "assistant" and m.get("id") != ctx.message_id
+                for b in m.get("blocks") or []]
+
+    def _source_notes(self) -> dict[str, list[str]]:
+        """What Admin says about each connected source, keyed the way the catalogue is."""
+        notes: dict[str, list[str]] = {}
+        for server in self.c.store.mcp_servers().values():
+            lines = self.c.knowledge.catalog_lines(server["id"])
+            if lines:
+                notes[server.get("slug") or server["name"]] = lines
+        return notes
+
+    def _data_block(self, question: str) -> str:
+        """The part of the source knowledge — and of the analyst's toolkit — this question needs.
+
+        Metrics the question names, by name or synonym, come with their exact definition,
+        repeated here next to the question: a definition that only sits in the tool notes
+        above was dropped as soon as a question crossed two sources, and "revenue" quietly
+        became every order instead of the shipped ones. Checked queries that resemble the
+        question ride along as worked examples. And when the question asks to *see*
+        something or to *get* a file, that is said plainly: a mid-size model asked "show me
+        the trend" answered with a table as often as with the chart it was asked for.
+        Written by whoever set up the sources, so it goes in unfenced, like identity.
+        """
+        sources = self._data_sources()
+        parts = []
+        lowered = question.lower()
+        if sources:
+            metrics = self.c.knowledge.metrics_mentioned(question, sources)
+            if metrics:
+                lines = [f"- {m['name']} [{m['source']}] = {m['definition']}" for m in metrics]
+                parts.append("## Metrics this question uses — compute exactly these\n"
+                             + "\n".join(dict.fromkeys(lines))
+                             + "\nApply each filter in every query that computes the metric, "
+                               "including queries feeding a join with another source. Say in "
+                               "one line which definition you used.")
+            examples = self.c.knowledge.verified_for(question, sources)
+            if examples:
+                lines = [f"- [{e['source']}] {e['question']}\n  {e['sql']}" for e in examples]
+                parts.append("## Checked queries that resemble this question\n"
+                             "Written and run by whoever set these sources up. Adapt one of "
+                             "these before writing SQL from scratch:\n" + "\n".join(lines))
+        if _VISUAL.search(lowered):
+            parts.append("## The reader wants to see this\n"
+                         "Draw it with `chart`, from the #ref of the call that returned the rows, "
+                         "then keep the prose to what the chart shows.")
+        if _FILE.search(lowered):
+            parts.append("## The reader wants a file\n"
+                         "An extract, the data or Excel → `export_data` from the #ref. A report "
+                         "or a PDF → draw the charts first, then `create_report`.")
+        return ("\n\n" + "\n\n".join(parts)) if parts else ""
+
+    def _data_sources(self) -> list[dict]:
+        return [s for s in self.c.store.mcp_servers().values()
+                if self.c.knowledge.get(s["id"])["model"] or self.c.knowledge.get(s["id"])["description"]]
+
     async def _context_window(self) -> int:
         getter = getattr(self.c.llm, "context_window", None)
         return await getter() if getter else 0
@@ -859,7 +1049,25 @@ class AgentRunner:
                     f"with run_python and pass the result.")))
                 continue
 
-            if ctx.guard.tool_is_down(call.name):
+            # Rows retyped into any tool's arguments — a dataframe expression, a file body,
+            # a chart — are refused when they match a result that already exists: the fix
+            # is to name that result, and the message says exactly how.
+            if call.name != "run_python":
+                pasted = data_tools.pasted_result_in(
+                    call.arguments, [*ctx.blocks, *self._earlier_blocks(ctx)])
+                if pasted:
+                    immediate.append((call, self._fail(ctx, block,
+                        f"These arguments retype the rows returned by call {pasted}. Name them "
+                        f"instead: source='{pasted}' for export_data, data='{pasted}' for chart, "
+                        f"or rows('{pasted}') inside run_python. Retyped rows are how data gets "
+                        f"lost or quietly changed on the way.")))
+                    continue
+
+            # "The tool is down" is a claim about a server. A built-in never goes down; when
+            # one fails three times running, it is refusing the arguments — and telling the
+            # model to stop calling it made a chart that needed one fixed field name get
+            # abandoned instead.
+            if spec is None and ctx.guard.tool_is_down(call.name):
                 immediate.append((call, self._fail(ctx, block,
                     f"`{call.name}` has failed {ctx.guard.tool_failures(call.name)} times in a "
                     f"row on different arguments — the tool itself is unavailable right now, "
@@ -985,11 +1193,19 @@ class AgentRunner:
         elif ok and spec is None:
             result = self._note_ignored_arguments(call, result)
             result = self._note_whole_table_aggregate(call, result)
+            result = self._note_several_matches(call, result)
+            result = self._note_shared_columns(ctx, call, result)
+            result = self._note_metric_filters(call, result)
         text = result.get("text") or result.get("error") or ""
         text, model_body = self._launder(ctx, call, block, text, spec)
         summary = result.get("summary") or (result.get("error") or "")[:200]
         block.update({"status": "done" if ok else "error", "ok": ok, "summary": summary,
                       "text": text[:40000], "ms": elapsed, "data": result.get("data")})
+        # What the reader receives rather than what the model reads: a chart to draw, a
+        # file to download, a question that was answered. Kept on the block so the answer
+        # still shows them when the conversation is reopened.
+        outputs = {key: result[key] for key in ("chart", "file", "ask") if result.get(key)}
+        block.update(outputs)
         if result.get("truncated"):
             block["summary"] = f"[result truncated] {block['summary']}"[:300]
         ctx.usage["tool_calls"] += 1
@@ -1006,7 +1222,7 @@ class AgentRunner:
                             offloaded=block.get("offloaded"))
         ctx.emit({"type": "tool.end", "index": block["index"], "id": block["id"], "ok": ok,
                   "status": block["status"], "summary": summary, "ms": elapsed,
-                  "preview": text[:1200]})
+                  "preview": text[:1200], **outputs})
         if ok:
             ctx.tool_cache[key] = {"summary": summary, "text": text[:40000]}
             ctx.recent_tools = [call.name, *[t for t in ctx.recent_tools if t != call.name]][:8]
@@ -1161,6 +1377,128 @@ class AgentRunner:
                 "table holds statuses, reversals, duplicates or negative corrections, they "
                 "are all in this number. Before reporting it as the answer, look at what "
                 "the table actually contains and say which rows your figure includes.]")
+        return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+
+    def _note_metric_filters(self, call: ToolCall, result: dict) -> dict:
+        """An aggregate that computes a defined metric's measure without the metric's filter.
+
+        The source says revenue is SUM(amount) WHERE status = 'shipped'. Asked which regions
+        missed their targets — a question that never says "revenue" — the agent summed every
+        order, and every region "beat" its target. The definition was in the prompt twice.
+        A definition is only enforced where the number is produced, so that is where the
+        mismatch is pointed out: advisory, because a query about refunds sums the same
+        column on purpose.
+        """
+        slug = call.name.split("__", 1)[0] if "__" in call.name else ""
+        server = next((s for s in self.c.store.mcp_servers().values() if s.get("slug") == slug), None)
+        if server is None:
+            return result
+        query = " ".join(str(v) for v in call.arguments.values() if isinstance(v, str)).lower()
+        if not re.search(r"\b(sum|avg|count)\s*\(", query):
+            return result
+        misses = []
+        for metric in self.c.knowledge.get(server["id"])["model"].get("metrics") or []:
+            found = _METRIC.match(metric["definition"].strip())
+            if not found:
+                continue
+            func, measure, condition = found.groups()
+            column = measure.split(".")[-1].lower()
+            table = measure.split(".")[0].lower() if "." in measure else ""
+            stem = table.removesuffix("_clean").removesuffix("_view")
+            # Only a query that reads the metric's own table can be computing that metric;
+            # summing the same column name in another table (refunds) is something else.
+            if table and not re.search(rf"\b({re.escape(table)}|{re.escape(stem)})\b", query):
+                continue
+            if not re.search(rf"\b{func.lower()}\s*\([^)]*\b{re.escape(column)}\b", query):
+                continue
+            literals = [v.lower() for v in re.findall(r"'([^']+)'", condition)]
+            if literals and all(f"'{v}'" in query or f'"{v}"' in query for v in literals):
+                continue
+            misses.append(f"{metric['name']} = {metric['definition']}")
+        if not misses:
+            return result
+        note = ("[This aggregates without the filter the source's metric definition uses: "
+                + "; ".join(misses[:3]) + ". If this figure stands for that metric, run it again "
+                "with the filter; if you are deliberately measuring something else, say so.]")
+        return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+
+    def _note_shared_columns(self, ctx: RunContext, call: ToolCall, result: dict) -> dict:
+        """A column this query used means something else in another source: say so, once.
+
+        "Répartition du CA entre les canaux" has two honest readings when Sales has a
+        `channel` (web, partner, direct) and the CRM has one too (event, search, social,
+        email). The agent picked marketing channels and computed them perfectly — for a
+        question that most likely meant the other one. The collision is visible in the
+        source notes; it only matters at the moment one of them is queried, so that is
+        where it is said.
+        """
+        slug = call.name.split("__", 1)[0] if "__" in call.name else ""
+        server = next((s for s in self.c.store.mcp_servers().values() if s.get("slug") == slug), None)
+        if server is None:
+            return result
+        query = " ".join(str(v) for v in call.arguments.values() if isinstance(v, str)).lower()
+        words = set(re.findall(r"[a-z_][a-z0-9_]*", query))
+
+        def categorical(model: dict) -> dict[str, list[str]]:
+            out: dict[str, list[str]] = {}
+            for table in model.get("tables") or []:
+                for column in table.get("columns") or []:
+                    if column.get("values"):
+                        out.setdefault(column["name"].lower(), []).append(
+                            f"{table['name']}: " + ", ".join(column["values"][:6]))
+            return out
+
+        mine = {k: v for k, v in categorical(self.c.knowledge.get(server["id"])["model"]).items()
+                if k in words}
+        if not mine:
+            return result
+        seen: set = ctx.__dict__.setdefault("shared_columns_said", set())
+        notes = []
+        for other in self.c.store.mcp_servers().values():
+            if other["id"] == server["id"]:
+                continue
+            theirs = categorical(self.c.knowledge.get(other["id"])["model"])
+            for name in mine:
+                if name in theirs and name not in seen:
+                    seen.add(name)
+                    notes.append(f"'{name}' also exists in {other['name']} ({'; '.join(theirs[name][:2])}), "
+                                 f"with a different meaning than here ({'; '.join(mine[name][:2])})")
+        if not notes:
+            return result
+        note = ("[" + ". ".join(notes) + ". If the reader's question did not say which one it "
+                "means, ask with ask_user before building the answer on this one.]")
+        return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+
+    def _note_several_matches(self, call: ToolCall, result: dict) -> dict:
+        """A name the reader gave matched several records: say so where the rows land.
+
+        "The customer Kerner" in a database with four Kerners was answered by exporting
+        all four — 44 rows where the reader wanted 10. The rule to ask was in the system
+        prompt and did not survive to the moment the four names came back; this note
+        arrives with them.
+        """
+        query = " ".join(str(v) for v in call.arguments.values() if isinstance(v, str))
+        match = _NAME_FILTER.search(query)
+        if not match:
+            return result
+        from app.data.rows import rows_from_text
+        try:
+            rows = rows_from_text(result.get("text") or "")
+        except ValueError:
+            return result
+        if not rows or not 2 <= len(rows) <= 200:
+            return result
+        key = next((k for k in rows[0] if re.search(r"name|nom|customer|client|company|raison", str(k), re.I)
+                    and not re.search(r"(^|_)id$", str(k), re.I)), None)
+        if not key:
+            return result
+        names = list(dict.fromkeys(str(r.get(key)) for r in rows if r.get(key) not in (None, "")))
+        if not 2 <= len(names) <= 12:
+            return result
+        term = match.group(2).strip("%* ")
+        note = (f"[Several records match '{term}': {', '.join(names[:8])}. If the reader meant one "
+                f"of them, ask which with ask_user — the names as options — before going further. "
+                f"Do not pick one, and do not combine them.]")
         return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
 
     def _note_ignored_arguments(self, call: ToolCall, result: dict) -> dict:

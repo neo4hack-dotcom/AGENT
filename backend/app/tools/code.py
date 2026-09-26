@@ -121,7 +121,7 @@ def available_modules() -> list[str]:
 async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: int,
                      allow_network: bool = False, bridge=None,
                      bridge_tools: list[str] | None = None,
-                     max_bridge_calls: int = 40) -> dict:
+                     max_bridge_calls: int = 40, setup: str = "") -> dict:
     if not (code or "").strip():
         return {"ok": False, "error": "No code to run."}
     workspace.mkdir(parents=True, exist_ok=True)
@@ -144,6 +144,9 @@ async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: i
     # `from __future__` must be the first statement in a file, and the prelude is now in
     # front of it. Hoisting is the fix; the alternative is a SyntaxError pointing at a line
     # of code the model never wrote.
+    # Run-specific definitions (e.g. `rows()`) join the prelude, so tracebacks still count
+    # lines from the model's own first line.
+    prelude = prelude + setup
     future, body = _hoist_future(code)
     source = future + prelude + body
     offset = source[:len(future) + len(prelude)].count("\n")

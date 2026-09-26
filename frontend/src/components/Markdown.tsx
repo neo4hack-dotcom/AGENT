@@ -200,13 +200,17 @@ function splitRow(line: string): string[] {
   return line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
 }
 
+// Zero-width characters models slip inside citations — "[\u200b#11\u200b]" — make them
+// inert text instead of links. They carry no meaning anywhere in an answer.
+const INVISIBLE = /[\u200b\u200c\u200d\u2060\ufeff]/g;
+
 export function Markdown({ text, className, cite }: {
   text: string; className?: string;
   /** Prefix for citation anchors, unique per message. */
   cite?: string;
 }) {
   citePrefix = cite ?? '';
-  const lines = (text || '').split('\n');
+  const lines = (text || '').replace(INVISIBLE, '').split('\n');
   const blocks: ReactNode[] = [];
   let list: { ordered: boolean; items: string[] } | null = null;
   let code: { lang: string; lines: string[] } | null = null;

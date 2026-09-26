@@ -62,6 +62,10 @@ class Container:
         # one file is one thing to back up.
         self.skills = Skills(self.memory._db, self.store)
         self.mcp = McpRegistry(self.store, self.bus, self.settings)
+        # What each source holds and how to read it — written once in Admin, read by
+        # every run. See app/data/knowledge.py.
+        from app.data.knowledge import Knowledge
+        self.knowledge = Knowledge(self.store)
         self._llm: LLMProvider | None = None
         self._fast_llm: LLMProvider | None = None
         self._llm_key: tuple = ()

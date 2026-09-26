@@ -1,0 +1,43 @@
+tables:
+  - name: orders_clean
+    description: >-
+      The table to query for anything about sales. orders with the six double-imported
+      rows counted once; credit notes (negative amounts) and orders of the unknown
+      customer 999 kept.
+  - name: orders
+    description: Raw order feed, duplicates included. Use only to audit data quality.
+metrics:
+  - name: revenue
+    synonyms: [CA, chiffre d'affaires, sales, ventes, turnover, revenus, gross sales]
+    definition: SUM(orders_clean.amount_eur) WHERE orders_clean.status = 'shipped'
+    description: Revenue recognised on shipped orders, in EUR, VAT included.
+  - name: order_count
+    synonyms: [orders, commandes, nombre de commandes, volume]
+    definition: COUNT(orders_clean.id) WHERE orders_clean.status = 'shipped'
+  - name: average_order_value
+    synonyms: [AOV, panier moyen, average basket, valeur moyenne de commande]
+    definition: AVG(orders_clean.amount_eur) WHERE orders_clean.status = 'shipped'
+  - name: refunded_amount
+    synonyms: [remboursements, refunds, montant remboursé]
+    definition: SUM(refunds.amount_eur)
+  - name: refund_rate
+    synonyms: [taux de remboursement, refund ratio]
+    definition: COUNT(orders_clean.id) WHERE status = 'refunded' / COUNT(orders_clean.id), per group
+    description: Share of all orders (every status) that ended refunded.
+caveats:
+  - Query orders_clean, never orders, for sales figures — the duplicates are already resolved there.
+  - Refunded orders already carry status 'refunded' and are outside revenue — never subtract refunds from revenue, that counts them twice.
+  - Negative amounts are credit notes and belong in revenue. Customer 999 is unknown — it counts in totals but in no regional or segment breakdown.
+  - Amounts include VAT; the per-country rates are in vat-rates.csv in the workspace.
+  - Data ends on 2026-07-01 — there is no Q3 beyond that single day.
+  - regional-targets-2026.csv holds H1 revenue targets per region — compare them with revenue as defined above.
+  - channel here is the sales channel (web, partner, direct). Marketing channels are campaigns.channel in the CRM.
+verified_queries:
+  - question: Revenue by region
+    sql: SELECT c.region, ROUND(SUM(o.amount_eur), 2) AS revenue FROM orders_clean o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'shipped' GROUP BY c.region ORDER BY revenue DESC
+  - question: Monthly revenue by channel
+    sql: SELECT substr(o.order_date, 1, 7) AS month, o.channel, ROUND(SUM(o.amount_eur), 2) AS revenue FROM orders_clean o WHERE o.status = 'shipped' GROUP BY month, o.channel ORDER BY month, o.channel
+  - question: Revenue per customer
+    sql: SELECT c.id AS customer_id, c.name, c.region, c.segment, ROUND(SUM(o.amount_eur), 2) AS revenue FROM orders_clean o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'shipped' GROUP BY c.id ORDER BY revenue DESC
+  - question: Refund rate by region
+    sql: SELECT c.region, ROUND(100.0 * SUM(o.status = 'refunded') / COUNT(*), 2) AS refund_rate_pct, COUNT(*) AS orders FROM orders_clean o JOIN customers c ON c.id = o.customer_id GROUP BY c.region ORDER BY refund_rate_pct DESC

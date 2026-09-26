@@ -17,7 +17,7 @@ import { Sidebar } from './components/Sidebar';
 import { AssistantTurn, UserTurn, useStickToBottom, type ApprovalRequest } from './components/Thread';
 import { Badge, Dot, cls, useTheme, useToast } from './components/ui';
 import type {
-  Block, Bootstrap, Conversation, ConversationSummary, Message, PlanStep, StreamEvent, Usage,
+  AskRequest, Block, Bootstrap, FileOut, Conversation, ConversationSummary, Message, PlanStep, StreamEvent, Usage,
 } from './types';
 
 interface Live {
@@ -30,6 +30,8 @@ interface Live {
   phase: string;
   notices: { text: string; quiet?: boolean }[];
   approval: ApprovalRequest | null;
+  ask: AskRequest | null;
+  files: FileOut[];
   error: string | null;
   trust: { sources: string[]; injections: { tool: string; patterns: string[] }[];
            compactions: number };
@@ -47,7 +49,7 @@ function rememberConversation(id: string | null): void {
 const emptyLive = (runId: string, conversationId: string, messageId: string): Live => ({
   runId, conversationId, messageId,
   blocks: new Map(), plan: [], usage: {}, phase: 'starting', notices: [],
-  approval: null, error: null,
+  approval: null, ask: null, files: [], error: null,
   trust: { sources: [], injections: [], compactions: 0 },
 });
 
@@ -284,6 +286,18 @@ export default function App() {
     } finally { setApproving(false); }
   }, [live, toast]);
 
+  const [answering, setAnswering] = useState(false);
+  const answerQuestion = useCallback(async (answer: string) => {
+    if (!live?.ask) return;
+    setAnswering(true);
+    try {
+      await api.answer(live.runId, live.ask.call_id, answer);
+      setLive((current) => (current ? { ...current, ask: null } : current));
+    } catch (e) {
+      toast(String((e as Error).message), 'error');
+    } finally { setAnswering(false); }
+  }, [live, toast]);
+
   const openConversation = useCallback(async (id: string) => {
     stopStream.current?.();
     stopStream.current = null;
@@ -409,7 +423,7 @@ export default function App() {
                 const isLive = live?.messageId === message.id;
                 const rendered: Message = isLive
                   ? { ...message, blocks: liveBlocks, plan: live!.plan, usage: live!.usage,
-                      trust: live!.trust }
+                      trust: live!.trust, files: live!.files }
                   : message;
                 return (
                   <div key={message.id} className="group/turn">
@@ -419,6 +433,9 @@ export default function App() {
                       phase={live?.phase}
                       approval={isLive ? live!.approval : null}
                       onApprove={(approved) => void resolveApproval(approved)}
+                      ask={isLive ? live!.ask : null}
+                      onAnswer={(answer) => void answerQuestion(answer)}
+                      answering={answering}
                       approving={approving}
                       notices={isLive ? live!.notices : message.notices}
                       error={isLive ? live!.error : message.error}
@@ -638,9 +655,24 @@ function applyEvent(live: Live, event: StreamEvent): void {
         ...(block ?? { index: event.index, type: 'tool', name: '' }),
         status: event.status, ok: event.ok, summary: event.summary, ms: event.ms,
         cached: event.cached, text: event.preview ?? '',
+        ...(event.chart ? { chart: event.chart } : {}),
+        ...(event.file ? { file: event.file } : {}),
+        ...(event.ask ? { ask: event.ask } : {}),
       } as Block);
       break;
     }
+    case 'ask.request':
+      live.ask = {
+        call_id: event.call_id, question: event.question, options: event.options ?? [],
+        allow_other: event.allow_other ?? true, expires_in_s: event.expires_in_s ?? 0,
+      };
+      break;
+    case 'ask.resolved':
+      live.ask = null;
+      break;
+    case 'files':
+      live.files = event.files;
+      break;
     case 'approval.request':
       live.approval = {
         call_id: event.call_id, name: event.name, args: event.args,

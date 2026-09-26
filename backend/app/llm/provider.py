@@ -49,6 +49,7 @@ class LLMResult:
     latency_ms: int = 0
     native_tools: bool = True     # False when the call was recovered from plain text
     stop_reason: str = ""
+    error: str = ""               # what the server said went wrong mid-stream, if anything
 
 
 class LLMProvider:
@@ -309,10 +310,17 @@ class OllamaProvider(LLMProvider):
         # losing a run to one is avoidable; resuming a half-streamed answer is not — the
         # deltas are already on the user's screen, so a second attempt would duplicate
         # them. That condition is the whole safety of this loop.
+        stream_errors: list[str] = []
         for attempt in range(2):
             try:
                 await self._stream_once(payload, text_parts, think_parts, raw_calls,
-                                        on_text, on_thinking, should_stop)
+                                        on_text, on_thinking, should_stop, stream_errors)
+                # An error line with nothing shown to the reader yet is as retryable as a
+                # 500: nothing would be duplicated by asking again.
+                if stream_errors and attempt == 0 and not (text_parts or raw_calls):
+                    think_parts.clear()
+                    await asyncio.sleep(1.0)
+                    continue
             except _Retryable as exc:
                 streamed = bool(text_parts or think_parts or raw_calls)
                 if attempt == 0 and not streamed:
@@ -357,15 +365,18 @@ class OllamaProvider(LLMProvider):
             latency_ms=int((time.time() - started) * 1000),
             native_tools=native,
             stop_reason=stop_reason,
+            error=" | ".join(dict.fromkeys(stream_errors))[:600],
         )
 
     async def _stream_once(self, payload: dict, text_parts: list[str], think_parts: list[str],
                            raw_calls: list[dict], on_text: Delta | None,
                            on_thinking: Delta | None,
-                           should_stop: Callable[[], bool] | None = None) -> None:
+                           should_stop: Callable[[], bool] | None = None,
+                           errors: list[str] | None = None) -> None:
         """One pass over the streamed response, appending into the caller's buffers."""
         tokens_in = tokens_out = 0
         stop_reason = ""
+        errors = errors if errors is not None else []
         async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_s, connect=15)) as client:
             async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as resp:
                 if resp.status_code >= 400:
@@ -384,6 +395,13 @@ class OllamaProvider(LLMProvider):
                     try:
                         chunk = json.loads(line)
                     except json.JSONDecodeError:
+                        continue
+                    if chunk.get("error"):
+                        # Ollama reports a failure that happens mid-generation as a line of
+                        # its own, not as an HTTP status — a tool call it could not parse,
+                        # an upstream model error. Skipping it turned a real failure into a
+                        # silent, empty turn.
+                        errors.append(str(chunk["error"])[:500])
                         continue
                     message_obj = chunk.get("message") or {}
                     piece = message_obj.get("content")

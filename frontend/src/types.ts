@@ -30,6 +30,71 @@ export interface Block {
   /** Workspace handle when the result was too large to keep in context. */
   offloaded?: string;
   redacted?: number;
+  /** What the reader receives from this call: a chart, a file, an answered question. */
+  chart?: ChartOut;
+  file?: FileOut;
+  ask?: AskOut;
+}
+
+/** A chart as the backend stored it: the Vega-Lite spec with its rows, no theme. */
+export interface ChartOut {
+  id: string;
+  version: number;
+  title: string;
+  source: string;
+  spec: Record<string, unknown>;
+  data: Record<string, unknown>[];
+  /** True when the rows were written into the call rather than named. */
+  typed?: boolean;
+}
+
+export interface FileOut {
+  path: string;
+  name: string;
+  /** csv, xlsx, json, pdf — or whatever extension a tool gave a file it wrote. */
+  format: string;
+  bytes: number;
+  rows?: number;
+  pages?: number;
+  sheets?: string[];
+}
+
+export interface AskOut {
+  question: string;
+  options: string[];
+  answer: string | null;
+}
+
+export interface AskRequest {
+  call_id: string;
+  question: string;
+  options: string[];
+  allow_other: boolean;
+  expires_in_s: number;
+}
+
+/** One data source in Admin: what is written about it and how ready it is. */
+export interface SourceSummary {
+  id: string;
+  name: string;
+  slug: string;
+  connected: boolean;
+  /** Has a read-only SQL tool, so it can be profiled and given a model. */
+  queryable: boolean;
+  description: string;
+  counts: { tables: number; metrics: number; caveats: number; verified: number };
+  readiness: { score: number; of: number; checks: { key: string; ok: boolean; hint: string }[] };
+  profiled_at: number | null;
+  updated_at: number | null;
+}
+
+export interface SourceDetail extends SourceSummary {
+  model_yaml: string;
+  example_yaml?: string;
+  profile: Record<string, unknown>;
+  errors: string[];
+  checked?: number;
+  rejected?: { question: string; sql: string; error: string }[];
 }
 
 export interface PlanStep {
@@ -101,6 +166,8 @@ export interface Message {
   images?: { name: string; mime: string }[];
   /** Remarks the run made about itself; `quiet` ones belong in the log, not the answer. */
   notices?: { text: string; quiet?: boolean }[];
+  /** Files the run left in the workspace that no output card already covers. */
+  files?: FileOut[];
   /** What this answer rests on: outside sources read, manipulation attempts, compactions. */
   trust?: { sources: string[]; injections: { tool: string; patterns: string[] }[];
             compactions: number };
@@ -346,7 +413,11 @@ export type StreamEvent =
   | { type: 'tool.start'; index: number; id: string; name: string; args: Record<string, unknown>;
       server: string; kind: 'builtin' | 'mcp'; by?: string; ref?: string }
   | { type: 'tool.end'; index: number; id: string; ok: boolean; status: ToolStatus;
-      summary: string; ms: number; preview?: string; cached?: boolean }
+      summary: string; ms: number; preview?: string; cached?: boolean;
+      chart?: ChartOut; file?: FileOut; ask?: AskOut }
+  | ({ type: 'ask.request' } & AskRequest)
+  | { type: 'files'; files: FileOut[] }
+  | { type: 'ask.resolved'; call_id: string; answer: string | null; reason?: string }
   | { type: 'approval.request'; call_id: string; index: number; name: string;
       args: Record<string, unknown>; server: string; kind: string; reason: string;
       expires_in_s: number; host?: string }

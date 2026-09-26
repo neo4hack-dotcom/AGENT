@@ -1,0 +1,447 @@
+"""The agent's analyst tools: draw a chart, ask the reader, hand over a file, write a report.
+
+They share one rule, the one that separates an analysis from a transcription: data is
+*named*, never retyped. `#4` is the result of call four in this conversation; `chart:c1`
+is a chart's rows; anything else is a workspace file. The rows are fetched from where they
+actually are, so what the reader sees in a chart, an extract or a PDF is exactly what the
+query returned.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import json
+import re
+import uuid
+from pathlib import Path
+from typing import Any
+
+from app.agent import builtin, trust
+from app.data import charts as chart_lib
+from app.data import exports as export_lib
+from app.data import report as report_lib
+from app.data import rows as rows_lib
+
+_REF_NUMBER = re.compile(r"#(\d{1,3})")
+_ROWS_CALL = re.compile(r"""\brows\(\s*['"]((?:#\d{1,3})|(?:chart:[\w-]+)|(?:[^'"]+\.(?:csv|json|xlsx)))['"]\s*\)""")
+
+
+_DEICTIC = re.compile(r"\b(ce|cet|le|ton|this|the|that|your)\s+(graph\w*|chart|diagramme|visuel|"
+                      r"camembert|donut|histogramme)\b", re.IGNORECASE)
+_LITERAL_ROWS = re.compile(r"\[\s*\{.{120,}?\}\s*,?\s*\]", re.DOTALL)
+_NUMBER = re.compile(r"(?<![\w.])-?\d+\.\d{2}(?![\d])")
+
+
+def _pasted_result(code: str, blocks: list[dict]) -> str:
+    """The #ref whose rows this code has typed in as a literal, if any.
+
+    Only a literal that matches an existing result counts: a list of constants the model
+    genuinely wrote is left alone. The match is on decimal figures — three of them found
+    together in one earlier result is not a coincidence.
+    """
+    for literal in _LITERAL_ROWS.findall(code):
+        if literal.count("{") < 4:
+            continue
+        figures = list(dict.fromkeys(_NUMBER.findall(literal)))
+        if len(figures) < 3:
+            continue
+        probe = figures[:6]
+        for block in reversed(blocks):
+            if block.get("type") != "tool" or not block.get("ok") or not block.get("ref"):
+                continue
+            if block.get("name") == "run_python":
+                continue
+            text = block.get("text") or ""
+            if sum(1 for f in probe if f in text) >= min(3, len(probe)):
+                return block["ref"]
+    return ""
+
+
+def pasted_result_in(arguments: dict, blocks: list[dict]) -> str:
+    """The #ref whose rows appear retyped in any string argument of a call."""
+    for value in (arguments or {}).values():
+        text = value if isinstance(value, str) else (
+            json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, (list, dict)) else "")
+        if len(text) > 120:
+            ref = _pasted_result(text, blocks)
+            if ref:
+                return ref
+    return ""
+
+
+def _as_obj(value: Any) -> Any:
+    """Models sometimes send a JSON object as a string. Accept both."""
+    if isinstance(value, str) and value.strip()[:1] in "{[":
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
+    c = runner.c
+    workspace = c.workspace()
+    store = chart_lib.ChartStore(workspace)
+
+    def history() -> list[list[dict]]:
+        conv = c.store.conversation(ctx.conversation_id) or {}
+        return [m.get("blocks") or [] for m in reversed(conv.get("messages") or [])
+                if m.get("role") == "assistant" and m.get("id") != ctx.message_id]
+
+    def resolve(source: Any) -> tuple[list[dict], str]:
+        return rows_lib.resolve(source, blocks=ctx.blocks, history=history(), workspace=workspace,
+                                charts=store, conversation_id=ctx.conversation_id)
+
+    def relative(path: str) -> str:
+        try:
+            return str(Path(path).resolve().relative_to(workspace.resolve()))
+        except ValueError:
+            return path
+
+    def revision_target() -> dict | None:
+        """The chart the reader is pointing at, when they plainly point at one.
+
+        "Passe ce graphique en barres empilées" is a revision even when the model gives the
+        new version a new name — and the Modify button's "Chart c1: …" names it outright.
+        Without this, "this chart" produced a second chart beside the first, and the
+        report and the version history lost track of which was which.
+        """
+        conv = c.store.conversation(ctx.conversation_id) or {}
+        asked = next((m.get("content", "") for m in reversed(conv.get("messages") or [])
+                      if m.get("role") == "user"), "")
+        named = re.match(r"^\s*chart\s+([\w-]+)\s*:", asked, re.IGNORECASE)
+        if named:
+            return store.latest(ctx.conversation_id, named.group(1))
+        if not _DEICTIC.search(asked):
+            return None
+        for scope in history():
+            ids = list(dict.fromkeys(b["chart"]["id"] for b in scope if b.get("chart")))
+            if ids:
+                return store.latest(ctx.conversation_id, ids[-1]) if len(ids) == 1 else None
+        return None
+
+    # ------------------------------------------------------------------ chart
+    async def h_chart(spec: Any = None, data: Any = None, title: str = "", subtitle: str = "",
+                      chart_id: str = "", **_: Any) -> dict:
+        spec = _as_obj(spec)
+        data = _as_obj(data)
+        chart_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(chart_id or "").strip())[:40]
+        # A name the model picked for a new chart is simply its name. Only an existing id
+        # means "revise": refusing an unknown one sent the model round in circles.
+        previous = store.latest(ctx.conversation_id, chart_id) if chart_id else None
+        if previous is None:
+            meant = revision_target()
+            if meant:
+                chart_id, previous = meant["id"], meant
+        if not isinstance(spec, dict):
+            if previous and (title or subtitle):
+                spec = {k: v for k, v in previous["spec"].items() if k not in ("data", "title")}
+            else:
+                return {"ok": False, "error": "spec must be a Vega-Lite object: at least 'mark' "
+                                              "and 'encoding'. " + chart_lib.COOKBOOK}
+        typed = False
+        try:
+            if data not in (None, "", []):
+                rows, source = resolve(data)
+                typed = isinstance(data, list)
+            elif isinstance((spec.get("data") or {}).get("values"), list):
+                rows, source, typed = spec["data"]["values"], "values written by the agent", True
+            elif previous:
+                rows, source = previous["data"], previous["source"]
+            else:
+                return {"ok": False, "error": "Say where the rows come from: data='#4' for the "
+                                              "result of call #4, 'chart:c1', or a workspace "
+                                              "file. Do not paste the rows."}
+        except rows_lib.SourceError as exc:
+            return {"ok": False, "error": str(exc)}
+        if typed and len(rows) > 60:
+            return {"ok": False, "error": f"{len(rows)} rows were typed into the call. Name them "
+                                          f"instead — data='#N' for the call that returned "
+                                          f"them — so the chart shows what the query returned."}
+        if len(rows) > chart_lib.MAX_CHART_ROWS:
+            return {"ok": False, "error": f"{len(rows):,} rows is too many to chart legibly. "
+                                          f"Aggregate first (GROUP BY in the query, or an "
+                                          f"'aggregate' transform) and chart the result."}
+        columns = rows_lib.columns_of(rows)
+        try:
+            full = chart_lib.assemble(spec, rows, title or (previous or {}).get("title", ""),
+                                      subtitle)
+            chart_lib.validate_fields(full, columns)
+            await chart_lib.check_renders(full)
+        except chart_lib.ChartError as exc:
+            return {"ok": False, "error": str(exc)}
+        chart_id = chart_id or store.next_id(ctx.conversation_id)
+        view = store.save(ctx.conversation_id, chart_id, full, source)
+        shape = chart_lib.describe(full, rows)
+        revised = f" (version {view['version']})" if view["version"] > 1 else ""
+        return {"ok": True,
+                "summary": f"chart {chart_id}{revised}: {view['title']} — {shape}",
+                "text": (f"Chart {chart_id}{revised} is drawn under your answer: {shape}, rows "
+                         f"from {source}. Columns: {', '.join(columns)}. Do not restate its "
+                         f"numbers; say in a sentence what it shows. To change it, call chart "
+                         f"with chart_id='{chart_id}' and the full revised spec."),
+                "chart": {**view, "typed": typed}}
+
+    # ---------------------------------------------------------------- ask_user
+    async def h_ask(question: str = "", options: Any = None, allow_other: bool = True,
+                    **_: Any) -> dict:
+        options = _as_obj(options)
+        choices = [str(o).strip() for o in (options or []) if str(o).strip()] \
+            if isinstance(options, list) else []
+        choices = list(dict.fromkeys(choices))[:5]
+        if not question.strip():
+            return {"ok": False, "error": "Say what you need to know."}
+        if len(choices) == 1:
+            return {"ok": False, "error": "One option is not a choice. Give 2 to 5, or none to "
+                                          "let the reader type an answer."}
+        call_id = f"ask_{uuid.uuid4().hex[:10]}"
+        timeout = float(c.settings.approval_timeout_s)
+        answer = await ctx.request_input(call_id, {"question": question.strip(), "options": choices,
+                                                   "allow_other": bool(allow_other) or not choices},
+                                         timeout)
+        if ctx.cancelled:
+            return {"ok": False, "error": "The run was stopped while waiting for an answer."}
+        if answer is None:
+            return {"ok": True, "summary": f"no answer to: {question[:80]}",
+                    "text": (f"The reader did not answer within {int(timeout // 60)} minutes. "
+                             f"Go ahead with the option that is most standard for this data, "
+                             f"and state that assumption in the first line of your answer."),
+                    "ask": {"question": question, "options": choices, "answer": None}}
+        return {"ok": True, "summary": f"{question[:80]} → {answer[:60]}",
+                "text": f"The reader answered: {answer}",
+                "ask": {"question": question, "options": choices, "answer": answer}}
+
+    # ------------------------------------------------------------ export_data
+    async def h_export(source: Any = None, format: str = "xlsx", filename: str = "",
+                       sheets: Any = None, title: str = "", **_: Any) -> dict:
+        sheets = _as_obj(sheets)
+        wanted: list[tuple[str, Any]] = []
+        if isinstance(sheets, list) and sheets:
+            for i, sheet in enumerate(sheets):
+                if isinstance(sheet, dict):
+                    wanted.append((str(sheet.get("name") or f"Sheet{i + 1}"),
+                                   sheet.get("source") or sheet.get("data")))
+        elif source not in (None, ""):
+            wanted.append((title or "Data", _as_obj(source)))
+        if not wanted:
+            return {"ok": False, "error": "Name the rows to export: source='#4' (or 'chart:c1', "
+                                          "or a workspace file), or sheets=[{source, name}]."}
+        resolved = []
+        try:
+            for name, ref in wanted:
+                rows, _label = resolve(ref)
+                resolved.append((name, rows))
+        except rows_lib.SourceError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            info = await asyncio.to_thread(export_lib.export, resolved, format,
+                                           workspace / "exports", filename, title)
+        except export_lib.ExportError as exc:
+            return {"ok": False, "error": str(exc)}
+        info["path"] = relative(info["path"])
+        detail = f"{info['rows']:,} rows" + (f", sheets {', '.join(info['sheets'])}"
+                                             if len(info.get("sheets") or []) > 1 else "")
+        return {"ok": True, "summary": f"{info['name']} — {detail}",
+                "text": (f"Saved {info['name']} ({detail}, {info['bytes']:,} bytes). A download "
+                         f"card is shown under your answer; mention the file in one line."),
+                "file": info}
+
+    # ---------------------------------------------------------- create_report
+    def source_notes() -> dict[int, str]:
+        notes: dict[int, str] = {}
+        for scope in [ctx.blocks, *history()]:
+            for block in scope:
+                if block.get("type") != "tool" or not block.get("ref") or not block.get("ok"):
+                    continue
+                number = int(block["ref"].lstrip("#"))
+                if number in notes:
+                    continue
+                args = block.get("args") or {}
+                query = next((str(v) for k, v in args.items()
+                              if k in ("query", "sql", "expression") and v), "")
+                detail = f": {' '.join(query.split())[:220]}" if query else ""
+                notes[number] = f"{block.get('name', '')}{detail} — {block.get('summary', '')[:120]}"
+        return notes
+
+    async def h_report(title: str = "", sections: Any = None, subtitle: str = "",
+                       filename: str = "", **_: Any) -> dict:
+        sections = _as_obj(sections)
+        if not title.strip() or not isinstance(sections, list) or not sections:
+            return {"ok": False, "error": "A report needs a title and a list of sections: "
+                                          "[{heading, text, chart, table, table_title}]."}
+        charts_needed: dict[str, dict] = {}
+        tables: dict[str, tuple[list[dict], str]] = {}
+        used: set[int] = set()
+        clean = []
+        try:
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                entry = {k: section.get(k) for k in ("heading", "text", "chart", "table",
+                                                     "table_title", "columns") if section.get(k)}
+                if entry.get("chart"):
+                    chart_key = str(entry["chart"]).removeprefix("chart:").strip()
+                    chart = store.latest(ctx.conversation_id, chart_key)
+                    if chart is None:
+                        existing = [ch["id"] for ch in store.all_latest(ctx.conversation_id)]
+                        return {"ok": False, "error": f"No chart '{chart_key}' to include. Charts "
+                                                      f"in this conversation: "
+                                                      f"{', '.join(existing) or 'none'} — draw it "
+                                                      f"with the chart tool first."}
+                    entry["chart"] = chart_key
+                    charts_needed[chart_key] = chart
+                    used.update(int(n) for n in _REF_NUMBER.findall(chart.get("source", "")))
+                if entry.get("table"):
+                    key = str(entry["table"])
+                    rows, label = resolve(_as_obj(entry["table"]))
+                    tables[key] = (rows, label)
+                    entry["table"] = key
+                    used.update(int(n) for n in _REF_NUMBER.findall(label))
+                clean.append(entry)
+        except rows_lib.SourceError as exc:
+            return {"ok": False, "error": str(exc)}
+        notes = source_notes()
+        path = export_lib.unique_path(workspace / "reports",
+                                      export_lib.safe_name(filename or title, "pdf"))
+        try:
+            info = await asyncio.to_thread(
+                report_lib.build, path, title=title.strip(), subtitle=subtitle.strip(),
+                sections=clean, sources=notes, used=used, charts=charts_needed, tables=tables,
+                generated=dt.datetime.now())
+        except Exception as exc:  # noqa: BLE001 - a layout failure must reach the model, not kill the run
+            return {"ok": False, "error": f"The PDF could not be built: {type(exc).__name__}: {exc}"}
+        info["path"] = relative(info["path"])
+        return {"ok": True, "summary": f"{info['name']} — {info['pages']} page(s)",
+                "text": (f"Saved {info['name']}: {info['pages']} page(s), {len(charts_needed)} "
+                         f"chart(s), {len(tables)} table(s). A download card is shown under your "
+                         f"answer. In the answer itself, give the key finding in one or two "
+                         f"sentences with its figures, then point to the report — the reader "
+                         f"should not have to open the PDF to learn the headline."),
+                "file": info}
+
+    # ------------------------------------------------------- rows() in run_python
+    python = tools.get("run_python")
+    if python is not None:
+        original = python.handler
+
+        async def h_run_python(code: str = "", **kwargs: Any) -> dict:
+            """Give the program the real rows of earlier calls, by name.
+
+            Joining two servers means combining two results, and the only way the model had
+            was to paste one of them into the code — the exact retyping this module exists
+            to prevent. `rows("#3")` in the code is resolved here, before it runs, to the
+            full result on disk; the program reads the data, the model never re-types it.
+            """
+            pasted = _pasted_result(code or "", [*ctx.blocks, *[b for scope in history() for b in scope]])
+            if pasted:
+                return {"ok": False,
+                        "error": f"This code pastes the rows returned by call {pasted}. Use "
+                                 f"rows('{pasted}') instead — rows typed into code are how rows "
+                                 f"get lost, reordered or quietly changed. Same code otherwise."}
+            refs = list(dict.fromkeys(m.group(1) for m in _ROWS_CALL.finditer(code or "")))
+            setup = ""
+            if refs:
+                folder = workspace / ".results" / "rows"
+                folder.mkdir(parents=True, exist_ok=True)
+                files: dict[str, str] = {}
+                for ref in refs:
+                    try:
+                        data, _label = resolve(ref)
+                    except rows_lib.SourceError as exc:
+                        return {"ok": False, "error": f"rows({ref!r}): {exc}"}
+                    path = folder / f"{ctx.run_id}-{re.sub(r'[^A-Za-z0-9]+', '_', ref)}.json"
+                    path.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
+                    files[ref] = str(path)
+                setup = (
+                    "import json as _rows_json\n"
+                    f"_ROWS_FILES = {json.dumps(files)}\n"
+                    "def rows(ref):\n"
+                    "    if ref not in _ROWS_FILES:\n"
+                    "        raise KeyError(f'rows({ref!r}) was not loaded: write the reference as a literal string, e.g. rows(\"#3\")')\n"
+                    "    with open(_ROWS_FILES[ref], encoding='utf-8') as _handle:\n"
+                    "        return _rows_json.load(_handle)\n")
+            return await original(code=code, _setup=setup, **kwargs)
+
+        python.handler = h_run_python
+        # Right after the first sentence, not at the end: under schema compression only the
+        # first ~600 characters of a description survive, and this is the part that matters
+        # most when combining sources.
+        head, _, rest = python.description.partition(". ")
+        python.description = (
+            f"{head}. rows('#4') inside the code returns the full rows of call #4 as a list of "
+            "dicts (also rows('chart:c1'), rows('file.csv')) — combine results from different "
+            "servers with it; never paste data into the code. To chart or export what you "
+            "computed, print JSON rows (print(df.to_json(orient='records'))) and use this "
+            f"call's #ref. {rest}")
+
+    # -------------------------------------------------------------- the specs
+    tools["chart"] = builtin.ToolSpec(
+        "chart",
+        "Draw a chart for the reader from rows that already exist. `data` names the rows — "
+        "'#4' for the result of call #4 (any call in this conversation), 'chart:c1' for another "
+        "chart's rows, or a workspace file — never paste rows you could name. If you computed the "
+        "rows yourself (run_python, pandas), have that call output them as JSON or CSV, then chart "
+        "its #ref. `spec` is a Vega-Lite spec without data. To change a chart the reader asked "
+        "about, pass its chart_id with the complete revised spec (omit data to keep its rows); "
+        "every version is kept. The chart appears under your answer.\n" + chart_lib.COOKBOOK,
+        {"type": "object",
+         "properties": {
+             "data": {"type": "string", "description": "Where the rows come from: '#4', 'chart:c1', or a workspace file path."},
+             "spec": {"type": "object", "description": "Vega-Lite spec without data: mark, encoding, and optionally transform, layer, facet, resolve."},
+             "title": {"type": "string", "description": "What the chart shows, as a reader would say it."},
+             "subtitle": {"type": "string", "description": "Scope and units, e.g. 'H1 2026, EUR, VAT included'."},
+             "chart_id": {"type": "string", "description": "Only to revise an existing chart, e.g. 'c1'."}},
+         "required": ["spec", "title"]},
+        h_chart, group="Data", capabilities=(trust.FS_READ,))
+
+    tools["ask_user"] = builtin.ToolSpec(
+        "ask_user",
+        "Ask the reader one question and wait for the answer. Only when the request is "
+        "ambiguous in a way that changes the result AND nothing settles it — no defined metric, "
+        "no earlier answer, no query that could find out. Typical: which of two definitions they "
+        "mean, which period, which source to trust when two disagree. Ask before doing the work "
+        "it affects, at most once or twice per request; every question costs the reader a round "
+        "trip. Give 2-4 short, mutually exclusive options.",
+        {"type": "object",
+         "properties": {
+             "question": {"type": "string", "description": "One clear question, in the reader's language."},
+             "options": {"type": "array", "items": {"type": "string"}, "description": "2 to 4 short choices."},
+             "allow_other": {"type": "boolean", "description": "Let the reader type another answer (default true)."}},
+         "required": ["question", "options"]},
+        h_ask, group="Data")
+
+    tools["export_data"] = builtin.ToolSpec(
+        "export_data",
+        "Give the reader a file of rows: an Excel workbook (xlsx, formatted, filterable), a CSV "
+        "or JSON. `source` names the rows like chart's data ('#4', 'chart:c1', a workspace "
+        "file). For several tables in one workbook pass `sheets` as [{source, name}]. Use it "
+        "when the reader asks for an extract, the data, a file, or Excel — not to show numbers "
+        "that belong in the answer.",
+        {"type": "object",
+         "properties": {
+             "source": {"type": "string", "description": "'#4', 'chart:c1' or a workspace file."},
+             "format": {"type": "string", "enum": ["xlsx", "csv", "json"]},
+             "filename": {"type": "string", "description": "A short descriptive name, without folder."},
+             "sheets": {"type": "array", "items": {"type": "object"}, "description": "For a multi-sheet workbook: [{\"source\": \"#4\", \"name\": \"By region\"}]."},
+             "title": {"type": "string", "description": "What the file contains."}},
+         "required": ["format"]},
+        h_export, group="Data", capabilities=(trust.FS_READ,))
+
+    tools["create_report"] = builtin.ToolSpec(
+        "create_report",
+        "Write a PDF report the reader can keep or forward, once the analysis is done. Sections "
+        "run in order; each may have a heading, markdown text, a chart (by chart id, drawn "
+        "beforehand with the chart tool) and a table (rows by reference, like '#4'). Lead with "
+        "the findings, cite figures with their [#N] labels — they become numbered sources at the "
+        "end of the PDF. Draw the charts first, then call this once.",
+        {"type": "object",
+         "properties": {
+             "title": {"type": "string"},
+             "subtitle": {"type": "string", "description": "Scope: sources, period, units."},
+             "sections": {"type": "array", "items": {"type": "object"},
+                          "description": "[{\"heading\": \"Key findings\", \"text\": \"markdown\"}, {\"heading\": \"Trend\", \"chart\": \"c1\"}, {\"heading\": \"Detail\", \"table\": \"#4\", \"table_title\": \"...\"}]"},
+             "filename": {"type": "string"}},
+         "required": ["title", "sections"]},
+        h_report, group="Data", capabilities=(trust.FS_READ,))

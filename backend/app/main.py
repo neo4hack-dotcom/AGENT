@@ -30,6 +30,10 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(c.mcp.connect_enabled())
     else:
         c.mcp._ready.set()
+    # The chart renderer starts a JavaScript engine on first use (~0.5s). Pay that at
+    # boot, in the background, rather than in the middle of someone's first answer.
+    from app.data.charts import warm_up
+    asyncio.create_task(asyncio.to_thread(warm_up))
     try:
         yield
     finally:

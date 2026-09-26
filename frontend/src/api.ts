@@ -5,7 +5,7 @@
 import type {
   AdminState, AuditReport, Bootstrap, CatalogEntry, Conversation, ConversationSummary,
   Artifact, Diagnostics, MemoryEntry, McpServer, ModelOption, RuntimeInfo, SearchHit, Skill,
-  SkillStats, StreamEvent, UploadResult,
+  SkillStats, SourceDetail, SourceSummary, StreamEvent, UploadResult,
 } from './types';
 
 const TOKEN_KEY = 'agent.admin.token';
@@ -67,6 +67,11 @@ export const api = {
     request<{ run_id: string; conversation_id: string; user_message_id: string; message_id: string }>(
       '/chat', { method: 'POST', body: body(payload) }),
   cancelRun: (runId: string) => request<{ ok: boolean }>(`/runs/${runId}/cancel`, { method: 'POST' }),
+  answer: (runId: string, callId: string, answer: string) =>
+    request<{ ok: boolean }>(`/runs/${runId}/answer`,
+      { method: 'POST', body: body({ call_id: callId, answer }) }),
+  chartTheme: () => request<{ light: Record<string, unknown>; dark: Record<string, unknown> }>(
+    '/charts/theme'),
   approve: (runId: string, callId: string, approved: boolean) =>
     request<{ ok: boolean }>(`/runs/${runId}/approve`,
       { method: 'POST', body: body({ call_id: callId, approved }) }),
@@ -146,6 +151,15 @@ export const api = {
     request<Skill>('/admin/skills', { method: 'POST', body: body(payload) }),
   forgetSkill: (id: string) =>
     request<{ ok: boolean }>(`/admin/skills/${id}`, { method: 'DELETE' }),
+
+  sources: () => request<SourceSummary[]>('/admin/sources'),
+  source: (id: string) => request<SourceDetail>(`/admin/sources/${id}`),
+  saveSource: (id: string, patch: { description?: string; model_yaml?: string }) =>
+    request<SourceDetail>(`/admin/sources/${id}`, { method: 'PUT', body: body(patch) }),
+  profileSource: (id: string) =>
+    request<SourceDetail>(`/admin/sources/${id}/profile`, { method: 'POST' }),
+  draftSource: (id: string) =>
+    request<SourceDetail>(`/admin/sources/${id}/draft`, { method: 'POST' }),
 
   diagnostics: () => request<Diagnostics>('/admin/diagnostics'),
   audit: (limit = 200) => request<AuditReport>(`/admin/audit?limit=${limit}`),

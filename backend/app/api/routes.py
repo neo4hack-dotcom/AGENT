@@ -173,6 +173,27 @@ async def approve_call(run_id: str, body: ApprovalBody) -> dict:
     return {"ok": True}
 
 
+@router.get("/charts/theme")
+async def chart_theme() -> dict:
+    """The house chart style, from the one place it is defined — so the chart on screen and
+    the chart in the PDF can never drift apart."""
+    from app.data.charts import theme
+    return {"light": theme(False), "dark": theme(True)}
+
+
+class AnswerBody(BaseModel):
+    call_id: str
+    answer: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/runs/{run_id}/answer")
+async def answer_question(run_id: str, body: AnswerBody) -> dict:
+    """The reader's answer to a clarifying question the agent is waiting on."""
+    if not c.runner.answer(run_id, body.call_id, body.answer.strip()):
+        raise HTTPException(404, "That question is no longer waiting for an answer.")
+    return {"ok": True}
+
+
 # -------------------------------------------------------------------- uploads
 def _upload_dir() -> Path:
     path = c.workspace() / UPLOAD_DIRNAME
@@ -231,8 +252,14 @@ async def artifacts() -> list[dict]:
     return sorted(found, key=lambda f: f["modified"], reverse=True)[:400]
 
 
+# Formats a browser can show on this origin without running anything the app did not
+# write. HTML is deliberately absent: served inline here it would run with the app's cookies.
+_INLINE = {".pdf": "application/pdf", ".png": "image/png", ".svg": "image/svg+xml",
+           ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
 @router.get("/artifacts/{path:path}")
-async def artifact(path: str):
+async def artifact(path: str, inline: bool = False, download: bool = False):
     from fastapi.responses import FileResponse, PlainTextResponse
     try:
         target = file_tool.resolve(c.workspace(), path)
@@ -240,6 +267,12 @@ async def artifact(path: str):
         raise HTTPException(400, str(exc)) from exc
     if not target.is_file():
         raise HTTPException(404, "No such file in the workspace.")
+    if download:
+        return FileResponse(target, filename=target.name)
+    if inline and target.suffix.lower() in _INLINE:
+        media = _INLINE[target.suffix.lower()]
+        headers = {"Content-Security-Policy": "script-src 'none'"} if media == "image/svg+xml" else {}
+        return FileResponse(target, media_type=media, headers=headers)
     if target.stat().st_size > 2_000_000:
         return FileResponse(target, filename=target.name)
     try:
