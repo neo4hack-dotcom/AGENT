@@ -39,7 +39,7 @@ BRIDGE_PRELUDE = (Path(__file__).parent / "bridge_prelude.py").read_text()
 
 
 def _wrappers(names: list[str]) -> str:
-    """One named function per tool, so the model writes `web_fetch(url=...)`, not a string."""
+    """One named function per tool, so the model writes `sqlite__read_query(query=...)`, not a string."""
     return "\n".join(
         f"def {name}(**kw):\n    return call_tool({name!r}, **kw)\n"
         for name in names if name.isidentifier())
@@ -205,8 +205,8 @@ async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: i
         detail = _renumber(err.strip(), offset)[-3000:] or f"exit code {proc.returncode}"
         if "Operation not permitted" in detail and sandbox_available():
             detail += ("\n\nThis process runs with the network denied by the kernel and "
-                       "writes confined to the workspace. Fetch with web_fetch and pass the "
-                       "result in, or write inside the workspace.")
+                       "writes confined to the workspace. Read data through the connected "
+                       "sources' tools and pass it in, or write inside the workspace.")
         if proc.returncode == -signal.SIGKILL:
             detail = ("killed — most likely it exceeded the memory or CPU ceiling. "
                       + detail)

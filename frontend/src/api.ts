@@ -111,7 +111,7 @@ export const api = {
   // --- admin -------------------------------------------------------------
   adminState: () => request<AdminState>('/admin/state'),
   login: (password: string) =>
-    request<{ token: string; expires_at: number }>('/admin/login',
+    request<{ token: string; role: 'admin' | 'user'; expires_at: number }>('/admin/login',
       { method: 'POST', body: body({ password }) }),
   logout: () => request<{ ok: boolean }>('/admin/logout', { method: 'POST' }),
 

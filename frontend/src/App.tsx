@@ -8,7 +8,8 @@ import {
   AlertTriangle, Cloud, Command, MonitorSmartphone, Moon, Plus, Sparkles, Sun,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, streamRun } from './api';
+import { ApiError, api, setAdminToken, streamRun } from './api';
+import { SignIn } from './components/SignIn';
 import { Admin, AdminDoor } from './components/Admin';
 import { Artifacts } from './components/Artifacts';
 import { Palette } from './components/Palette';
@@ -57,6 +58,9 @@ export default function App() {
   const toast = useToast();
   const [dark, toggleTheme] = useTheme();
   const [boot, setBoot] = useState<Bootstrap | null>(null);
+  // Someone on another machine, before sign-in: 'signin' (a password opens it) or
+  // 'closed' (this deployment answers its own machine only).
+  const [gate, setGate] = useState<{ kind: 'signin' | 'closed'; message: string } | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [live, setLive] = useState<Live | null>(null);
@@ -76,7 +80,16 @@ export default function App() {
 
   /* ------------------------------------------------------------ loading */
   const refreshBoot = useCallback(async () => {
-    try { setBoot(await api.bootstrap()); } catch (e) { toast(String((e as Error).message), 'error'); }
+    try {
+      setBoot(await api.bootstrap());
+      setGate(null);
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+        setGate({ kind: e.status === 401 ? 'signin' : 'closed', message: e.message });
+      } else {
+        toast(String((e as Error).message), 'error');
+      }
+    }
   }, [toast]);
 
   const refreshConversations = useCallback(async () => {
@@ -345,6 +358,11 @@ export default function App() {
   const toolsCapable = boot?.model.capabilities.tools ?? false;
   const canSeeAdmin = boot?.admin.authenticated || boot?.admin.mode === 'password';
 
+  if (gate) {
+    return <SignIn closed={gate.kind === 'closed'} message={gate.message}
+      onToken={(token) => { setAdminToken(token); void refreshBoot(); void refreshConversations(); }} />;
+  }
+
   return (
     <div className="flex h-full flex-col">
       <Sidebar
@@ -567,10 +585,6 @@ function buildSuggestions(boot: Bootstrap | null): { label: string; text: string
   if (!boot) return [];
   const names = new Set(boot.tools.map((t) => t.name));
   const out: { label: string; text: string }[] = [];
-  if (names.has('web_search')) {
-    out.push({ label: 'Research something',
-      text: 'Research what has shipped recently around the Model Context Protocol: search, open the pages that matter, and give me a sourced summary.' });
-  }
   if (names.has('run_python')) {
     out.push({ label: 'Compute something real',
       text: 'Actually run the code to work out how many working days are left this year, and what share of the year has already passed.' });

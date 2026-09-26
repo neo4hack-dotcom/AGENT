@@ -6,8 +6,7 @@
 // feel like watching a build run instead of reading an answer.
 
 import {
-  AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileText, FolderOpen, Globe,
-  Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
+  AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileText, FolderOpen, Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
   Sparkles, Terminal, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -18,7 +17,7 @@ import { AskCard, FileCard } from './Outputs';
 import { Badge, Button, Spinner, cls } from './ui';
 
 const TOOL_ICONS: Record<string, LucideIcon> = {
-  web_search: Search, web_fetch: Globe, run_python: Terminal, workspace_read: FileText,
+  run_python: Terminal, workspace_read: FileText,
   workspace_write: Save, workspace_import: Save, workspace_list: FolderOpen,
   remember: Brain, recall: Brain, plan: ListChecks, current_time: Clock,
   find_tools: Search,
@@ -316,7 +315,7 @@ export function ApprovalCard({
         <ShieldQuestion size={15} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0 flex-1">
           {/* Name the thing being decided. For a fetch that is the host, not the tool —
-              nobody weighs "allow web_fetch", they weigh "allow this site". */}
+              nobody weighs "allow a fetch tool", they weigh "allow this host". */}
           <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">
             {request.host ? <>Fetch <span className="font-mono">{request.host}</span>?</> : <>
               Allow <span className="font-mono">{request.name}</span>

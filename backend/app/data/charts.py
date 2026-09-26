@@ -346,14 +346,19 @@ def themed(spec: dict, *, dark: bool = False, width: int | None = None) -> dict:
     return out
 
 
+# The renderer is a JavaScript engine that will fetch a `data.url` if a spec has one. The
+# sanitizer already strips them; this makes the engine itself refuse, whatever gets past.
+NO_NETWORK: list[str] = []
+
+
 def _render_svg(spec: dict) -> str:
     import vl_convert as vlc
-    return vlc.vegalite_to_svg(spec)
+    return vlc.vegalite_to_svg(spec, allowed_base_urls=NO_NETWORK)
 
 
 def render_png(spec: dict, width: int = 900, scale: float = 2.0) -> bytes:
     import vl_convert as vlc
-    return vlc.vegalite_to_png(themed(spec, width=width), scale=scale)
+    return vlc.vegalite_to_png(themed(spec, width=width), scale=scale, allowed_base_urls=NO_NETWORK)
 
 
 async def check_renders(spec: dict) -> None:

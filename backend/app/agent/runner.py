@@ -29,7 +29,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from app.agent import builtin, data_tools, context, prompts, skills, subagent, trust
+from app import network
+from app.agent import builtin, data_tools, context, prompts, skills, trust
 from app.agent.guard import LoopGuard, signature
 from app.errors import NotConfigured, RunCancelled
 from app.llm.provider import ToolCall
@@ -485,34 +486,6 @@ class AgentRunner:
                                        lambda: ctx.taint.tainted, find_tools,
                                        bridge, bridge_tools)
 
-        async def research(question: str = "", **_: Any) -> dict:
-            mcp_now = self.c.mcp.tools()
-            result = await subagent.research(
-                question=question, container=self.c, ctx=ctx, tools=tools,
-                mcp_tools=mcp_now, max_iterations=int(self.c.settings.subagent_iterations),
-                timeout_s=int(self.c.settings.subagent_timeout_s))
-            if not result.get("ok"):
-                return result
-            ctx.taint.mark("research")
-            return {"ok": True,
-                    "summary": f"{len(result['calls'])} source(s) read in "
-                               f"{result['elapsed_ms'] // 1000}s",
-                    "text": result["answer"],
-                    "data": {"calls": result["calls"]}}
-
-        tools["research"] = builtin.ToolSpec(
-            "research",
-            "Delegate a self-contained research question to a reader that can only read. "
-            "It has its own context — it never sees this conversation — and no tool that "
-            "writes, runs, sends or remembers. Use it when answering needs several sources "
-            "read in full: it keeps their bulk out of this conversation, and anything "
-            "hostile in them is talking to something with no hands. Give it one precise "
-            "question, not a topic.",
-            {"type": "object",
-             "properties": {"question": {"type": "string",
-                                         "description": "One precise, self-contained question."}},
-             "required": ["question"]},
-            research, group="Planning", capabilities=(trust.NET, trust.FS_READ))
         data_tools.register(tools, self, ctx)
         documented = self._data_sources()
         if documented:
@@ -1009,7 +982,7 @@ class AgentRunner:
                             else set((mcp_tool or {}).get("capabilities") or ()))
 
             # Any tool call carrying a URL goes past the egress policy — built-in or MCP,
-            # `web_fetch` or a browser server's `navigate`. The rule lives here rather than
+            # an HTTP tool or a browser server's `navigate`. The rule lives here rather than
             # inside one tool because the capability is the URL, not the tool.
             action, reason, host = self._check_egress(ctx, call)
             if action == "deny":
@@ -1246,7 +1219,7 @@ class AgentRunner:
         as "ask", and the caller puts the decision in front of the user.
         """
         for value in _urls_in(call.arguments):
-            verdict, reason = ctx.egress.verdict(value, ctx.taint.tainted)
+            verdict, reason = ctx.egress.verdict(value, ctx.taint.tainted, network.airgapped())
             shape = trust.looks_like_exfiltration(value)
             if verdict == "deny":
                 return "deny", f"Blocked: {reason}", trust.host_of(value)

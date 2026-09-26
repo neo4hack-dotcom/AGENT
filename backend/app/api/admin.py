@@ -10,14 +10,15 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from app import network
 from app.deps import OVERRIDABLE, container as c
 from app.errors import McpError
 from app.mcp import runtimes
 from app.mcp.catalog import CATALOG, CATEGORIES, instantiate
-from app.security import admin_state, check_admin, login, logout
+from app.security import COOKIE, admin_state, check_admin, login, logout, request_token
 from app.tools.code import available_modules
 
 
@@ -40,18 +41,22 @@ async def state(request: Request) -> dict:
 
 
 @router.post("/login")
-async def do_login(request: Request, body: LoginBody) -> dict:
+async def do_login(request: Request, body: LoginBody, response: Response) -> dict:
     result = login(c, request, body.password)
     await c.store.save()
+    # The cookie carries the session where a header cannot: the event stream, downloads.
+    response.set_cookie(COOKIE, result["token"], max_age=c.env.session_ttl_s, httponly=True,
+                        samesite="strict", secure=request.url.scheme == "https", path="/")
     return result
 
 
 @router.post("/logout")
-async def do_logout(request: Request) -> dict:
-    header = request.headers.get("authorization") or ""
-    if header.lower().startswith("bearer "):
-        logout(c, header[7:].strip())
+async def do_logout(request: Request, response: Response) -> dict:
+    token = request_token(request)
+    if token:
+        logout(c, token)
         await c.store.save()
+    response.delete_cookie(COOKIE, path="/")
     return {"ok": True}
 
 
@@ -83,7 +88,10 @@ async def models() -> dict:
             except Exception:
                 caps = {"tools": False, "thinking": False, "vision": False, "context_length": 0,
                         "source": "capabilities unavailable"}
-        return {**entry, "capabilities": caps}
+        # Listed, not hidden, when the air gap refuses it: a model that vanished from the
+        # picker is a mystery, one marked "leaves the network" is an answer.
+        return {**entry, "capabilities": caps,
+                "refused": network.check_model(entry["name"], c.get("ollama_base_url")) or ""}
 
     enriched = await asyncio.gather(*(enrich(e) for e in entries)) if entries else []
     return {"ok": listing.get("ok", False), "error": listing.get("error"),
@@ -137,6 +145,7 @@ class InstallBody(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     cwd: str = ""
     description: str = ""
+    network: str = ""
     connect: bool = True
 
 
@@ -157,7 +166,8 @@ async def add_server(body: InstallBody) -> dict:
             raise HTTPException(400, "A stdio server needs a command.")
         cfg = {"name": body.name, "transport": body.transport, "command": body.command,
                "args": body.args, "env": body.env, "url": body.url, "headers": body.headers,
-               "cwd": body.cwd, "description": body.description, "category": "Custom"}
+               "cwd": body.cwd, "description": body.description, "category": "Custom",
+               "network": body.network}
     server = await c.mcp.add_server(cfg)
     await c.store.save()
     snapshot = {}
@@ -177,6 +187,7 @@ class PatchBody(BaseModel):
     command: str | None = None
     cwd: str | None = None
     description: str | None = None
+    network: str | None = None
 
 
 @guarded.patch("/servers/{server_id}")
@@ -450,6 +461,7 @@ async def diagnostics() -> dict:
                         f"Install it with: {runtime['install']}")
     return {
         "model": {**llm, "capabilities": caps},
+        "network": network.summary(),
         "runs": run_metrics(),
         "mcp": c.mcp.summary(),
         "runtimes": runtimes.probe(),

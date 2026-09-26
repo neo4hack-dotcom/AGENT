@@ -234,6 +234,8 @@ export interface AdminState {
   mode: 'local-only' | 'password';
   authenticated: boolean;
   local: boolean;
+  signed_in?: boolean;
+  remote?: 'password' | 'closed';
 }
 
 export interface Bootstrap {
@@ -267,6 +269,8 @@ export interface McpServer {
   created_at: number;
   status: 'disconnected' | 'connecting' | 'connected' | 'error';
   error: string | null;
+  /** How this server's process is fenced from the network, once connected. */
+  network?: string;
   tool_count: number;
   resource_count: number;
   prompt_count: number;
@@ -319,6 +323,8 @@ export interface ModelOption {
   parameters: string;
   local: boolean;
   capabilities: ModelCapabilities;
+  /** Why the air gap refuses this model; empty when it may be used. */
+  refused?: string;
 }
 
 export interface MemoryEntry {
@@ -391,6 +397,8 @@ export interface Diagnostics {
   workspace: string;
   store: string;
   warnings: string[];
+  network?: { airgapped: boolean; internal_domains: string[]; kernel_sandbox: boolean;
+              cloud_model_allowed: boolean };
 }
 
 export interface UploadResult {

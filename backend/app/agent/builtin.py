@@ -21,7 +21,6 @@ from typing import Any, Callable
 from app.agent import trust
 from app.tools import code as code_tool
 from app.tools import files as file_tool
-from app.tools import web as web_tool
 
 
 class ToolSpec:
@@ -106,27 +105,6 @@ def build_registry(settings, memory, workspace: Path, on_plan,
     and failing — an agent told about a capability it cannot use wastes turns discovering
     that, and reports the failure as if the world were broken.
     """
-
-    async def h_web_search(query: str = "", max_results: int = 6, **_: Any) -> dict:
-        result = await web_tool.web_search(query, max_results=min(int(max_results or 6), 10),
-                                           timeout_s=settings.web_timeout_s)
-        if not result.get("ok"):
-            return result
-        lines = [f"{i + 1}. {r['title']}\n   {r['url']}\n   {r['snippet'][:240]}"
-                 for i, r in enumerate(result["results"])]
-        return {"ok": True, "summary": f"{len(result['results'])} result(s) for “{query}”",
-                "text": "\n".join(lines), "data": result["results"]}
-
-    async def h_web_fetch(url: str = "", **_: Any) -> dict:
-        result = await web_tool.fetch_url(url, max_bytes=settings.web_fetch_max_bytes,
-                                          timeout_s=settings.web_timeout_s)
-        if not result.get("ok"):
-            return result
-        text = result["text"]
-        return {"ok": True,
-                "summary": f"{result['title'] or result['url']} — {len(text)} characters",
-                "text": text[:24000] + ("\n\n[truncated at 24k characters]" if len(text) > 24000 else ""),
-                "data": {"url": result["url"], "title": result["title"]}}
 
     async def h_run_python(code: str = "", _setup: str = "", **_: Any) -> dict:
         callable_tools = bridge_tools() if bridge_tools else []
@@ -270,22 +248,6 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                       ["need"]),
                  h_find_tools, group="Planning"),
     ]
-    if settings.enable_web_tools:
-        specs += [
-            ToolSpec("web_search",
-                     "Search the web and get back titles, URLs and snippets. Use it whenever the "
-                     "answer depends on anything current, specific or outside your training data. "
-                     "Follow up with web_fetch on the URLs worth actually reading.",
-                     _obj({"query": {"type": "string", "description": "What to search for."},
-                           "max_results": {"type": "integer",
-                                           "description": "1-10, default 6."}}, ["query"]),
-                     h_web_search, capabilities=(trust.NET,)),
-            ToolSpec("web_fetch",
-                     "Fetch one URL and read it as text. Works on HTML pages, JSON, CSV and plain "
-                     "text. Use it on search results, documentation, APIs and raw files.",
-                     _obj({"url": {"type": "string", "description": "Full http(s) URL."}}, ["url"]),
-                     h_web_fetch, capabilities=(trust.NET,)),
-        ]
     if settings.enable_python_tool:
         modules = ", ".join(code_tool.available_modules()) or "the standard library only"
         specs.append(ToolSpec(
@@ -298,7 +260,7 @@ def build_registry(settings, memory, workspace: Path, on_plan,
             f"The working directory is the workspace, so relative paths are shared with the "
             f"file tools. Killed after {settings.python_timeout_s}s.\n\n"
             f"**The other tools are callable from inside your code** as ordinary functions — "
-            f"`web_fetch(url=...)`, `sqlite__read_query(query=...)` — each returning the "
+            f"`sqlite__read_query(query=...)`, `workspace_read(path=...)` — each returning the "
             f"result as text and raising `ToolError` on failure. Prefer this whenever a task "
             f"is several steps over the same data: one program that fetches, filters and "
             f"writes is one turn, where the same work as separate tool calls is five. Loops "

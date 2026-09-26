@@ -222,6 +222,7 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="font-mono text-xs font-medium">{model.name}</span>
                     {!model.local && <Badge tone="warn">remote</Badge>}
+                    {model.refused && <span title={model.refused}><Badge tone="bad">leaves the network</Badge></span>}
                     {model.parameters && <span className="text-2xs dimmer">{model.parameters}</span>}
                     {model.size_gb > 0 && <span className="text-2xs dimmer">· {model.size_gb} GB</span>}
                   </div>
@@ -235,12 +236,13 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1">
-                  <Button size="xs" variant={active ? 'subtle' : 'outline'} disabled={active}
+                  <Button size="xs" variant={active ? 'subtle' : 'outline'} disabled={active || !!model.refused}
+                    title={model.refused || undefined}
                     busy={saving === model.name + 'model'}
                     onClick={() => void choose(model.name, 'model')}>
                     {active ? <><Check size={11} /> active</> : usable ? 'Use' : 'Use anyway'}
                   </Button>
-                  <button
+                  <button disabled={!!model.refused}
                     onClick={() => void choose(model.name, 'fast_model')}
                     className={cls('focus-ring rounded px-1 text-2xs transition-colors',
                       model.name === data.fast_selected ? 'text-brand-800 dark:text-brand-300' : 'dimmer hover:text-zinc-600')}>
@@ -384,9 +386,6 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
 
       <section className="space-y-2">
         <h3 className="text-xs font-semibold uppercase tracking-wider dim">Capabilities</h3>
-        <Switch checked={!!prefs.enable_web_tools} label="Web access"
-          hint="web_search and web_fetch — the only built-in tools that leave this machine."
-          onChange={(v) => void update({ enable_web_tools: v })} />
         <Switch checked={!!prefs.enable_python_tool} label="Python execution"
           hint="Separate process, working directory bounded to the workspace, killed past the timeout. This is not a security sandbox: the code runs with this app's own rights."
           onChange={(v) => void update({ enable_python_tool: v })} />
@@ -733,6 +732,17 @@ function DiagnosticsPanel() {
         </section>
       )}
       <RunPanel metrics={data.runs} />
+      {data.network && (
+        <Row label="Network"
+          tone={data.network.airgapped && !data.network.cloud_model_allowed ? 'good' : 'warn'}
+          value={data.network.airgapped
+            ? `Air-gapped${data.network.cloud_model_allowed ? ' — except the model (AGENT_ALLOW_CLOUD_MODEL, testing only)' : ''}`
+            : 'Open — set AGENT_AIRGAPPED=true to close every path out'}
+          extra={[
+            data.network.kernel_sandbox ? 'Local MCP servers run in a loopback-only kernel sandbox' : 'No kernel sandbox on this OS: MCP servers rely on the firewall',
+            data.network.internal_domains.length ? `internal domains: ${data.network.internal_domains.join(', ')}` : 'internal = loopback and private addresses',
+          ].join(' · ')} />
+      )}
       <Row label="Active model" value={data.model.model || '—'}
         tone={data.model.ok ? 'good' : 'bad'} extra={data.model.capabilities.source} />
       <Row label="MCP servers"
