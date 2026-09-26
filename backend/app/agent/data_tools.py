@@ -92,6 +92,11 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 if m.get("role") == "assistant" and m.get("id") != ctx.message_id]
 
     def resolve(source: Any) -> tuple[list[dict], str]:
+        ref = str(source).strip() if isinstance(source, str) else ""
+        reason = getattr(ctx, "flagged_refs", {}).get(ref)
+        if reason:
+            raise rows_lib.SourceError(f"{ref} was flagged as wrong when it came back: {reason} Use the "
+                                       f"result of the corrected query instead.")
         return rows_lib.resolve(source, blocks=ctx.blocks, history=history(), workspace=workspace,
                                 charts=store, conversation_id=ctx.conversation_id)
 

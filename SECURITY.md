@@ -156,6 +156,14 @@ notes are stored as *proposed*, offered only inside `source_info` results (fence
 tool output, labelled unconfirmed), and reach the system prompt only once a person has
 confirmed them in Admin.
 
+## Checks the runner makes on its own
+
+Two kinds of call happen without the model asking, both read-only and both recorded as
+checks on the answer: the SQL filter-value check (one `SELECT DISTINCT … WHERE lower(col) =
+lower('value') LIMIT 5` through the same read-only tool the query used) and, in Admin, the
+safe probes of *Draft with AI* (tools the server declares read-only and that take no
+arguments).
+
 ## The audit log
 
 Every action is appended to `data/audit.jsonl`: which tool, with which arguments (redacted),

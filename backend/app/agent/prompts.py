@@ -228,8 +228,15 @@ from market data, VaR or sensitivities from risk.
 on a result; add nothing for small talk.
 - When unsure whether a source is needed, include it: a source left out cannot be used.
 - plan: when the answer needs two sources or more, 2-5 short steps naming the source and tool \
-for each, in order, ending with how the pieces are combined (usually run_python over the \
-earlier results). Prefer one list or history call over one lookup per item. Otherwise [].
+for each, in order, ending with how the pieces are combined. Prefer one list or history call \
+over one lookup per item. Otherwise [].
+- The agent has built-in tools you do not route to: run_python (pandas/numpy on earlier \
+results), profile_data (quality and anomaly profile of a result), batch_call (one tool for \
+many items, or for every row of a result), chart, export_data, create_report. Plan with them \
+rather than a dataframe or file server, unless the question is about files.
+- Read dates against the data: "the day's close" next to trades means each trade's own date; \
+"today" only when the question says so. Do not settle an ambiguous term in the plan — keep \
+the question's wording.
 Return JSON: {"sources": ["<slug>", ...], "reason": "<one short sentence>", "plan": ["...", ...]}"""
 
 

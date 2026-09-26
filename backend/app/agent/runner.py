@@ -211,6 +211,8 @@ class RunContext:
         self.route_plan: list[str] = []
         # What was verified along the way, kept with the answer for whoever audits it.
         self.checks: list[dict] = []
+        # Results a check found to be wrong, by ref, with the reason.
+        self.flagged_refs: dict[str, str] = {}
         # Progressive tool disclosure: what has been used, and what the model asked for by
         # name. Both survive the turn that established them — a task that needed a tool
         # once usually needs it again, and making it search twice is a wasted turn.
@@ -866,6 +868,7 @@ class AgentRunner:
         reflected = False
         deliverable_nudged = False
         names_nudged = False
+        giveup_nudged = False
         must_compose = False
         window = 0
         empty_turns = 0
@@ -1077,6 +1080,9 @@ class AgentRunner:
                 if not missing and not names_nudged and not last_turn:
                     missing = self._unnamed_codes(ctx, text, (text_block or {}).get("text", ""))
                     names_nudged = bool(missing)
+                if not missing and not giveup_nudged and not last_turn:
+                    missing = self._gave_up(ctx, (text_block or {}).get("text", ""))
+                    giveup_nudged = bool(missing)
                 if missing:
                     deliverable_nudged = True
                     ctx.checks.append({"name": "Deliverable", "result": "missing, asked again", "detail": missing})
@@ -1333,6 +1339,9 @@ class AgentRunner:
                 return {"ok": False, "error": "With rows_from, give arguments: a map from each tool "
                                               "parameter to a column of those rows, e.g. "
                                               "{\"identifier\": \"instrument_id\", \"date\": \"trade_date\"}."}
+            if ctx.flagged_refs.get(str(rows_from).strip()):
+                return {"ok": False, "error": f"{rows_from} was flagged as wrong: "
+                                              f"{ctx.flagged_refs[str(rows_from).strip()]} Use the corrected result."}
             try:
                 source_rows, _label = rows_lib.resolve(
                     rows_from, blocks=ctx.blocks, history=[self._earlier_blocks(ctx)],
@@ -1495,6 +1504,35 @@ class AgentRunner:
             return ("The reader asked for a file and none has been produced. Call `export_data` "
                     "(extract, Excel, CSV) or `create_report` (PDF) now, from the #ref of the rows.")
         return ""
+
+    def _versioned_tables(self, ctx: RunContext) -> set[str]:
+        """Tables seen to keep a version column — from schemas described in this conversation
+        and from the sources' models."""
+        found: set[str] = set()
+        for block in [*self._earlier_blocks(ctx), *ctx.blocks]:
+            if block.get("type") == "tool" and "describe" in (block.get("name") or "") and \
+                    re.search(r'"name":\s*"(version|revision|version_no|amendment_no)"', block.get("text") or ""):
+                table = str((block.get("args") or {}).get("table_name") or (block.get("args") or {}).get("table") or "")
+                if table:
+                    found.add(table.lower())
+        for server in self.c.store.mcp_servers().values():
+            for table in (self.c.knowledge.get(server["id"])["model"].get("tables") or []):
+                if any(str(c.get("name", "")).lower() in ("version", "revision") for c in table.get("columns") or []):
+                    found.add(str(table.get("name", "")).lower())
+        return found
+
+    def _gave_up(self, ctx: RunContext, draft: str) -> str:
+        """A draft that says it cannot be done, from a run that never asked the reader."""
+        if not draft or any(b.get("name") == "ask_user" for b in ctx.blocks if b.get("type") == "tool"):
+            return ""
+        if not re.search(r"(ne peu[tx]|impossible|pas (possible|disponible)|aucun(e)? .{0,40}(disponible|fourni)|"
+                         r"cannot|can't|not (possible|available)|unable to)", draft[:600], re.I):
+            return ""
+        return ("The draft concludes this cannot be done. Before that: re-read the question against the "
+                "data (a date like 'the day's close' next to a trade means that trade's date; 'at the end "
+                "of the half' is the last date the data covers). If a reasonable reading works, do it. If "
+                "two readings give different answers, ask the reader with ask_user, the readings as "
+                "options. Only if neither works, say what is missing.")
 
     def _unnamed_codes(self, ctx: RunContext, question: str, draft: str) -> str:
         """Instruments named only by ISIN in the draft: the names, from the evidence already in hand."""
@@ -1759,6 +1797,9 @@ class AgentRunner:
             result = self._note_shared_columns(ctx, call, result)
             result = self._note_metric_filters(call, result)
             result = await self._note_filter_values(ctx, call, result)
+            result = self._note_conventions(result)
+            if result.get("_flagged"):
+                ctx.flagged_refs[block.get("ref", "")] = result.pop("_flagged")
         text = result.get("text") or result.get("error") or ""
         text, model_body = self._launder(ctx, call, block, text, spec)
         if spec is None:
@@ -2047,6 +2088,29 @@ class AgentRunner:
                 "means, ask with ask_user before building the answer on this one.]")
         return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
 
+    def _note_conventions(self, result: dict) -> dict:
+        """Say what a quoting convention means, where the quoted value arrives.
+
+        Two conventions cost more wrong answers than any other in markets data, and both
+        can be recognised from the result alone: an FX rate quoted as a currency pair (EURGBP
+        0.78 is GBP per 1 EUR — GBP amounts are divided by it, not multiplied), and a price
+        quoted in percent of par (market value is nominal × price / 100).
+        """
+        text = result.get("text") or ""
+        notes = []
+        pairs = dict.fromkeys(re.findall(r'"(?:pair|currency_pair|ccy_pair|cross)"\s*:\s*"([A-Z]{3})/?([A-Z]{3})"', text))
+        rate = re.search(r'"(?:rate|fx_rate|mid|fixing|px_last)"\s*:\s*([0-9.]+)', text)
+        for base, quote in list(pairs)[:2]:
+            value = f" = {rate.group(1)}" if rate and len(pairs) == 1 else ""
+            notes.append(f"{base}{quote}{value} means 1 {base} = that many {quote}: to convert {quote} into "
+                         f"{base}, divide by the rate; {base} into {quote}, multiply.")
+        if re.search(r'"(?:quote|quote_type|price_type|convention)"\s*:\s*"(PCT_OF_PAR|PERCENT_OF_PAR|PCT|CLEAN_PCT)"', text):
+            notes.append("Prices quoted PCT_OF_PAR are percent of the nominal: market value = nominal × price / 100, "
+                         "in the instrument's currency.")
+        if not notes:
+            return result
+        return {**result, "text": f"{text}\n\n[Convention: {' '.join(notes)}]"}
+
     async def _note_filter_values(self, ctx: RunContext, call: ToolCall, result: dict) -> dict:
         """Check that the text values a SQL query filters on exist, spelled as written.
 
@@ -2070,6 +2134,16 @@ class AgentRunner:
                              "for a record cancelled in its last version, the previous version is kept "
                              "and counted. Pick the latest version first, then filter its status.")
                 break
+        flagged = False
+        # A COUNT(*) over a table that keeps several versions per record counts versions.
+        versioned = self._versioned_tables(ctx)
+        if re.search(r"count\s*\(\s*\*\s*\)", sql, re.I) and not re.search(r"\bversion\b|distinct", sql, re.I):
+            touched = [t for t, _alias in re.findall(r"\b(?:from|join)\s+([A-Za-z_]\w*)(?:\s+(\w+))?", sql, re.I)
+                       if t.lower() in versioned]
+            if touched:
+                notes.append(f"{touched[0]} keeps several versions per record: COUNT(*) here counts versions, "
+                             f"not records. Keep the latest version of each record (then its status), or "
+                             f"count DISTINCT ids.")
         checks = _literal_filters(sql)[:4]
         seen = ctx.__dict__.setdefault("_filter_probes", {})
         for table, column, literal in checks:
@@ -2094,6 +2168,7 @@ class AgentRunner:
                 notes.append(f"'{literal}' matches no row of {table}.{column} as written — the value is "
                              f"{', '.join(repr(m) for m in matches)} (comparison is case-sensitive). "
                              f"The result above is likely wrong: run it again with the exact value.")
+                flagged = True
             else:
                 notes.append(f"No row of {table}.{column} equals '{literal}', in any case. A filter on it "
                              f"selects or excludes nothing — check the values the column takes.")
@@ -2101,7 +2176,12 @@ class AgentRunner:
             return result
         ctx.checks.append({"name": "SQL filter values", "result": "flagged", "detail": " | ".join(notes)[:300]})
         note = "[" + " ".join(notes) + "]"
-        return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+        out = {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+        if flagged:
+            # Remembered under the ref this result gets, so nothing can be drawn, exported or
+            # computed from it without first hearing why it is wrong.
+            out["_flagged"] = " ".join(notes)[:400]
+        return out
 
     def _note_empty_result(self, call: ToolCall, result: dict) -> dict:
         """No rows came back for a filtered call: say that this is not yet an absence.

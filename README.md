@@ -63,7 +63,10 @@ different model (`qwen3.5:4b` and `gemma4:e4b` both see).
 | `chart` | a professional Vega-Lite chart, validated against the data, revisable in place |
 | `export_data` / `create_report` | an Excel/CSV/JSON extract, or a PDF report with charts and numbered sources |
 | `ask_user` | a question with options, when the request is ambiguous (which "Kerner"?) |
-| `source_info` | what a connected source holds: its description, model, metrics and caveats |
+| `source_info` | what a connected source holds: its description, model, metrics and caveats, and what its tools were seen returning |
+| `batch_call` | one read-only tool for many items at once — or for every row of an earlier result (`rows_from='#N'`) |
+| `profile_data` | a data-quality profile of any result: nulls, duplicates, robust outliers per instrument, weekend/holiday dates, values missing from reference data |
+| `note_source` | a convention or pitfall learned about a source, proposed for an administrator to confirm |
 | `read_file` / `write_file` / `list_files` | the workspace, and nothing else |
 | `remember` / `recall` | durable memory across conversations |
 | `plan` | the checklist you watch tick over |
@@ -149,6 +152,18 @@ that refuses anything outside the private network and by a kernel sandbox that d
 them, and every action lands in a hash-chained log that cannot hide being edited.
 
 [`SECURITY.md`](SECURITY.md) is the whole model, including what it does not claim.
+
+### Traceability
+
+Every answer carries its lineage, derived from the run rather than from the model's account
+of itself: the evidence it cites and everything that evidence depended on — each step with
+its source, the exact SQL, code or arguments, the number of rows, the time, and a SHA-256
+fingerprint of the result, so a re-run can be compared. Under the answer, *based on …*
+opens the steps and the checks that ran (source routing, the Critic's verdict, SQL filter
+values verified against the source, flags raised on results); *Explain the method* writes
+the method in plain words from that chain; *Audit trail* downloads the whole of it as
+Markdown or JSON. Excel extracts carry a *Provenance* sheet, CSV and JSON a
+`.provenance.json` beside them, PDF reports a *Method and provenance* appendix.
 
 ### Honesty before completeness
 
