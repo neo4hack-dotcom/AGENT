@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app import network
-from app.agent import builtin, data_tools, context, prompts, skills, trust
+from app.agent import builtin, data_tools, context, lineage, prompts, skills, trust
 from app.agent.guard import LoopGuard, signature
 from app.errors import NotConfigured, RunCancelled
 from app.llm.provider import ToolCall
@@ -166,6 +166,8 @@ class RunContext:
         self.workspace_before: dict[str, tuple[int, float]] = {}
         self.question = ""
         self.route_plan: list[str] = []
+        # What was verified along the way, kept with the answer for whoever audits it.
+        self.checks: list[dict] = []
         # Progressive tool disclosure: what has been used, and what the model asked for by
         # name. Both survive the turn that established them — a task that needed a tool
         # once usually needs it again, and making it search twice is a wasted turn.
@@ -579,6 +581,16 @@ class AgentRunner:
             message["blocks"] = ctx.blocks
             message["plan"] = ctx.plan
             message["usage"] = ctx.usage
+            # What the answer rests on, derived from the run itself: see agent/lineage.py.
+            answer = "\n".join(b.get("text") or "" for b in ctx.blocks
+                               if b["type"] == "text" and not b.get("superseded"))
+            try:
+                message["lineage"] = lineage.build(ctx.blocks, answer)
+            except Exception:  # noqa: BLE001 - provenance must never cost the answer
+                message["lineage"] = {}
+            message["checks"] = ctx.checks + lineage.notes_raised(ctx.blocks)
+            if ctx.route_plan:
+                message["route"] = ctx.route_plan
             # What the answer rests on, kept with the answer: which outside sources were
             # read, whether any tried to give orders, and whether the transcript had to be
             # compressed to fit. Reading an old answer without those is reading it blind.
@@ -1006,6 +1018,10 @@ class AgentRunner:
                 if tools_used >= settings.critic_min_tools and not reflected and not last_turn:
                     reflected = True
                     gap = await self._reflect(ctx, text, tools)
+                    ctx.checks.append({"name": "Final check (Critic)",
+                                       "result": "complete" if gap.get("complete") else "gap found",
+                                       "detail": str(gap.get("missing") or "")[:300]
+                                                 + (f" → ran {gap['tool']}" if gap.get("tool") else "")})
                     if not gap.get("complete"):
                         if gap.get("tool"):
                             await self._run_gap_step(ctx, gap["tool"], gap["arguments"], tools)
@@ -1219,6 +1235,8 @@ class AgentRunner:
         plan = data.get("plan") if isinstance(data, dict) else None
         ctx.route_plan = [str(step).strip()[:200] for step in (plan or []) if str(step).strip()][:5] \
             if isinstance(plan, list) and len(chosen) > 1 else []
+        ctx.checks.append({"name": "Source routing", "result": ", ".join(sorted(chosen)) or "none",
+                           "detail": reason})
         ctx.emit({"type": "notice", "quiet": True,
                   "message": f"Sources for this question: {', '.join(sorted(chosen)) or 'none'}"
                              + (f" — {reason}" if reason else "")
@@ -1386,7 +1404,7 @@ class AgentRunner:
             batched = (self.c.mcp.resolve(str((call.arguments or {}).get("tool") or ""))
                        if call.name == "batch_call" else None)
             block = {"type": "tool", "index": len(ctx.blocks), "id": call.id or new_id("t"),
-                     "ref": ctx.next_ref(),
+                     "ref": ctx.next_ref(), "at": now(),
                      "name": call.name, "args": call.arguments,
                      "server": (mcp_tool["server_name"] if mcp_tool else
                                 batched["server_name"] if batched else
@@ -2127,7 +2145,7 @@ class AgentRunner:
         spec = tools.get(tool_name)
         mcp_tool = None if spec else self.c.mcp.resolve(tool_name)
         block = {"type": "tool", "index": len(ctx.blocks), "id": call.id, "name": tool_name,
-                 "ref": ctx.next_ref(), "args": arguments, "by": "critic",
+                 "ref": ctx.next_ref(), "at": now(), "args": arguments, "by": "critic",
                  "server": mcp_tool["server_name"] if mcp_tool else (spec.group if spec else ""),
                  "kind": "mcp" if mcp_tool else "builtin", "status": "running",
                  "ok": None, "summary": "", "text": "", "ms": 0}

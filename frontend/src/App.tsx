@@ -456,6 +456,7 @@ export default function App() {
                   <div key={message.id} className="group/turn">
                     <AssistantTurn
                       message={rendered}
+                      conversationId={conversation?.id}
                       live={isLive}
                       phase={live?.phase}
                       draft={isLive ? live!.draft : ''}

@@ -211,6 +211,21 @@ earlier results). Prefer one list or history call over one lookup per item. Othe
 Return JSON: {"sources": ["<slug>", ...], "reason": "<one short sentence>", "plan": ["...", ...]}"""
 
 
+EXPLAIN_SYSTEM = """You explain to a risk manager or an auditor how an answer was produced. \
+You get the question, the answer, and the exact evidence chain: each call with its ref, the \
+source, the query or code it ran, and how many rows came back.
+
+Write, in the language of the question, 4 to 8 short bullet points under these headings, \
+using only the chain — never a step it does not show:
+**Data** — which sources, which tables or tools, the refs (#N), the period or date.
+**Rules applied** — filters, definitions, conventions (versions, cancellations, currency \
+conversion, quote conventions), as the queries and code show them.
+**Calculation** — how the figures were combined, in one or two lines.
+**Limits** — what the answer does not cover, assumptions made, and anything the checks \
+flagged. If the chain shows no such limit, say "None identified in the evidence."
+No preamble, no repetition of the answer's figures beyond what explains them."""
+
+
 LESSONS_SYSTEM = """You read the trace of an analyst agent's tool calls in which some calls \
 failed or returned nothing before a later call to the same source worked. State what the next \
 question should know about the source so it gets it right first time: the parameter format or \

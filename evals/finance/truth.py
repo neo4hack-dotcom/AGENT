@@ -93,3 +93,98 @@ def compute(root: Path = Path("/tmp/agent-finance")) -> dict:
 
 if __name__ == "__main__":
     print(json.dumps(compute(), indent=1, ensure_ascii=False))
+
+
+def compute_mining(root: Path = Path("/tmp/agent-finance")) -> dict:
+    """Ground truth for the data-mining scenarios (M1–M10)."""
+    import math
+    import statistics
+
+    world = json.loads((root / "finance.json").read_text())
+    con = sqlite3.connect(root / "trades.db")
+    con.row_factory = sqlite3.Row
+    ref = world["refdata"]
+    px, fx = world["prices"], world["fx"]
+    bonds = {b["isin"]: b for b in ref["bonds"]}
+    equities = {e["isin"]: e for e in ref["equities"]}
+    live = [dict(r) for r in con.execute("""
+        SELECT t.* FROM trades t JOIN (SELECT trade_id, MAX(version) v FROM trades GROUP BY trade_id) l
+          ON l.trade_id = t.trade_id AND l.v = t.version WHERE t.status != 'CANCELLED'""")]
+    t: dict = {}
+
+    # M1 — trades executed more than 3% away from that day's close.
+    off = []
+    for tr in live:
+        close = px.get(tr["instrument_id"], {}).get(tr["trade_date"])
+        if close and tr["price"]:
+            gap = tr["price"] / close - 1
+            if abs(gap) > 0.03:
+                off.append({"trade_id": tr["trade_id"], "gap_pct": round(gap * 100, 2)})
+    t["M1"] = off
+
+    # M2 — the planted data-quality defects.
+    t["M2"] = {"holiday": "T09001", "orphan": "T09002", "orphan_cp": "CP099", "fat_finger": "T09003"}
+
+    # M3/M4 — correlation and volatility of equities over H1.
+    days = world["days"]
+    returns = {}
+    for isin in equities:
+        series = [px[isin][d] for d in days]
+        returns[isin] = [series[i] / series[i - 1] - 1 for i in range(1, len(series))]
+
+    def corr(a, b):
+        ma, mb = statistics.fmean(a), statistics.fmean(b)
+        cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+        return cov / math.sqrt(sum((x - ma) ** 2 for x in a) * sum((y - mb) ** 2 for y in b))
+
+    pairs = sorted(((corr(returns[a], returns[b]), a, b) for i, a in enumerate(equities)
+                    for b in list(equities)[i + 1:]), reverse=True)
+    best = pairs[0]
+    t["M3"] = {"pair": [equities[best[1]]["name"], equities[best[2]]["name"]], "corr": round(best[0], 3)}
+    vols = sorted(((statistics.stdev(r) * math.sqrt(252), isin) for isin, r in returns.items()), reverse=True)
+    t["M4"] = {"top": equities[vols[0][1]]["name"], "top_vol_pct": round(vols[0][0] * 100, 1),
+               "ranking": [equities[i]["name"] for _, i in vols]}
+
+    # M5 — trader whose tickets are most often amended or cancelled.
+    rates = []
+    for row in con.execute("SELECT trader, COUNT(DISTINCT trade_id) n, "
+                           "COUNT(DISTINCT CASE WHEN version > 1 THEN trade_id END) changed "
+                           "FROM trades GROUP BY trader"):
+        rates.append((row["changed"] / row["n"], row["trader"]))
+    rates.sort(reverse=True)
+    t["M5"] = {"trader": rates[0][1], "rate_pct": round(rates[0][0] * 100, 1)}
+
+    # M6 — share of long bond nominal (EUR at the 30 June fixing) held on the top 3 issuers.
+    day = "2026-06-30"
+    by_issuer: dict[str, float] = {}
+    for r in con.execute("SELECT instrument_id, SUM(quantity) q FROM positions_eod WHERE asof_date = ? "
+                         "GROUP BY instrument_id", (day,)):
+        bond = bonds.get(r["instrument_id"])
+        if not bond or r["q"] <= 0:
+            continue
+        eur = r["q"] if bond["currency"] == "EUR" else r["q"] / fx[f"EUR{bond['currency']}"][day]
+        by_issuer[bond["issuer"]] = by_issuer.get(bond["issuer"], 0) + eur
+    ranked = sorted(by_issuer.items(), key=lambda kv: -kv[1])
+    t["M6"] = {"top3": [k for k, _ in ranked[:3]],
+               "share_pct": round(100 * sum(v for _, v in ranked[:3]) / sum(by_issuer.values()), 1)}
+
+    # M7 — live trades per desk per month.
+    desk_of = {r["book_id"]: r["desk"] for r in con.execute("SELECT book_id, desk FROM books")}
+    counts: dict[tuple[str, str], int] = {}
+    for tr in live:
+        key = (desk_of[tr["book_id"]], tr["trade_date"][:7])
+        counts[key] = counts.get(key, 0) + 1
+    t["M7"] = {"total": sum(counts.values()), "cells": len(counts)}
+
+    # M8 — counterparties active in the trade store.
+    t["M8"] = {"counterparties": sorted({tr["counterparty_id"] for tr in live})}
+
+    # M9 — the off-market extract.
+    t["M9"] = {"rows": len(off)}
+
+    # M10 — P&L impact of +50 bp on the Rates desk from DV01 at 30 June.
+    dv01 = world["risk"]["dv01_by_book"][day]
+    total = dv01["RAT-EUR"] + dv01["RAT-USD"]
+    t["M10"] = {"dv01": round(total, 2), "impact": round(-50 * total, 2)}
+    return t
+

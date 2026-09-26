@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import time
 import re
 import uuid
 from pathlib import Path
@@ -307,9 +308,19 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 resolved.append((name, rows))
         except rows_lib.SourceError as exc:
             return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
+        # Where every exported table came from, down to the query — written into the file
+        # itself, so the extract still explains itself once it has left this app.
+        from app.agent import lineage as lineage_lib
+        everything = [*[b for scope in reversed(history()) for b in scope], *ctx.blocks]
+        provenance = {"question": question(), "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                      "model": getattr(c.llm, "model", ""),
+                      "tables": [{"sheet": name, "source": str(ref),
+                                  "chain": lineage_lib.for_ref(everything, str(ref))
+                                  if isinstance(ref, str) and (ref.startswith("#") or ref.startswith("chart:")) else []}
+                                 for name, ref in wanted]}
         try:
             info = await asyncio.to_thread(export_lib.export, resolved, format,
-                                           workspace / "exports", filename, title)
+                                           workspace / "exports", filename, title, provenance)
         except export_lib.ExportError as exc:
             return {"ok": False, "error": str(exc)}
         info["path"] = relative(info["path"])
@@ -377,11 +388,18 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         notes = source_notes()
         path = export_lib.unique_path(workspace / "reports",
                                       export_lib.safe_name(filename or title, "pdf"))
+        from app.agent import lineage as lineage_lib
+        everything = [*[b for scope in reversed(history()) for b in scope], *ctx.blocks]
+        provenance: list[dict] = []
+        for number in sorted(used):
+            for node in lineage_lib.for_ref(everything, f"#{number}"):
+                if node["ref"] not in {n["ref"] for n in provenance}:
+                    provenance.append(node)
         try:
             info = await asyncio.to_thread(
                 report_lib.build, path, title=title.strip(), subtitle=subtitle.strip(),
                 sections=clean, sources=notes, used=used, charts=charts_needed, tables=tables,
-                generated=dt.datetime.now())
+                generated=dt.datetime.now(), provenance=provenance)
         except Exception as exc:  # noqa: BLE001 - a layout failure must reach the model, not kill the run
             return {"ok": False, "error": f"The PDF could not be built: {type(exc).__name__}: {exc}"}
         info["path"] = relative(info["path"])
