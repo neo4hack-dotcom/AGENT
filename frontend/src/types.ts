@@ -86,6 +86,26 @@ export interface SourceSummary {
   readiness: { score: number; of: number; checks: { key: string; ok: boolean; hint: string }[] };
   profiled_at: number | null;
   updated_at: number | null;
+  /** What the agent has seen this source's tools return, across conversations. */
+  observed?: SourceObserved;
+}
+
+export interface SourceNote {
+  id: string;
+  text: string;
+  origin: string;
+  status: 'proposed' | 'confirmed';
+  seen: number;
+  created_at: number;
+  question?: string;
+}
+
+export interface SourceObserved {
+  coverage: { seen: string[]; stale: string[]; unexplored: string[]; total: number };
+  notes?: SourceNote[];
+  calls: number;
+  last_seen: number | null;
+  tools: { name: string; calls: number; ok: number; failed: number; fields: string[]; last_seen: number | null }[];
 }
 
 export interface SourceDetail extends SourceSummary {
@@ -95,6 +115,8 @@ export interface SourceDetail extends SourceSummary {
   errors: string[];
   checked?: number;
   rejected?: { question: string; sql: string; error: string }[];
+  /** Tools called unprompted to draft a tool source's description (read-only, no arguments). */
+  probed?: string[];
 }
 
 export interface PlanStep {

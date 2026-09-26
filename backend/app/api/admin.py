@@ -306,6 +306,8 @@ def _source_summary(server: dict) -> dict:
     model = knowledge["model"]
     conn = c.mcp.connections.get(server["id"])
     queryable = _queryable(server)
+    tools = [t for t in c.mcp.tools() if t["server_id"] == server["id"]]
+    observed = c.atlas.summary(server["id"], tools)
     return {
         "id": server["id"], "name": server["name"], "slug": server.get("slug") or "",
         "connected": bool(conn and conn.status == "connected"),
@@ -315,7 +317,8 @@ def _source_summary(server: dict) -> dict:
                    "caveats": len(model.get("caveats") or []),
                    "verified": len(model.get("verified_queries") or [])},
         "queryable": queryable,
-        "readiness": c.knowledge.readiness(server["id"], queryable),
+        "readiness": c.knowledge.readiness(server["id"], queryable, observed["coverage"]),
+        "observed": observed,
         "profiled_at": knowledge["profiled_at"], "updated_at": knowledge["updated_at"],
     }
 
@@ -380,8 +383,18 @@ async def draft_source(server_id: str) -> dict:
     reads a draft before the agent trusts it."""
     from app.data.drafting import draft
     from app.data.profiler import Profiler, ProfileError
+    from app.data.drafting import draft_tools
     server = _source_or_404(server_id)
     current = c.knowledge.get(server_id)
+    if not _queryable(server):
+        # A service of tools rather than tables: described from its schemas, from what
+        # the atlas saw, and from the few calls that cannot change anything.
+        try:
+            proposal = await draft_tools(c.llm, c.mcp, c.atlas, server)
+        except ProfileError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        await c.store.save()
+        return {**_source_summary(server), "model_yaml": current["model_yaml"], "errors": [], **proposal}
     try:
         if not current["model"].get("tables"):
             profile, model = await Profiler(c.mcp).profile(server)
@@ -391,6 +404,31 @@ async def draft_source(server_id: str) -> dict:
     except ProfileError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {**_source_summary(server), **proposal}
+
+
+class NoteBody(BaseModel):
+    status: str = Field(pattern="^(confirmed|proposed|discarded)$")
+
+
+@guarded.post("/sources/{server_id}/notes/{note_id}")
+async def set_note(server_id: str, note_id: str, body: NoteBody) -> dict:
+    """Confirm a note the agent proposed (it then reaches every prompt), or discard it."""
+    server = _source_or_404(server_id)
+    if not c.atlas.set_note(server_id, note_id, body.status):
+        raise HTTPException(404, "No such note.")
+    await c.store.save()
+    c.audit.record("source.note", server=server["name"], note=note_id, status=body.status)
+    return _source_summary(server)
+
+
+@guarded.delete("/sources/{server_id}/observations")
+async def forget_observations(server_id: str) -> dict:
+    """Clear what the agent has observed about this source's tools. It relearns from use."""
+    server = _source_or_404(server_id)
+    removed = c.atlas.forget(server_id)
+    await c.store.save()
+    c.audit.record("source.forget_observations", server=server["name"], tools=removed)
+    return {**_source_summary(server), "removed": removed}
 
 
 # --------------------------------------------------------------- diagnostics

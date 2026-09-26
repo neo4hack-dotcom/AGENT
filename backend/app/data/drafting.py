@@ -183,3 +183,66 @@ def _json_object(text: str) -> dict | None:
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
+
+
+# ------------------------------------------------------------ tool-based sources
+
+TOOLS_DRAFT_SYSTEM = """You document a tool-based data service for an analytics agent at a \
+bank. You get its tools (names, descriptions, parameters), what past calls were observed \
+returning (fields, kinds, example values, errors) and the output of a few safe calls.
+
+Write the functional description the agent will read before choosing and calling this \
+service. Plain text, at most 220 words, in this order:
+1. One or two sentences: what the service holds and what questions it answers.
+2. One line per tool: what it is for, the parameters that matter with their accepted values \
+or formats, and what it returns — with units, currencies and quoting conventions.
+3. Conventions and pitfalls: identifiers it expects, dates it has or lacks (holidays, \
+month-ends), how values are quoted, anything a call can silently get wrong.
+4. What it cannot answer, and the keys that connect it to other sources (ISIN, book_id…).
+
+State only what the tools, observations and outputs show. Where something is uncertain, \
+say "appears to". Return only the description."""
+
+
+async def draft_tools(llm, registry, atlas, server: dict, probe_timeout_s: float = 20.0) -> dict:
+    """A functional description of a tool-based source, from its schemas, from what the atlas
+    has observed, and from a few calls that cannot change anything."""
+    import asyncio
+
+    tools = [t for t in registry.tools() if t["server_id"] == server["id"]]
+    if not tools:
+        raise ProfileError("This source is not connected, so there is nothing to describe.")
+    # Safe to call unprompted: read-only by the server's own declaration, and nothing to
+    # fill in. Anything else could have an effect, or needs arguments only a question gives.
+    probes = [t for t in tools if t.get("read_only") and not t.get("write")
+              and not (t.get("input_schema") or {}).get("required")][:5]
+    samples = []
+    for tool in probes:
+        try:
+            result = await asyncio.wait_for(registry.call(tool["qualified_name"], {}), probe_timeout_s)
+        except Exception as exc:  # noqa: BLE001 - a failed probe is simply not a sample
+            result = {"ok": False, "error": str(exc)}
+        text = str(result.get("text") or result.get("error") or "")
+        atlas.observe(tool, {}, bool(result.get("ok")), text, str(result.get("error") or ""),
+                      "(probed from Admin to draft this source's description)")
+        samples.append(f"### {tool['name']}()\n{text[:1200]}")
+    listing = []
+    for tool in tools:
+        params = (tool.get("input_schema") or {}).get("properties") or {}
+        required = set((tool.get("input_schema") or {}).get("required") or [])
+        shown = ", ".join(f"{name}{'*' if name in required else ''}"
+                          + (f": {' '.join(str(spec.get('description', '')).split())[:60]}"
+                             if isinstance(spec, dict) and spec.get("description") else "")
+                          for name, spec in params.items())
+        listing.append(f"- {tool['name']}({shown}) — {' '.join((tool.get('description') or '').split())[:300]}")
+    observed = atlas.full_text(server["id"], tools)
+    prompt = (f"# Service: {server['name']}\n\n## Tools (* = required)\n" + "\n".join(listing)
+              + f"\n\n## Observed\n{observed}"
+              + ("\n\n## Outputs of safe calls\n" + "\n\n".join(samples) if samples else ""))
+    result = await llm.chat([{"role": "user", "content": prompt[:24000]}], system=TOOLS_DRAFT_SYSTEM,
+                            temperature=0.2, think=False)
+    description = (result.content or "").strip()
+    if not description:
+        raise ProfileError("The model returned nothing. Try again, or write the description by hand.")
+    return {"description": description[:4000], "probed": [t["name"] for t in probes],
+            "observed_tools": len(atlas.records_for(server["id"]))}

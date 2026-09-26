@@ -240,13 +240,12 @@ def build_registry(settings, memory, workspace: Path, on_plan,
         ToolSpec("current_time", "The current date and time on this machine.",
                  _obj({}), h_now),
         ToolSpec("find_tools",
-                 "Search every connected server for a tool you need but were not offered. "
-                 "Only the tools relevant to the question are listed each turn; this is how "
-                 "you reach the rest. Describe the capability in your own words — "
-                 "\"read a spreadsheet\", \"list git branches\" — and the matches become "
-                 "callable for the remainder of this task.",
+                 "Make tools callable that were not offered this turn. Give a source's slug "
+                 "from the source map — \"market_risk\" — to get all of its tools, or describe "
+                 "the capability in your own words — \"FX history\", \"read a spreadsheet\". "
+                 "The matches stay callable for the rest of this task.",
                  _obj({"need": {"type": "string",
-                                "description": "What you need to do, in a few words."}},
+                                "description": "A source slug, or what you need to do in a few words."}},
                       ["need"]),
                  h_find_tools, group="Planning"),
     ]
@@ -322,9 +321,21 @@ _PLAN_DESC = (
 )
 
 
+def _tool_label(tool: dict, width: int) -> str:
+    if not width:
+        return tool["name"]
+    gist = " ".join((tool.get("description") or "").split())
+    gist = re.split(r"(?<=[.;:])\s", gist, maxsplit=1)[0].rstrip(".;:")
+    if len(gist) > width:
+        gist = gist[:width].rsplit(" ", 1)[0] + "…"
+    return f"{tool['name']} ({gist})" if gist else tool["name"]
+
+
 def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
                  scopes: list[dict] | None = None, workspace: str = "",
-                 notes: dict[str, list[str]] | None = None) -> str:
+                 notes: dict[str, list[str]] | None = None,
+                 observed: dict[str, str] | None = None,
+                 unexplored: dict[str, list[str]] | None = None) -> str:
     """A compact index of the live tool surface for the system prompt.
 
     Names only, grouped. The full descriptions and JSON schemas already travel in the
@@ -350,14 +361,24 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
     # what distinguishes them here.
     scope_by_slug = {s["slug"]: s for s in (scopes or []) if s.get("slug")}
     if mcp_tools:
-        by_server: dict[str, tuple[str, list[str]]] = {}
+        by_server: dict[str, tuple[str, list[dict]]] = {}
         for tool in mcp_tools:
             slug = tool.get("server_slug") or tool["server_name"]
-            by_server.setdefault(slug, (tool["server_name"], []))[1].append(tool["qualified_name"])
-        for slug, (name, names) in by_server.items():
+            by_server.setdefault(slug, (tool["server_name"], []))[1].append(tool)
+        # The source map. With twenty servers the list of tool *names* stops being enough:
+        # "positions" is a job vacancy in HR and a holding in the trade store, "desk" is a
+        # trading desk and a piece of furniture. Each tool keeps the first words of its own
+        # description, which is what tells them apart — trimmed harder as the map grows.
+        crowded = len(mcp_tools) > 60
+        lines.append(f"Sources — {len(by_server)} connected. Choose by what a source holds, "
+                     f"not by a word it shares with the question. Tools not offered this turn "
+                     f"are one `find_tools('<source>')` away.")
+        for slug, (name, tools_of) in by_server.items():
             server = f"{name} ({slug})" if slug and slug != name else name
-            shown = ", ".join(names[:40])
-            more = f" (+{len(names) - 40} more)" if len(names) > 40 else ""
+            described = bool((notes or {}).get(slug))
+            width = 0 if (crowded and described) else (42 if crowded else 70)
+            shown = ", ".join(_tool_label(t, width) for t in tools_of[:30])
+            more = f" (+{len(tools_of) - 30} more)" if len(tools_of) > 30 else ""
             scope = scope_by_slug.get(slug)
             where = ""
             if scope:
@@ -375,11 +396,16 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
                 if workspace and workspace in scope["paths"]:
                     where += (" — the same directory workspace_write writes to, so anything "
                               "you save there is immediately loadable here")
-            # What someone wrote about this source in Admin: what it holds, its tables and
-            # their values, the metrics as they are meant to be computed, what is tricky.
-            # This is the part that replaces five describe calls per question.
+            # What someone wrote about this source in Admin, then what past calls showed —
+            # declared first, observed second, each labelled as what it is.
             known = "".join(f"\n    ↳ {line}" for line in (notes or {}).get(slug, []))
-            lines.append(f"{server}: {shown}{more}{where}{known}")
+            seen = (observed or {}).get(slug)
+            if seen:
+                known += f"\n    ↳ Observed returning: {seen}"
+            blank = (unexplored or {}).get(slug)
+            if blank and len(blank) < len(tools_of):
+                known += f"\n    ↳ Not yet explored: {', '.join(blank[:12])}"
+            lines.append(f"- {server}: {shown}{more}{where}{known}")
     return "\n".join(lines)
 
 

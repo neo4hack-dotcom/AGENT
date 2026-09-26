@@ -63,8 +63,11 @@ class Container:
         self.mcp = McpRegistry(self.store, self.bus, self.settings)
         # What each source holds and how to read it — written once in Admin, read by
         # every run. See app/data/knowledge.py.
+        from app.data.atlas import Atlas
         from app.data.knowledge import Knowledge
         self.knowledge = Knowledge(self.store)
+        # What each tool has been seen to return, across conversations. See app/data/atlas.py.
+        self.atlas = Atlas(self.store)
         self._llm: LLMProvider | None = None
         self._fast_llm: LLMProvider | None = None
         self._llm_key: tuple = ()

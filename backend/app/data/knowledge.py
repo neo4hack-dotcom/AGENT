@@ -288,7 +288,7 @@ class Knowledge:
         self.store.touch()
 
     # ---------------------------------------------------------------- readiness
-    def readiness(self, server_id: str, queryable: bool = True) -> dict:
+    def readiness(self, server_id: str, queryable: bool = True, coverage: dict | None = None) -> dict:
         """How ready a source is for questions, as a short checklist.
 
         Not a grade for its own sake: each line is a specific failure it prevents. No
@@ -311,9 +311,14 @@ class Knowledge:
              "Add two or more questions with checked SQL, as worked examples."),
         ]
         if not queryable:
-            # A web fetcher or a clock has no tables to profile and no metric to define; its
-            # description is all there is to write, and all it needs.
-            checks = checks[:1]
+            # A service of tools has no tables to profile and no metric to define: its
+            # description, and tools the agent has actually seen working, are what it needs.
+            seen = len((coverage or {}).get("seen") or []) + len((coverage or {}).get("stale") or [])
+            total = (coverage or {}).get("total") or 0
+            checks = checks[:1] + [
+                ("explored", bool(total) and seen * 2 >= total,
+                 "Half its tools or more seen working — use it, or Draft with AI, which "
+                 "probes the tools that are safe to call.")]
         done = sum(1 for _, ok, _ in checks if ok)
         return {"score": done, "of": len(checks),
                 "checks": [{"key": key, "ok": ok, "hint": hint} for key, ok, hint in checks]}

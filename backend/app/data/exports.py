@@ -102,16 +102,29 @@ def write_xlsx(sheets: list[tuple[str, list[dict]]], path: Path, title: str = ""
                 values.append(value)
                 widths[i] = max(widths[i], min(60, len(str(value)) if value is not None else 0))
             sheet.append(values)
+        # What each column is — a year, an amount in EUR, a share — read from its values
+        # the way charts read them, so 2026 is not written "2,026" and 0.183 reads 18.3 %.
+        from app.data.chart_sense import infer
+        kinds = infer(rows)
         for i, column in enumerate(columns, start=1):
             letter = get_column_letter(i)
             sheet.column_dimensions[letter].width = min(62, max(9, widths[i - 1] + 2))
             sample = next((r.get(column) for r in rows if r.get(column) is not None), None)
+            info = kinds.get(column) or {}
             fmt = None
             if isinstance(sample, bool):
                 continue
-            if isinstance(sample, float):
+            if info.get("kind") == "year" or re.search(r"(^|_)id$|code", column, re.I):
+                fmt = "0" if isinstance(sample, (int, float)) else None
+            elif info.get("kind") == "percent" and isinstance(sample, (int, float)):
+                fmt = "0.0%" if info.get("fraction") else '0.0" %"'
+            elif info.get("kind") == "currency" and isinstance(sample, (int, float)):
+                symbol = {"EUR": ' "€"', "USD": ' "$"', "GBP": ' "£"', "CHF": ' "CHF"', "JPY": ' "¥"'}.get(
+                    (info.get("unit") or "").upper(), "")
+                fmt = f"#,##0.00{symbol}"
+            elif isinstance(sample, float):
                 fmt = "#,##0.00"
-            elif isinstance(sample, int) and not re.search(r"(^|_)id$|year|code", column, re.I):
+            elif isinstance(sample, int):
                 fmt = "#,##0"
             elif isinstance(sample, str) and _ISO_DAY.match(sample):
                 fmt = "yyyy-mm-dd"

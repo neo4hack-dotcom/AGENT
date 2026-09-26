@@ -162,6 +162,10 @@ export const api = {
     request<SourceDetail>(`/admin/sources/${id}/profile`, { method: 'POST' }),
   draftSource: (id: string) =>
     request<SourceDetail>(`/admin/sources/${id}/draft`, { method: 'POST' }),
+  setSourceNote: (id: string, noteId: string, status: 'confirmed' | 'discarded') =>
+    request<SourceSummary>(`/admin/sources/${id}/notes/${noteId}`, { method: 'POST', body: body({ status }) }),
+  forgetObservations: (id: string) =>
+    request<SourceDetail>(`/admin/sources/${id}/observations`, { method: 'DELETE' }),
 
   diagnostics: () => request<Diagnostics>('/admin/diagnostics'),
   audit: (limit = 200) => request<AuditReport>(`/admin/audit?limit=${limit}`),

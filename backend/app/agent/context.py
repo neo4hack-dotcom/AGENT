@@ -98,7 +98,7 @@ MIN_SIGNAL = 2.0
 
 
 def select_tools(mcp_tools: list[dict], query: str, recent: list[str], pinned: set[str],
-                 budget: int) -> tuple[list[dict], int]:
+                 budget: int, routed: set[str] | None = None) -> tuple[list[dict], int]:
     """The MCP tools to offer this turn, and how many were left out.
 
     Anything the model explicitly asked for stays pinned for the rest of the run: having
@@ -111,6 +111,17 @@ def select_tools(mcp_tools: list[dict], query: str, recent: list[str], pinned: s
     if len(mcp_tools) <= budget:
         return mcp_tools, 0
     ranked = rank_tools(mcp_tools, query, recent)
+    if routed is not None:
+        # Sources chosen by meaning for this question: theirs first, then whatever this
+        # run has already reached for. Nothing else is offered in full — the map still
+        # names every tool, and find_tools pins any of them in one call.
+        chosen = [t for t in ranked if t["qualified_name"] in pinned or t["qualified_name"] in recent]
+        for tool in ranked:
+            if len(chosen) >= budget:
+                break
+            if tool not in chosen and (tool.get("server_slug") or tool["server_name"]) in routed:
+                chosen.append(tool)
+        return chosen, max(0, len(mcp_tools) - len(chosen))
     # Signal means the *question* matched something. A tool scores highly for having
     # just been used, which says nothing about whether the catalogue was understood.
     best = _score(ranked[0], set(_terms(query)), []) if ranked else 0.0

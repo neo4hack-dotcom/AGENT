@@ -368,6 +368,7 @@ const PHASES: Record<string, string> = {
   thinking: 'Thinking',
   checking: 'Checking the answer',
   labelling: 'Labelling the chart',
+  routing: 'Choosing sources',
   compacting: 'Compressing context',
   writing: 'Writing',
   cancelled: 'Stopped',

@@ -40,6 +40,23 @@ from app.store import new_id, now
 # nearly always a preamble to a tool call, and would be shown only to be taken away.
 PREAMBLE_CHARS = 280
 
+_LEAK = re.compile(
+    r"^\s*(?:we need to|we should|we must|we have to|we'll|we will|let's|let us|i need to|"
+    r"i should|i will|i'll|now we|next,? we|then we|need to call|must call)\b[^.!?\n]*"
+    r"(?:\b(?:call|calls|tool|tools|query|fetch|request|compute|use|retrieve|issue|look up)\b)"
+    r"[^.!?\n]*[.!?]?\s*", re.IGNORECASE)
+
+
+def strip_leaked_reasoning(text: str) -> str:
+    """The answer without the model's own leading plan ("We need to call get_price…")."""
+    out = text
+    for _ in range(6):
+        match = _LEAK.match(out)
+        if not match or not match.group(0).strip():
+            break
+        out = out[match.end():]
+    return out if out != text else text
+
 # A model abbreviating its own output is a habit from writing prose, and it does not stop
 # at the boundary of a tool argument. What it produces is unmistakable: a run of spaces —
 # often non-breaking — and then an ellipsis, at the end of a value or alone on a line.
@@ -98,6 +115,7 @@ class RunContext:
         self.status = "running"
         self.error: str | None = None
         self.buffer: list[dict] = []     # replayed to a client that reconnects mid-run
+        self._seq = -1
         # Identical (tool, arguments) inside one run returns the first result instead of
         # doing the work twice. A model that re-fetches the same page mid-run is not
         # gathering new evidence, it is stalling — and each repeat costs a full turn.
@@ -115,6 +133,8 @@ class RunContext:
         self.produced: list[dict] = []
         # The workspace as the run found it, so what the run made can be told apart.
         self.workspace_before: dict[str, tuple[int, float]] = {}
+        self.question = ""
+        self.route_plan: list[str] = []
         # Progressive tool disclosure: what has been used, and what the model asked for by
         # name. Both survive the turn that established them — a task that needed a tool
         # once usually needs it again, and making it search twice is a wasted turn.
@@ -171,6 +191,7 @@ class RunContext:
         released = False
         for b in ([block] if block is not None else self.blocks):
             if b["type"] == "text" and not b.get("superseded") and b.pop("held", False):
+                b["text"] = strip_leaked_reasoning(b.get("text") or "")
                 released = True
                 self.emit({"type": "block.open", "kind": "text", "index": b["index"]})
                 if b.get("text"):
@@ -189,7 +210,11 @@ class RunContext:
         if event.get("type") == "notice":
             self.notices.append({"text": event.get("message", ""),
                                  "quiet": bool(event.get("quiet"))})
-        event = {**event, "run_id": self.run_id, "seq": len(self.buffer)}
+        # A counter of its own, never the buffer's length: once a long run trims its buffer
+        # the length goes back down, and a client that de-duplicates by sequence number
+        # then drops every later event — "done" included — and waits forever.
+        self._seq += 1
+        event = {**event, "run_id": self.run_id, "seq": self._seq}
         self.buffer.append(event)
         if len(self.buffer) > 4000:
             # A very long run keeps its tail; the persisted blocks remain the full record.
@@ -400,6 +425,51 @@ class AgentRunner:
             ctx.finish()
             # Kept briefly so a reconnecting client can still replay the tail.
             asyncio.create_task(self._expire(ctx.run_id))
+            # After the reader has their answer, never before: what this run had to learn
+            # the hard way, proposed as notes for the next question.
+            asyncio.create_task(self._review_lessons(ctx))
+
+    async def _review_lessons(self, ctx: RunContext) -> None:
+        """Turn a run's corrections into proposed source notes.
+
+        Only a run that had to correct itself has anything to teach: a call that failed or
+        came back empty, then a call to the same source that worked. The fast model reads
+        that trace — tool names, arguments, one line of outcome — and states the lesson in
+        a sentence, tied to a source. Proposed, not trusted: see Atlas.add_note.
+        """
+        mcp_blocks = [b for b in ctx.blocks if b.get("type") == "tool" and "__" in (b.get("name") or "")]
+        troubled = {b["name"].split("__")[0] for b in mcp_blocks
+                    if b.get("ok") is False or "[No rows for" in (b.get("text") or "")}
+        recovered = {b["name"].split("__")[0] for b in mcp_blocks if b.get("ok")
+                     and b["name"].split("__")[0] in troubled and "[No rows for" not in (b.get("text") or "")}
+        if not recovered or ctx.status == "cancelled":
+            return
+        servers = {t["server_slug"]: t["server_id"] for t in self.c.mcp.tools()}
+        trace = []
+        for b in mcp_blocks:
+            if b["name"].split("__")[0] not in recovered:
+                continue
+            outcome = "EMPTY" if "[No rows for" in (b.get("text") or "") else ("ok" if b.get("ok") else "FAILED")
+            gist = " ".join(str(b.get("summary") or "").split())[:160]
+            trace.append(f"- {b['name']}({json.dumps(b.get('args') or {}, ensure_ascii=False)[:180]}) → {outcome}: {gist}")
+        try:
+            result = await asyncio.wait_for(self.c.fast_llm.chat(
+                [{"role": "user", "content": f"Question: {ctx.question[:400]}\n\nCalls, in order:\n"
+                                             + "\n".join(trace[:40])}],
+                system=prompts.LESSONS_SYSTEM, temperature=0.0, think=False,
+                json_schema={"type": "object", "properties": {"notes": {"type": "array", "items": {
+                    "type": "object", "properties": {"source": {"type": "string"}, "note": {"type": "string"}},
+                    "required": ["source", "note"]}}}, "required": ["notes"]}), timeout=40)
+            data = json.loads(result.content or "{}")
+        except Exception:  # noqa: BLE001 - a lesson missed is a lesson relearned, nothing worse
+            return
+        notes = data.get("notes") if isinstance(data, dict) else None
+        for item in (notes or [])[:3]:
+            if not isinstance(item, dict):
+                continue
+            slug = str(item.get("source") or "").strip()
+            if slug in servers and slug in recovered:
+                self.c.atlas.add_note(servers[slug], str(item.get("note") or ""), "run review", ctx.question)
 
     async def _rescue(self, ctx: RunContext, question: str,
                       messages: list[dict] | None = None, system: str = "") -> None:
@@ -515,7 +585,10 @@ class AgentRunner:
             return [p for scope in self.c.mcp.scopes() for p in scope["paths"]]
 
         def find_tools(need: str) -> dict:
-            matches = self.c.mcp.search(need, limit=12)
+            wanted = (need or "").strip().lower()
+            whole = [t for t in self.c.mcp.tools()
+                     if wanted and wanted in ((t.get("server_slug") or "").lower(), t["server_name"].lower())]
+            matches = whole or self.c.mcp.search(need, limit=12)
             if not matches:
                 available = sorted({t["server_name"] for t in self.c.mcp.tools()})
                 return {"ok": False,
@@ -543,28 +616,60 @@ class AgentRunner:
                                        bridge, bridge_tools)
 
         data_tools.register(tools, self, ctx)
-        documented = self._data_sources()
-        if documented:
-            by_slug = {(s.get("slug") or s["name"]): s for s in documented}
-
+        connected: dict[str, dict] = {}
+        for tool in self.c.mcp.tools():
+            entry = connected.setdefault(tool["server_slug"], {"id": tool["server_id"],
+                                                               "name": tool["server_name"], "tools": []})
+            entry["tools"].append(tool)
+        if connected:
             async def source_info(source: str = "", **_: Any) -> dict:
-                server = by_slug.get(source) or next(
-                    (s for s in documented if s["name"].lower() == source.lower()), None)
-                if server is None:
-                    return {"ok": False, "error": f"No notes for '{source}'. Documented sources: "
-                                                  f"{', '.join(by_slug)}."}
-                text = self.c.knowledge.full_text(server["id"], server["name"])
-                return {"ok": True, "summary": f"notes for {server['name']}", "text": text}
+                key = (source or "").strip()
+                entry = connected.get(key) or next(
+                    (e for e in connected.values() if e["name"].lower() == key.lower()), None)
+                if entry is None:
+                    return {"ok": False, "error": f"No source '{source}'. Sources: {', '.join(connected)}."}
+                declared = self.c.knowledge.full_text(entry["id"], entry["name"])
+                observed = self.c.atlas.full_text(entry["id"], entry["tools"])
+                tools_line = "Tools: " + "; ".join(
+                    f"{t['name']} — {' '.join((t['description'] or '').split())[:160]}" for t in entry["tools"])
+                return {"ok": True, "summary": f"notes for {entry['name']}",
+                        "text": f"{declared}\n\n{tools_line}\n\n{observed}"}
+
+            async def note_source(source: str = "", note: str = "", **_: Any) -> dict:
+                key = (source or "").strip()
+                entry = connected.get(key) or next(
+                    (e for e in connected.values() if e["name"].lower() == key.lower()), None)
+                if entry is None:
+                    return {"ok": False, "error": f"No source '{source}'. Sources: {', '.join(connected)}."}
+                saved = self.c.atlas.add_note(entry["id"], note, "agent", ctx.question)
+                if saved is None:
+                    return {"ok": False, "error": "Write the note as one full sentence."}
+                return {"ok": True, "summary": f"noted for {entry['name']} (to be confirmed in Admin)",
+                        "text": "Noted. It will be offered with this source's notes, marked unconfirmed, "
+                                "until someone confirms it in Admin."}
+
+            tools["note_source"] = builtin.ToolSpec(
+                "note_source",
+                "Record, for future questions, one thing you had to investigate to understand "
+                "about a source: a convention (bond prices in % of par), the values a parameter "
+                "takes (books are RAT-EUR…, not desk names), a pitfall (VaR only at month ends). "
+                "One factual sentence. Never a figure that changes over time, never an answer.",
+                {"type": "object",
+                 "properties": {"source": {"type": "string", "description": "The source's slug."},
+                                "note": {"type": "string", "description": "One sentence."}},
+                 "required": ["source", "note"]},
+                note_source, group="Data", capabilities=(trust.MEMORY_WRITE,))
 
             tools["source_info"] = builtin.ToolSpec(
                 "source_info",
-                "Everything written about one data source: its tables with every column's "
-                "values and ranges, joins, metric definitions, caveats and checked queries. "
-                "One call replaces describing tables one by one. Sources with notes: "
-                + ", ".join(by_slug) + ".",
+                "Everything known about one source: what its administrator wrote (tables, "
+                "values, metric definitions, caveats, checked queries) and what past calls "
+                "showed its tools return — fields, units, arguments that worked, errors, and "
+                "which tools were never explored. One call before working with a source you "
+                "have not used in this conversation saves several exploratory ones.",
                 {"type": "object",
                  "properties": {"source": {"type": "string",
-                                           "description": "The source's slug, as in the tool names."}},
+                                           "description": "The source's slug, as in the source map."}},
                  "required": ["source"]},
                 source_info, group="Data", capabilities=(trust.FS_READ,))
         mcp_tools = self.c.mcp.tools()
@@ -608,6 +713,7 @@ class AgentRunner:
     # --------------------------------------------------------------- main loop
     async def _run(self, ctx: RunContext, text: str, images: list[dict]) -> None:
         settings = self.c.settings
+        ctx.question = text
         ctx.emit({"type": "status", "phase": "starting"})
         # A run launched seconds after boot would otherwise plan around an empty tool
         # surface while servers are still handshaking.
@@ -615,10 +721,12 @@ class AgentRunner:
 
         tools, mcp_tools, _all_functions = self._tool_surface(ctx)
         self._turn_tools = tools
+        observed, unexplored = self._atlas_lines(mcp_tools)
         catalog = builtin.catalog_text(tools, mcp_tools, self.c.mcp.scopes(),
                                        str(Path(self.c.settings.workspace_dir)
                                            .expanduser().resolve()),
-                                       notes=self._source_notes())
+                                       notes=self._source_notes(),
+                                       observed=observed, unexplored=unexplored)
         # Stable first, volatile last — see prompts.system_prompt. The nonce notice is the
         # most volatile thing in the prompt, so it goes at the very end.
         volatile = (self._data_block(text)
@@ -654,6 +762,17 @@ class AgentRunner:
         # it is spent deliberately rather than on every turn.
         deep_think = True
         turn_temperature = 0.35
+        # Past the point where every schema fits, sources are chosen once, by meaning, before
+        # the first turn — and only theirs are offered in full. The rest stay on the map.
+        routed = (await self._route(ctx, text, mcp_tools)
+                  if len(mcp_tools) > int(settings.tool_budget) else None)
+        if ctx.route_plan:
+            # A route, not a script: it saves the first turns of wandering between twenty
+            # sources, and the model is told to change it as soon as the data disagrees.
+            pending_hint = prompts.note(
+                "A likely route through the sources for this question — a starting point, "
+                "not a script; change it as soon as what you find disagrees:\n"
+                + "\n".join(f"{i}. {step}" for i, step in enumerate(ctx.route_plan, 1)))
 
         for iteration in range(settings.max_iterations):
             ctx.check_cancelled()
@@ -672,7 +791,7 @@ class AgentRunner:
             # Offer the tools this turn plausibly needs; `find_tools` reaches the rest.
             offered, omitted = context.select_tools(
                 mcp_tools, text, ctx.recent_tools, ctx.pinned_tools,
-                budget=int(settings.tool_budget))
+                budget=int(settings.tool_budget), routed=routed)
             # Full schemas while the catalogue is small; compressed once it is not, which
             # is exactly when the tokens are needed elsewhere.
             dense = len(tools) + len(offered) > int(settings.tool_budget)
@@ -764,6 +883,23 @@ class AgentRunner:
                 ctx.usage["ttft_ms"] = result.latency_ms
             ctx.emit({"type": "usage", **ctx.usage})
 
+            if not result.tool_calls and text_block is not None and text_block.get("held") \
+                    and not last_turn:
+                # gpt-oss sometimes writes its plan instead of calling it: "We need to fetch
+                # prices for each instrument. Let's request get_price." Published, that was
+                # the answer. Its own reasoning is not an answer: the stray sentences go,
+                # and a turn that was nothing but them is treated as the stall it is.
+                kept = strip_leaked_reasoning(text_block["text"])
+                if kept != text_block["text"]:
+                    ctx.emit({"type": "notice", "quiet": True,
+                              "message": f"Dropped the model's own planning from the answer: "
+                                         f"{text_block['text'][:160]}"})
+                    text_block["text"] = kept
+                    if not kept.strip():
+                        ctx.blocks.remove(text_block)
+                        ctx.emit({"type": "draft.clear"})
+                        text_block = None
+                        result.content = ""
             if not result.tool_calls:
                 if not (result.content or "").strip() and not last_turn:
                     # An empty turn is a stall, and it has exactly two causes worth telling
@@ -960,11 +1096,90 @@ class AgentRunner:
                 if m.get("role") == "assistant" and m.get("id") != ctx.message_id
                 for b in m.get("blocks") or []]
 
+    async def _route(self, ctx: RunContext, question: str, mcp_tools: list[dict]) -> set[str] | None:
+        """The sources this question needs, chosen by what they hold — or None to fall back.
+
+        Word overlap cannot do this job. The question is in French and the tools in English,
+        and the words that do overlap are the misleading ones: "positions" is also what HR
+        calls a vacancy. One short call to the fast model reads the source map the way a
+        colleague would. A follow-up ("and for Rates?") is routed with the question before
+        it and the sources that answered it.
+        """
+        ctx.emit({"type": "status", "phase": "routing"})
+        servers: dict[str, tuple[str, list[dict]]] = {}
+        for tool in mcp_tools:
+            servers.setdefault(tool.get("server_slug") or tool["server_name"],
+                               (tool["server_name"], []))[1].append(tool)
+        notes = self._source_notes()
+        observed, _ = self._atlas_lines(mcp_tools)
+        lines = []
+        for slug, (name, tools_of) in servers.items():
+            about = next((line[7:] for line in notes.get(slug, []) if line.startswith("About: ")), "")
+            listing = ", ".join(builtin._tool_label(t, 48) for t in tools_of[:14])
+            seen = f" Seen returning: {observed[slug][:160]}." if slug in observed else ""
+            lines.append(f"- {slug} ({name}): {about[:200]} Tools: {listing}.{seen}")
+        before = ""
+        earlier = [m for m in (self.c.store.conversation(ctx.conversation_id) or {}).get("messages") or []
+                   if m.get("id") != ctx.message_id]
+        last_user = next((m.get("content", "") for m in reversed(earlier) if m.get("role") == "user"
+                          and m.get("content") != question), "")
+        last_blocks = next((m.get("blocks") or [] for m in reversed(earlier)
+                            if m.get("role") == "assistant"), [])
+        used = sorted({(b.get("name") or "").split("__")[0] for b in last_blocks
+                       if b.get("type") == "tool" and "__" in (b.get("name") or "")})
+        if last_user:
+            before = (f"\nPrevious question in this conversation: {last_user[:300]}"
+                      + (f" (answered with: {', '.join(used)})" if used else ""))
+        try:
+            result = await asyncio.wait_for(self.c.fast_llm.chat(
+                [{"role": "user", "content": f"Question: {question[:1200]}{before}\n\nSources:\n"
+                                             + "\n".join(lines)}],
+                system=prompts.ROUTER_SYSTEM, temperature=0.0, think=False,
+                json_schema={"type": "object",
+                             "properties": {"sources": {"type": "array", "items": {"type": "string"}},
+                                            "reason": {"type": "string"}},
+                             "required": ["sources"]}), timeout=25)
+            data = json.loads(result.content or "{}")
+        except Exception:  # noqa: BLE001 - no routing is a slower run, not a failed one
+            return None
+        picked = data.get("sources") if isinstance(data, dict) else data
+        if not isinstance(picked, list):
+            picked = next((v for v in data.values() if isinstance(v, list)), []) if isinstance(data, dict) else []
+        chosen = {str(p).strip() for p in picked if str(p).strip() in servers}
+        # Continuity: a follow-up keeps the sources that answered the question before it.
+        chosen |= {slug for slug in used if slug in servers and last_user}
+        reason = str(data.get("reason") or "")[:240] if isinstance(data, dict) else ""
+        plan = data.get("plan") if isinstance(data, dict) else None
+        ctx.route_plan = [str(step).strip()[:200] for step in (plan or []) if str(step).strip()][:5] \
+            if isinstance(plan, list) and len(chosen) > 1 else []
+        ctx.emit({"type": "notice", "quiet": True,
+                  "message": f"Sources for this question: {', '.join(sorted(chosen)) or 'none'}"
+                             + (f" — {reason}" if reason else "")
+                             + (" · route: " + " → ".join(ctx.route_plan) if ctx.route_plan else "")})
+        return chosen
+
+    def _atlas_lines(self, mcp_tools: list[dict]) -> tuple[dict[str, str], dict[str, list[str]]]:
+        """Per source: the fields its tools were seen returning, and the tools never seen working."""
+        by_server: dict[str, list[dict]] = {}
+        for tool in mcp_tools:
+            by_server.setdefault(tool["server_id"], []).append(tool)
+        observed, unexplored = {}, {}
+        for server_id, tools_of in by_server.items():
+            slug = tools_of[0].get("server_slug") or tools_of[0]["server_name"]
+            line = self.c.atlas.map_line(server_id, tools_of)
+            if line:
+                observed[slug] = line
+                unexplored[slug] = self.c.atlas.coverage(server_id, tools_of)["unexplored"]
+        return observed, unexplored
+
     def _source_notes(self) -> dict[str, list[str]]:
         """What Admin says about each connected source, keyed the way the catalogue is."""
         notes: dict[str, list[str]] = {}
         for server in self.c.store.mcp_servers().values():
             lines = self.c.knowledge.catalog_lines(server["id"])
+            confirmed = self.c.atlas.notes(server["id"], "confirmed")
+            if confirmed:
+                lines = [*lines, "Learned (confirmed): " + " · ".join(n["text"] for n in confirmed[:12])]
             if lines:
                 notes[server.get("slug") or server["name"]] = lines
         return notes
@@ -1235,10 +1450,21 @@ class AgentRunner:
             result = self._note_ignored_arguments(call, result)
             result = self._note_whole_table_aggregate(call, result)
             result = self._note_several_matches(call, result)
+            result = self._note_empty_result(call, result)
             result = self._note_shared_columns(ctx, call, result)
             result = self._note_metric_filters(call, result)
         text = result.get("text") or result.get("error") or ""
         text, model_body = self._launder(ctx, call, block, text, spec)
+        if spec is None:
+            # What this call taught about the tool, kept for the next question. Structure
+            # only — field names, kinds, argument shapes — never the text of the reply.
+            tool = self.c.mcp.resolve(call.name)
+            if tool is not None:
+                try:
+                    self.c.atlas.observe(tool, call.arguments, ok, text, result.get("error", ""),
+                                         ctx.question)
+                except Exception:  # noqa: BLE001 - a cache must never cost an answer
+                    pass
         summary = result.get("summary") or (result.get("error") or "")[:200]
         block.update({"status": "done" if ok else "error", "ok": ok, "summary": summary,
                       "text": text[:40000], "ms": elapsed, "data": result.get("data")})
@@ -1508,6 +1734,41 @@ class AgentRunner:
             return result
         note = ("[" + ". ".join(notes) + ". If the reader's question did not say which one it "
                 "means, ask with ask_user before building the answer on this one.]")
+        return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+
+    def _note_empty_result(self, call: ToolCall, result: dict) -> dict:
+        """No rows came back for a filtered call: say that this is not yet an absence.
+
+        "DV01 of book Rates" returned nothing, and the answer said the data did not exist —
+        Rates is a desk; its books are RAT-EUR and RAT-USD. An empty result usually means a
+        filter value the source does not use, and what it does use is often already known
+        from earlier calls. The note puts those values where the empty result lands.
+        """
+        from app.data.rows import SourceError, rows_from_text
+        try:
+            rows = rows_from_text(result.get("text") or "")
+        except (SourceError, ValueError):
+            return result
+        filters = {k: v for k, v in (call.arguments or {}).items()
+                   if isinstance(v, (str, int, float)) and str(v).strip()
+                   and not re.search(r"date|start|end|from|to|limit|query|sql", k, re.I)}
+        if rows != [] or not filters:
+            return result
+        tool = self.c.mcp.resolve(call.name)
+        known: list[str] = []
+        if tool is not None:
+            for record in self.c.atlas.records_for(tool["server_id"]).values():
+                for column, info in ((record.get("shape") or {}).get("columns") or {}).items():
+                    for arg in filters:
+                        if info.get("values") and (arg.lower() in column.lower() or column.lower() in arg.lower()):
+                            known.append(f"{column} ∈ {{{', '.join(map(str, info['values'][:10]))}}}")
+        passed = ", ".join(f"{k}={v!r}" for k, v in filters.items())
+        note = (f"[No rows for {passed}. That is not yet evidence the data does not exist: the "
+                f"value may not be one this tool uses (a desk instead of a book, a name instead "
+                f"of a code)."
+                + (f" Values seen from this source before: {'; '.join(dict.fromkeys(known))}." if known else
+                   " Call it once without that filter, or look up the valid values, before concluding.")
+                + "]")
         return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
 
     def _note_several_matches(self, call: ToolCall, result: dict) -> dict:
