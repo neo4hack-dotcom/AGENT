@@ -78,6 +78,49 @@ def recover_bare_arguments(content: str, functions: list[dict]) -> ToolCall | No
     return ToolCall(id=new_id("t"), name=fits[0], arguments=arguments)
 
 
+_ISIN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b")
+
+_SQL_WORDS = {"where", "on", "join", "left", "right", "inner", "outer", "full", "cross", "group", "order",
+              "limit", "using", "select", "union", "having", "as", "natural", "lateral", "and", "or"}
+
+
+def _literal_filters(sql: str) -> list[tuple[str, str, str]]:
+    """(table, column, text value) for every `col = 'x'`, `col <> 'x'`, `col IN ('x', …)`."""
+    ctes = {m.lower() for m in re.findall(r"(?:\bwith\b|,)\s*([A-Za-z_]\w*)\s+as\s*\(", sql, re.I)}
+    aliases: dict[str, str] = {}
+    tables: list[str] = []
+    for table, alias in re.findall(r"\b(?:from|join)\s+([A-Za-z_][\w.]*)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?", sql, re.I):
+        if table.lower() in ctes or table.lower() in _SQL_WORDS:
+            continue
+        tables.append(table)
+        aliases[table.lower()] = table
+        if alias and alias.lower() not in _SQL_WORDS:
+            aliases[alias.lower()] = table
+    pairs: list[tuple[str, str]] = []
+    for column, _op, literal in re.findall(
+            r"((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(=|!=|<>)\s*'((?:[^']|'')*)'", sql):
+        pairs.append((column, literal.replace("''", "'")))
+    for column, inside in re.findall(r"((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s+(?:not\s+)?in\s*\(([^)]*)\)", sql, re.I):
+        for literal in re.findall(r"'((?:[^']|'')*)'", inside):
+            pairs.append((column, literal.replace("''", "'")))
+    out: list[tuple[str, str, str]] = []
+    for column, literal in pairs:
+        if not literal or re.fullmatch(r"[\d\-:./ T]+", literal) or len(literal) > 60:
+            continue      # dates, numbers and long strings are not the case-mismatch kind
+        if "." in column:
+            alias, name = column.split(".", 1)
+            table = aliases.get(alias.lower())
+        else:
+            name = column
+            distinct_tables = list(dict.fromkeys(tables))
+            table = distinct_tables[0] if len(distinct_tables) == 1 else None
+        if table and re.fullmatch(r"[A-Za-z_]\w*", name):
+            item = (table, name, literal)
+            if item not in out:
+                out.append(item)
+    return out
+
+
 def strip_leaked_reasoning(text: str) -> str:
     """The answer without the model's own leading plan ("We need to call get_price…")."""
     out = text
@@ -703,20 +746,30 @@ class AgentRunner:
                  "required": ["source", "note"]},
                 note_source, group="Data", capabilities=(trust.MEMORY_WRITE,))
 
-            async def batch_call(tool: str = "", calls: Any = None, **_: Any) -> dict:
-                return await self._batch_call(ctx, tool, calls)
+            async def batch_call(tool: str = "", calls: Any = None, rows_from: str = "",
+                                 arguments: Any = None, **_: Any) -> dict:
+                return await self._batch_call(ctx, tool, calls, rows_from, arguments)
 
             tools["batch_call"] = builtin.ToolSpec(
                 "batch_call",
                 "Call one read-only source tool for many items at once — prices of eight ISINs "
                 "at two dates is one batch_call with sixteen argument sets, not sixteen turns. "
+                "For many dates per item, batch the history tool instead (one call per item). "
+                "To look something up for every row of an earlier result — the close on each "
+                "trade's date — give rows_from='#N' and arguments mapping each parameter to a "
+                "column ({\"identifier\": \"instrument_id\", \"date\": \"trade_date\"}); one call per "
+                "distinct combination, nothing to copy. "
                 "Runs them in parallel and returns one table: each row carries the arguments it "
                 "came from, so the result can be charted, exported or read with rows('#N').",
                 {"type": "object",
                  "properties": {"tool": {"type": "string", "description": "Qualified tool name, e.g. market_data__get_price."},
                                 "calls": {"type": "array", "items": {"type": "object"},
-                                          "description": "One argument object per call, at most 60."}},
-                 "required": ["tool", "calls"]},
+                                          "description": "One argument object per call, at most 250."},
+                                "rows_from": {"type": "string",
+                                              "description": "Instead of calls: '#N' whose rows drive the calls."},
+                                "arguments": {"type": "object",
+                                              "description": "With rows_from: parameter → column name (or a fixed value)."}},
+                 "required": ["tool"]},
                 batch_call, group="Data", capabilities=(trust.FS_READ,))
 
             tools["source_info"] = builtin.ToolSpec(
@@ -811,6 +864,8 @@ class AgentRunner:
             image_payload = []
 
         reflected = False
+        deliverable_nudged = False
+        names_nudged = False
         must_compose = False
         window = 0
         empty_turns = 0
@@ -1015,6 +1070,19 @@ class AgentRunner:
                     continue
                 empty_turns = 0
                 turn_temperature = 0.35
+                # Asked for a chart or a file, about to answer without one: a runtime check,
+                # not a request to the Critic. A plotting snippet in the answer is not a chart
+                # and "here is the data" is not an extract.
+                missing = self._missing_deliverable(ctx, text) if not deliverable_nudged and not last_turn else ""
+                if not missing and not names_nudged and not last_turn:
+                    missing = self._unnamed_codes(ctx, text, (text_block or {}).get("text", ""))
+                    names_nudged = bool(missing)
+                if missing:
+                    deliverable_nudged = True
+                    ctx.checks.append({"name": "Deliverable", "result": "missing, asked again", "detail": missing})
+                    ctx.supersede_text()
+                    pending_hint = prompts.note(missing)
+                    continue
                 if tools_used >= settings.critic_min_tools and not reflected and not last_turn:
                     reflected = True
                     gap = await self._reflect(ctx, text, tools)
@@ -1243,7 +1311,8 @@ class AgentRunner:
                              + (" · route: " + " → ".join(ctx.route_plan) if ctx.route_plan else "")})
         return chosen
 
-    async def _batch_call(self, ctx: RunContext, tool: str, calls: Any) -> dict:
+    async def _batch_call(self, ctx: RunContext, tool: str, calls: Any, rows_from: str = "",
+                          mapping: Any = None) -> dict:
         """One read-only tool, many argument sets, one table back.
 
         The same gates as a direct call, applied to every argument set: the egress policy,
@@ -1251,6 +1320,35 @@ class AgentRunner:
         refused outright — a batch is for reading.
         """
         from app.data.rows import SourceError, rows_from_text
+        if rows_from:
+            # Calls built from an earlier result's rows: the model names columns instead of
+            # copying values, so 375 lookups cost one call and none can be mistyped.
+            from app.data import rows as rows_lib
+            if isinstance(mapping, str):
+                try:
+                    mapping = json.loads(mapping)
+                except ValueError:
+                    mapping = None
+            if not isinstance(mapping, dict) or not mapping:
+                return {"ok": False, "error": "With rows_from, give arguments: a map from each tool "
+                                              "parameter to a column of those rows, e.g. "
+                                              "{\"identifier\": \"instrument_id\", \"date\": \"trade_date\"}."}
+            try:
+                source_rows, _label = rows_lib.resolve(
+                    rows_from, blocks=ctx.blocks, history=[self._earlier_blocks(ctx)],
+                    workspace=self.c.workspace(), conversation_id=ctx.conversation_id)
+            except SourceError as exc:
+                return {"ok": False, "error": str(exc)}
+            columns = set().union(*(r.keys() for r in source_rows)) if source_rows else set()
+            built: list[dict] = []
+            for row in source_rows:
+                args = {param: (row.get(value) if isinstance(value, str) and value in columns else value)
+                        for param, value in mapping.items()}
+                if any(v is None for v in args.values()):
+                    continue
+                if args not in built:
+                    built.append(args)
+            calls = built
         if isinstance(calls, str):
             try:
                 calls = json.loads(calls)
@@ -1269,8 +1367,9 @@ class AgentRunner:
                      and set(c) <= {"arguments", "tool", "name"} else c for c in calls]
         if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) for c in calls):
             return {"ok": False, "error": "calls must be a list of argument objects, e.g. [{\"identifier\": \"FR0000120271\", \"date\": \"2026-06-30\"}]."}
-        if len(calls) > 60:
-            return {"ok": False, "error": f"{len(calls)} calls is more than 60; split them, or find a list or history tool."}
+        if len(calls) > 250:
+            return {"ok": False, "error": f"{len(calls)} calls is more than 250. Use a history or list tool "
+                                          f"(one call per item for all its dates), or split the batch."}
         for arguments in calls:
             action, reason, _host = self._check_egress(ctx, ToolCall(id="", name=target["qualified_name"],
                                                                      arguments=arguments))
@@ -1380,6 +1479,51 @@ class AgentRunner:
                          "An extract, the data or Excel → `export_data` from the #ref. A report "
                          "or a PDF → draw the charts first, then `create_report`.")
         return ("\n\n" + "\n\n".join(parts)) if parts else ""
+
+    def _missing_deliverable(self, ctx: RunContext, question: str) -> str:
+        """What the reader asked to receive and has not been given, as a runtime note."""
+        lowered = question.lower()
+        produced_chart = any(b.get("chart") for b in ctx.blocks if b.get("type") == "tool")
+        produced_file = any(b.get("file") for b in ctx.blocks if b.get("type") == "tool")
+        wants_chart = bool(re.search(r"\b(graph|graphique|chart|courbe|visuali|plot|diagramme|histogramme)", lowered))
+        wants_file = bool(re.search(r"\b(extract|extrait|export|excel|xlsx|csv|fichier|pdf|rapport|report)\b", lowered))
+        if wants_chart and not produced_chart:
+            return ("The reader asked for a chart and none has been drawn. Call the `chart` tool now, "
+                    "with data='#N' naming the call that returned the rows (compute them first if "
+                    "needed). Plotting code written in the answer is not a chart.")
+        if wants_file and not produced_file:
+            return ("The reader asked for a file and none has been produced. Call `export_data` "
+                    "(extract, Excel, CSV) or `create_report` (PDF) now, from the #ref of the rows.")
+        return ""
+
+    def _unnamed_codes(self, ctx: RunContext, question: str, draft: str) -> str:
+        """Instruments named only by ISIN in the draft: the names, from the evidence already in hand."""
+        from app.data.rows import SourceError, rows_from_text
+        codes = [c for c in dict.fromkeys(_ISIN.findall(draft or "")) if c not in question]
+        if not codes:
+            return ""
+        names: dict[str, str] = {}
+        for block in [*self._earlier_blocks(ctx), *ctx.blocks]:
+            if block.get("type") != "tool" or not block.get("ok") or "isin" not in (block.get("text") or "").lower():
+                continue
+            try:
+                rows = rows_from_text(block.get("text") or "") or []
+            except (SourceError, ValueError):
+                continue
+            for row in rows:
+                code = row.get("isin") or row.get("instrument_id") or row.get("identifier")
+                name = row.get("name") or row.get("issuer") or row.get("instrument_name")
+                if isinstance(code, str) and isinstance(name, str) and name.strip():
+                    names.setdefault(code, name.strip())
+        missing = [c for c in codes if c in names and names[c].split()[0].lower() not in draft.lower()]
+        if missing:
+            listing = "; ".join(f"{c} = {names[c]}" for c in missing[:20])
+            return (f"The draft names instruments only by ISIN. The reader knows them by name: {listing}. "
+                    f"Write the answer again with the name first and the ISIN in brackets.")
+        if all(c not in names for c in codes):
+            return ("The draft names instruments only by ISIN. Look up their names in the reference data "
+                    "(one list or batch call) and write the answer with the name first, the ISIN in brackets.")
+        return ""
 
     def _data_sources(self) -> list[dict]:
         return [s for s in self.c.store.mcp_servers().values()
@@ -1614,6 +1758,7 @@ class AgentRunner:
             result = self._note_empty_result(call, result)
             result = self._note_shared_columns(ctx, call, result)
             result = self._note_metric_filters(call, result)
+            result = await self._note_filter_values(ctx, call, result)
         text = result.get("text") or result.get("error") or ""
         text, model_body = self._launder(ctx, call, block, text, spec)
         if spec is None:
@@ -1737,14 +1882,19 @@ class AgentRunner:
         The person still sees the whole thing in the transcript — it is only the *context*
         that gets the excerpt, because that is the resource under pressure.
         """
-        off = context.offload(text, self.c.workspace() / ".results",
+        # The runner's own notes ride after the data. Parked with it, they made a JSON result
+        # unparseable — the file became .txt and every program reading it failed — and cut
+        # from the excerpt, they never reached the model at all. So the file gets the data,
+        # and the notes follow the excerpt.
+        body, notes = context.split_notes(text)
+        off = context.offload(body, self.c.workspace() / ".results",
                               block.get("id", "x"), call.name)
         if off is None:
             return text
         block["offloaded"] = off.handle
         ctx.emit({"type": "offload", "index": block["index"], "handle": off.handle,
                   "bytes": off.bytes})
-        return context.offload_note(off, call.name)
+        return context.offload_note(off, call.name) + (f"\n\n{notes}" if notes else "")
 
     # Servers reject a malformed call with a message about the field that was wrong, one
     # field at a time. A model then fixes that field and gets the next complaint — five
@@ -1895,6 +2045,62 @@ class AgentRunner:
             return result
         note = ("[" + ". ".join(notes) + ". If the reader's question did not say which one it "
                 "means, ask with ask_user before building the answer on this one.]")
+        return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+
+    async def _note_filter_values(self, ctx: RunContext, call: ToolCall, result: dict) -> dict:
+        """Check that the text values a SQL query filters on exist, spelled as written.
+
+        `status <> 'cancelled'` in a table whose value is 'CANCELLED' excludes nothing, and
+        the count that comes back is wrong without a trace of an error — twice in one
+        evaluation. For each quoted value compared with a column, one read-only query asks
+        the source which spellings exist, ignoring case; a value that matches nothing, or
+        matches only in another case, is said where the result lands. And a status filter
+        inside the subquery that picks the latest version is flagged: it resurrects the
+        previous version of every cancelled record.
+        """
+        key = next((k for k in ("query", "sql", "statement") if isinstance((call.arguments or {}).get(k), str)), None)
+        if key is None:
+            return result
+        sql = call.arguments[key]
+        notes: list[str] = []
+        for segment in re.findall(r"\(\s*select\b.*?\bgroup\s+by\b", sql, re.I | re.S):
+            if re.search(r"max\s*\(\s*(\w+\.)?\w*version\w*\s*\)", segment, re.I) and \
+                    re.search(r"\bstatus\b\s*(<>|!=|=|not\s+in|in)\b", segment, re.I):
+                notes.append("A status filter sits inside the subquery that picks the latest version: "
+                             "for a record cancelled in its last version, the previous version is kept "
+                             "and counted. Pick the latest version first, then filter its status.")
+                break
+        checks = _literal_filters(sql)[:4]
+        seen = ctx.__dict__.setdefault("_filter_probes", {})
+        for table, column, literal in checks:
+            probe_key = (call.name, table, column, literal)
+            if probe_key in seen:
+                matches = seen[probe_key]
+            else:
+                escaped = literal.replace("'", "''")
+                probe = (f"SELECT DISTINCT {column} AS value FROM {table} "
+                         f"WHERE lower({column}) = lower('{escaped}') LIMIT 5")
+                try:
+                    reply = await asyncio.wait_for(self.c.mcp.call(call.name, {**call.arguments, key: probe}), 15)
+                    from app.data.rows import rows_from_text
+                    rows = rows_from_text(reply.get("text") or "") if reply.get("ok") else None
+                except Exception:  # noqa: BLE001 - a check that cannot run is simply not made
+                    rows = None
+                matches = None if rows is None else [str(r.get("value")) for r in rows if r.get("value") is not None]
+                seen[probe_key] = matches
+            if matches is None or literal in matches:
+                continue
+            if matches:
+                notes.append(f"'{literal}' matches no row of {table}.{column} as written — the value is "
+                             f"{', '.join(repr(m) for m in matches)} (comparison is case-sensitive). "
+                             f"The result above is likely wrong: run it again with the exact value.")
+            else:
+                notes.append(f"No row of {table}.{column} equals '{literal}', in any case. A filter on it "
+                             f"selects or excludes nothing — check the values the column takes.")
+        if not notes:
+            return result
+        ctx.checks.append({"name": "SQL filter values", "result": "flagged", "detail": " | ".join(notes)[:300]})
+        note = "[" + " ".join(notes) + "]"
         return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
 
     def _note_empty_result(self, call: ToolCall, result: dict) -> dict:

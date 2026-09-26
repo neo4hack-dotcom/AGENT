@@ -216,6 +216,10 @@ export interface LineageNode {
   rows?: number;
   columns?: string[];
   output?: string;
+  /** A possible input of a computation whose inputs could not be traced exactly. */
+  inferred?: boolean;
+  /** Inputs could not be traced; depends_on lists the retrievals that came before. */
+  inputs_inferred?: boolean;
 }
 
 export interface Lineage {

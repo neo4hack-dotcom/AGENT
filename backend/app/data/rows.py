@@ -38,6 +38,10 @@ def rows_from_text(text: str) -> list[dict] | None:
     body = (text or "").strip()
     if not body:
         return None
+    if body[:1] in "[{":
+        # Whatever notes the runner appended after structured data are not rows.
+        from app.agent.context import split_notes
+        text = split_notes(body)[0]
     # The runner attaches bracketed notes to some results — before the data (an argument
     # the server ignored) or after it (a whole-table aggregate). Neither is a row.
     paragraphs = [p for p in (text or "").split("\n\n") if not _NOTE.match(p.strip())]

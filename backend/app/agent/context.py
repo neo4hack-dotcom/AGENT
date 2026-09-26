@@ -187,6 +187,29 @@ def _offload_extension(text: str) -> str:
     return "txt"
 
 
+def split_notes(text: str) -> tuple[str, str]:
+    """(data, notes): the runner's bracketed notes peeled off the end of a structured result."""
+    body, notes = text, []
+    while body.rstrip().endswith("]") and "\n\n[" in body:
+        head, _, tail = body.rpartition("\n\n[")
+        candidate = head.rstrip()
+        if not candidate or candidate[:1] not in "[{":
+            break
+        notes.insert(0, "[" + tail)
+        body = candidate
+        try:
+            json.loads(body)
+            break
+        except ValueError:
+            continue
+    if notes:
+        try:
+            json.loads(body)
+        except ValueError:
+            return text, ""   # not structured data after all: leave it as it came
+    return body, "\n\n".join(notes)
+
+
 def offload_note(off: Offload, tool: str) -> str:
     return (f"{off.excerpt}\n\n"
             f"[…{off.bytes - len(off.excerpt)} more characters. The full result of `{tool}` "

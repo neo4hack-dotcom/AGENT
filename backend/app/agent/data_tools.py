@@ -331,6 +331,62 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                          f"card is shown under your answer; mention the file in one line."),
                 "file": info}
 
+    # ------------------------------------------------------------ profile_data
+    async def h_profile(source: Any = None, reference: Any = None, holidays: Any = None,
+                        key: str = "", by: str = "", **_: Any) -> dict:
+        from app.data import profiling
+        try:
+            rows, label = resolve(_as_obj(source))
+        except rows_lib.SourceError as exc:
+            return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
+        references: dict[str, list] = {}
+        reference = _as_obj(reference)
+        if isinstance(reference, dict):
+            for column, target in reference.items():
+                ref, _, ref_column = str(target).partition(":") if not str(target).startswith("chart:") else (str(target), "", "")
+                try:
+                    ref_rows, _ = resolve(ref)
+                except rows_lib.SourceError as exc:
+                    return {"ok": False, "error": f"reference for {column}: {exc}"}
+                pick = ref_column or (column if ref_rows and column in ref_rows[0] else
+                                      next(iter(ref_rows[0]), "") if ref_rows else "")
+                references[column] = [r.get(pick) for r in ref_rows if r.get(pick) is not None]
+        holiday_set: set[str] = set()
+        holidays = _as_obj(holidays)
+        if isinstance(holidays, list):
+            holiday_set = {str(h)[:10] for h in holidays}
+        elif isinstance(holidays, str) and holidays.strip():
+            try:
+                found, _ = resolve(holidays)
+                for row in found:
+                    holiday_set.update(str(v)[:10] for v in row.values() if re.match(r"^\d{4}-\d{2}-\d{2}", str(v)))
+            except rows_lib.SourceError:
+                value = _json_of(holidays)
+                if isinstance(value, dict):
+                    for item in value.values():
+                        if isinstance(item, list):
+                            holiday_set.update(str(v)[:10] for v in item if re.match(r"^\d{4}-\d{2}-\d{2}", str(v)))
+        text = await asyncio.to_thread(profiling.profile, rows, key=key, by=by, reference=references,
+                                       holidays=holiday_set or None, label=label)
+        return {"ok": True, "summary": f"profiled {len(rows):,} rows from {label}", "text": text}
+
+    tools["profile_data"] = builtin.ToolSpec(
+        "profile_data",
+        "Profile the rows of an earlier result for data quality and shape: nulls, distinct "
+        "values, duplicates and repeated keys, range of every number and date, robust outliers "
+        "(overall and within each instrument or group), dates on weekends or on given holidays, "
+        "and values missing from reference data. The first step of any data-quality review, "
+        "anomaly search or unfamiliar dataset.",
+        {"type": "object",
+         "properties": {
+             "source": {"type": "string", "description": "'#N' — the rows to profile."},
+             "reference": {"type": "object", "description": "Column → '#M' (or '#M:column') whose rows list the valid values, e.g. {\"counterparty_id\": \"#7\"}."},
+             "holidays": {"description": "'#M' or a list of YYYY-MM-DD dates to flag."},
+             "key": {"type": "string", "description": "The id column (guessed when omitted)."},
+             "by": {"type": "string", "description": "Group column for outliers (instrument-like column guessed when omitted)."}},
+         "required": ["source"]},
+        h_profile, group="Data", capabilities=(trust.FS_READ,))
+
     # ---------------------------------------------------------- create_report
     def source_notes() -> dict[int, str]:
         notes: dict[int, str] = {}

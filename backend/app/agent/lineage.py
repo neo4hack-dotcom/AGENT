@@ -41,10 +41,29 @@ def _chart_refs(blocks: list[dict]) -> dict[str, str]:
     return out
 
 
-def depends_on(block: dict, charts: dict[str, str]) -> list[str]:
+_RESULT_FILE = re.compile(r"\.results/[\w.\-]+")
+
+
+def _offloads(blocks: list[dict]) -> dict[str, str]:
+    """Parked result file → the ref of the call whose result it is."""
+    out: dict[str, str] = {}
+    for block in blocks:
+        path = block.get("offloaded")
+        if path and block.get("ref"):
+            out[str(path).split("/")[-1]] = block["ref"]
+    return out
+
+
+def depends_on(block: dict, charts: dict[str, str], offloads: dict[str, str] | None = None) -> list[str]:
     name = block.get("name") or ""
     args = block.get("args") or {}
     refs: list[str] = []
+    # A result parked on disk and read back — by open() in code, a dataframe load, a
+    # workspace read — is that call's result, whichever tool read it.
+    for match in _RESULT_FILE.finditer(json.dumps(args, ensure_ascii=False, default=str)):
+        ref = (offloads or {}).get(match.group(0).split("/")[-1])
+        if ref:
+            refs.append(ref)
 
     def take(value: Any) -> None:
         if isinstance(value, str):
@@ -57,6 +76,15 @@ def depends_on(block: dict, charts: dict[str, str]) -> list[str]:
     if name == "run_python":
         for match in _ROWS.finditer(str(args.get("code") or "")):
             take(match.group(1))
+    elif name == "batch_call":
+        take(args.get("rows_from"))
+    elif name in ("profile_data",):
+        take(args.get("source"))
+        reference = args.get("reference")
+        if isinstance(reference, dict):
+            for value in reference.values():
+                take(str(value).split(":")[0] if isinstance(value, str) else value)
+        take(args.get("holidays"))
     elif name in ("chart", "export_data"):
         take(args.get("data"))
         take(args.get("source"))
@@ -82,7 +110,7 @@ def _kind(block: dict) -> str:
     name = block.get("name") or ""
     if _EXPLORATION.search(name):
         return "exploration"
-    if name == "run_python":
+    if name in ("run_python", "profile_data"):
         return "computation"
     if name in ("chart", "export_data", "create_report"):
         return "output"
@@ -119,13 +147,13 @@ def _shape(block: dict) -> dict:
     return {"rows": len(rows), "columns": columns}
 
 
-def node(block: dict, charts: dict[str, str]) -> dict:
+def node(block: dict, charts: dict[str, str], offloads: dict[str, str] | None = None) -> dict:
     out = {"ref": block.get("ref", ""), "tool": block.get("name", ""),
            "source": block.get("server", ""), "kind": _kind(block),
            "ok": bool(block.get("ok")), "at": block.get("at"), "ms": block.get("ms", 0),
            "operation": _operation(block), "summary": str(block.get("summary") or "")[:240],
            "fingerprint": fingerprint(block.get("text") or ""),
-           "depends_on": depends_on(block, charts)}
+           "depends_on": depends_on(block, charts, offloads)}
     out.update(_shape(block))
     if block.get("chart"):
         out["output"] = f"chart {block['chart'].get('id')} v{block['chart'].get('version', 1)}"
@@ -143,6 +171,7 @@ def build(blocks: list[dict], answer: str) -> dict:
     tools = [b for b in blocks if b.get("type") == "tool" and b.get("ref")]
     by_ref = {b["ref"]: b for b in tools}
     charts = _chart_refs(tools)
+    offloads = _offloads(tools)
     roots = [r for r in cited(answer) if r in by_ref]
     implicit = not roots
     if implicit:
@@ -152,15 +181,31 @@ def build(blocks: list[dict], answer: str) -> dict:
     # Outputs the reader received (charts, files) are part of the answer even uncited.
     roots += [b["ref"] for b in tools if (b.get("chart") or b.get("file")) and b["ref"] not in roots]
     seen: list[str] = []
+    inferred: set[str] = set()
+    guessed: dict[str, list[str]] = {}
     stack = list(roots)
     while stack:
         ref = stack.pop(0)
         if ref in seen or ref not in by_ref:
             continue
         seen.append(ref)
-        stack.extend(depends_on(by_ref[ref], charts))
+        found = depends_on(by_ref[ref], charts, offloads)
+        if not found and _kind(by_ref[ref]) in ("computation", "output"):
+            # Inputs not traceable from the call itself: every retrieval before it is a
+            # possible input, marked as inferred rather than passed off as known.
+            position = tools.index(by_ref[ref])
+            found = [b["ref"] for b in tools[:position] if b.get("ok") and _kind(b) == "retrieval"]
+            inferred.update(found)
+            guessed[ref] = found
+        stack.extend(found)
     order = {b["ref"]: i for i, b in enumerate(tools)}
-    nodes = [node(by_ref[r], charts) for r in sorted(seen, key=lambda r: order.get(r, 0))]
+    nodes = [node(by_ref[r], charts, offloads) for r in sorted(seen, key=lambda r: order.get(r, 0))]
+    for item in nodes:
+        if item["ref"] in inferred:
+            item["inferred"] = True
+        if item["ref"] in guessed:
+            item["depends_on"] = guessed[item["ref"]]
+            item["inputs_inferred"] = True
     exploration = [{"ref": b["ref"], "tool": b["name"], "source": b.get("server", ""),
                     "summary": str(b.get("summary") or "")[:160]}
                    for b in tools if _kind(b) == "exploration"]
@@ -176,6 +221,7 @@ def for_ref(blocks: list[dict], ref: str) -> list[dict]:
     tools = [b for b in blocks if b.get("type") == "tool" and b.get("ref")]
     by_ref = {b["ref"]: b for b in tools}
     charts = _chart_refs(tools)
+    offloads = _offloads(tools)
     start = charts.get(ref[6:]) if ref.startswith("chart:") else ref
     chain, stack = [], [start]
     while stack:
@@ -183,8 +229,8 @@ def for_ref(blocks: list[dict], ref: str) -> list[dict]:
         if not current or current in chain or current not in by_ref:
             continue
         chain.append(current)
-        stack.extend(depends_on(by_ref[current], charts))
-    return [node(by_ref[r], charts) for r in reversed(chain)]
+        stack.extend(depends_on(by_ref[current], charts, offloads))
+    return [node(by_ref[r], charts, offloads) for r in reversed(chain)]
 
 
 def markdown(question: str, answer: str, message: dict, lineage: dict) -> str:
