@@ -73,7 +73,7 @@ def _provenance_sheet(book, provenance: dict) -> None:
         sheet.append([key, value])
         sheet.cell(sheet.max_row, 1).font = bold
     sheet.append(["Sheet", "Step", "Ref", "Source", "Tool", "Operation (query, code or arguments)",
-                  "Rows", "Uses", "Retrieved at", "Result fingerprint (sha256)"])
+                  "Rows", "Uses", "Retrieved at", "Result fingerprint (sha256)", "Audit log entry"])
     for cell in sheet[sheet.max_row]:
         cell.font = bold
     for table in provenance.get("tables") or []:
@@ -85,8 +85,8 @@ def _provenance_sheet(book, provenance: dict) -> None:
             sheet.append([table.get("sheet"), step, node.get("ref"), node.get("source"), node.get("tool"),
                           node.get("operation"), node.get("rows"), ", ".join(node.get("depends_on") or []),
                           dt.datetime.fromtimestamp(at).strftime("%Y-%m-%d %H:%M:%S") if at else "",
-                          node.get("fingerprint")])
-    for letter, width in zip("ABCDEFGHIJ", (14, 6, 7, 18, 26, 90, 8, 12, 20, 20)):
+                          node.get("fingerprint"), node.get("audit")])
+    for letter, width in zip("ABCDEFGHIJK", (14, 6, 7, 18, 26, 90, 8, 12, 20, 20, 20)):
         sheet.column_dimensions[letter].width = width
     for row in sheet.iter_rows(min_row=5):
         row[5].alignment = Alignment(wrap_text=True, vertical="top")

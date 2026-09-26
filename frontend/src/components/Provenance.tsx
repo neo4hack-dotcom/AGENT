@@ -36,7 +36,7 @@ function Step({ node }: { node: LineageNode }) {
         {node.depends_on.length > 0 && <span className="dimmer">· {node.inputs_inferred ? 'after' : 'uses'} {node.depends_on.join(', ')}</span>}
         {node.output && <span className="dimmer">· {node.output}</span>}
         {node.inferred && <span className="text-amber-600 dark:text-amber-400" title="The computation read its inputs in a way that could not be traced exactly; this retrieval came before it.">· possible input</span>}
-        <span className="ml-auto font-mono dimmer" title={`sha256 of the result, first 16 hex digits${node.at ? ` · ${new Date(node.at * 1000).toISOString()}` : ''}`}>
+        <span className="ml-auto font-mono dimmer" title={`sha256 of the result, first 16 hex digits${node.at ? ` · ${new Date(node.at * 1000).toISOString()}` : ''}${node.audit ? ` · audit entry ${node.audit.slice(0, 16)}` : ''}`}>
           {when(node.at)} · {node.fingerprint.slice(0, 8)}
         </span>
       </div>

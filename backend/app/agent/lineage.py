@@ -153,6 +153,7 @@ def node(block: dict, charts: dict[str, str], offloads: dict[str, str] | None = 
            "ok": bool(block.get("ok")), "at": block.get("at"), "ms": block.get("ms", 0),
            "operation": _operation(block), "summary": str(block.get("summary") or "")[:240],
            "fingerprint": fingerprint(block.get("text") or ""),
+           "audit": block.get("audit") or "",
            "depends_on": depends_on(block, charts, offloads)}
     out.update(_shape(block))
     if block.get("chart"):
@@ -261,6 +262,8 @@ def markdown(question: str, answer: str, message: dict, lineage: dict) -> str:
         if n.get("output"):
             lines.append(f"- produced {n['output']}")
         lines.append(f"- result fingerprint (sha256): `{n['fingerprint']}`")
+        if n.get("audit"):
+            lines.append(f"- audit log entry: `{n['audit']}` (hash chain in data/audit.jsonl)")
         fence = "sql" if n["tool"].endswith(("read_query", "query")) else ("python" if n["tool"] == "run_python" else "json")
         lines += [f"```{fence}", n["operation"], "```", ""]
     if lineage.get("exploration"):

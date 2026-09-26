@@ -212,6 +212,8 @@ export interface LineageNode {
   operation: string;
   summary?: string;
   fingerprint: string;
+  /** Hash of this step's entry in the tamper-evident audit log. */
+  audit?: string;
   depends_on: string[];
   rows?: number;
   columns?: string[];

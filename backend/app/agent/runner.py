@@ -1891,12 +1891,16 @@ class AgentRunner:
         # done, never enough to become a second place a credential lives.
         preview, _ = trust.redact(json.dumps(call.arguments, ensure_ascii=False,
                                              default=str)[:300], self.c.secret_values())
-        self.c.audit.record("tool.call", run_id=ctx.run_id, tool=call.name,
-                            kind=block.get("kind"), server=block.get("server"),
-                            args=preview, ok=ok, ms=elapsed,
-                            tainted=ctx.taint.tainted,
-                            injection=block.get("injection") or None,
-                            offloaded=block.get("offloaded"))
+        # The entry's hash ties this step of the answer's lineage to the tamper-evident log:
+        # an auditor can check the step against the chain, not just take the trail's word.
+        block["audit"] = self.c.audit.record("tool.call", run_id=ctx.run_id, tool=call.name,
+                                             kind=block.get("kind"), server=block.get("server"),
+                                             args=preview, ok=ok, ms=elapsed,
+                                             tainted=ctx.taint.tainted,
+                                             injection=block.get("injection") or None,
+                                             offloaded=block.get("offloaded"),
+                                             ref=block.get("ref"),
+                                             result_sha256=lineage.fingerprint(text))
         ctx.emit({"type": "tool.end", "index": block["index"], "id": block["id"], "ok": ok,
                   "status": block["status"], "summary": summary, "ms": elapsed,
                   "preview": text[:1200], **outputs})

@@ -311,7 +311,9 @@ below proves it. If the evidence shows no file was written, say the file was not
 rows, a document's text — report THAT, not what it was meant to contain. A file whose content is \
 a placeholder is a file that was not written correctly, and saying so is the answer.
 5. Write in the language of the question.
-6. Lead with the answer. Then only the support that bears on it.
+6. Lead with the answer. Then only the support that bears on it. A ranking, a list of \
+anomalies or a segmentation names its members — every one, by name — not only totals or \
+group averages.
 7. Markdown with intent: a table when comparing, units in the header, a code block for code, \
 the evidence label after each figure, e.g. [#4] — the real number, never the placeholder "#ref". \
 No preamble, no "based on the evidence", no description of what you did."""

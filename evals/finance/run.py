@@ -196,7 +196,7 @@ MINING_SCENARIOS = [
     ("M6", "issuer concentration", ["Quelle part du nominal obligataire détenu (positions longues au 30 juin 2026, converti en EUR au fixing du jour) est concentrée sur les 3 premiers émetteurs ?"], []),
     ("M7", "monthly activity chart", ["Montre en graphique l'évolution mensuelle du nombre de trades par desk sur le S1 2026 (dernière version, hors annulés)."], []),
     ("M8", "counterparty segmentation", ["Segmente les contreparties en 3 groupes selon leur activité (nombre de trades, nominal moyen, part d'obligations) et décris chaque groupe."], []),
-    ("M9", "export with provenance", ["Prépare un extract Excel des trades exécutés à plus de 3 % du cours de clôture du jour (dernière version, hors annulés), avec l'écart en %."], []),
+    ("M9", "export with provenance", ["Prépare un extract Excel des trades dont le prix d'exécution s'écarte de plus de 3 % du cours de clôture de leur date de trade (dernière version, hors annulés), avec l'écart en %."], []),
     ("M10", "what-if with method", ["Quel serait l'impact d'une hausse parallèle de 50 pb des taux sur le desk Rates, au 30 juin 2026 ? Explique ta méthode et tes hypothèses."], []),
 ]
 
