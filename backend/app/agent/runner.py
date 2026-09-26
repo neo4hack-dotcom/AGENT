@@ -48,6 +48,9 @@ _LEAK = re.compile(
 
 
 _BARE_JSON = re.compile(r"^\{[^{}]{0,600}\}$", re.S)
+# Calls that teach how to ask, not what the answer is.
+_EXPLORATION = re.compile(r"(list_tables|describe_table|get_schema|table_info|source_info|find_tools|"
+                          r"note_source|workspace_list|^plan$|list_columns)", re.I)
 
 
 def recover_bare_arguments(content: str, functions: list[dict]) -> ToolCall | None:
@@ -688,6 +691,22 @@ class AgentRunner:
                  "required": ["source", "note"]},
                 note_source, group="Data", capabilities=(trust.MEMORY_WRITE,))
 
+            async def batch_call(tool: str = "", calls: Any = None, **_: Any) -> dict:
+                return await self._batch_call(ctx, tool, calls)
+
+            tools["batch_call"] = builtin.ToolSpec(
+                "batch_call",
+                "Call one read-only source tool for many items at once — prices of eight ISINs "
+                "at two dates is one batch_call with sixteen argument sets, not sixteen turns. "
+                "Runs them in parallel and returns one table: each row carries the arguments it "
+                "came from, so the result can be charted, exported or read with rows('#N').",
+                {"type": "object",
+                 "properties": {"tool": {"type": "string", "description": "Qualified tool name, e.g. market_data__get_price."},
+                                "calls": {"type": "array", "items": {"type": "object"},
+                                          "description": "One argument object per call, at most 60."}},
+                 "required": ["tool", "calls"]},
+                batch_call, group="Data", capabilities=(trust.FS_READ,))
+
             tools["source_info"] = builtin.ToolSpec(
                 "source_info",
                 "Everything known about one source: what its administrator wrote (tables, "
@@ -1206,6 +1225,78 @@ class AgentRunner:
                              + (" · route: " + " → ".join(ctx.route_plan) if ctx.route_plan else "")})
         return chosen
 
+    async def _batch_call(self, ctx: RunContext, tool: str, calls: Any) -> dict:
+        """One read-only tool, many argument sets, one table back.
+
+        The same gates as a direct call, applied to every argument set: the egress policy,
+        and no batching at all when every call must be approved by hand. Write tools are
+        refused outright — a batch is for reading.
+        """
+        from app.data.rows import SourceError, rows_from_text
+        if isinstance(calls, str):
+            try:
+                calls = json.loads(calls)
+            except ValueError:
+                calls = None
+        target = self.c.mcp.resolve(tool or "")
+        if target is None:
+            return {"ok": False, "error": f"No source tool '{tool}'. Use the qualified name, e.g. market_data__get_price."}
+        if target["write"]:
+            return {"ok": False, "error": f"{tool} can change something; batch_call only runs read-only tools."}
+        if self.c.get("approval_mode") == "always":
+            return {"ok": False, "error": "Every call needs approval here; call the tool once per item."}
+        if isinstance(calls, list):
+            # [{"tool": ..., "arguments": {...}}, …] is the other shape a model writes a batch in.
+            calls = [c["arguments"] if isinstance(c, dict) and isinstance(c.get("arguments"), dict)
+                     and set(c) <= {"arguments", "tool", "name"} else c for c in calls]
+        if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) for c in calls):
+            return {"ok": False, "error": "calls must be a list of argument objects, e.g. [{\"identifier\": \"FR0000120271\", \"date\": \"2026-06-30\"}]."}
+        if len(calls) > 60:
+            return {"ok": False, "error": f"{len(calls)} calls is more than 60; split them, or find a list or history tool."}
+        for arguments in calls:
+            action, reason, _host = self._check_egress(ctx, ToolCall(id="", name=target["qualified_name"],
+                                                                     arguments=arguments))
+            if action in ("deny", "ask"):
+                return {"ok": False, "error": f"{reason} Call that item on its own instead."}
+        gate = asyncio.Semaphore(6)
+        timeout = self.c.settings.tool_timeout_s
+
+        async def one(arguments: dict) -> dict:
+            async with gate:
+                try:
+                    return await asyncio.wait_for(self.c.mcp.call(target["qualified_name"], arguments), timeout)
+                except Exception as exc:  # noqa: BLE001 - one bad item is one error row
+                    return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        results = await asyncio.gather(*(one(a) for a in calls))
+        rows: list[dict] = []
+        failed = 0
+        for arguments, result in zip(calls, results):
+            ok = bool(result.get("ok"))
+            text = str(result.get("text") or "")
+            try:
+                self.c.atlas.observe(target, arguments, ok, text, str(result.get("error") or ""), ctx.question)
+            except Exception:  # noqa: BLE001
+                pass
+            if not ok:
+                failed += 1
+                rows.append({**arguments, "error": " ".join(str(result.get("error") or "failed").split())[:200]})
+                continue
+            try:
+                parsed = rows_from_text(text)
+            except (SourceError, ValueError):
+                parsed = None
+            if parsed:
+                rows.extend({**arguments, **row} for row in parsed)
+            elif parsed == []:
+                rows.append({**arguments, "result": "no rows"})
+            else:
+                rows.append({**arguments, "result": " ".join(text.split())[:300]})
+        ctx.usage["tool_calls"] += len(calls) - 1   # the batch itself is counted once already
+        return {"ok": True, "summary": f"{len(calls)} calls to {target['name']}: "
+                                       f"{len(calls) - failed} ok, {failed} failed",
+                "text": json.dumps({"rows": rows}, ensure_ascii=False, default=str)}
+
     def _atlas_lines(self, mcp_tools: list[dict]) -> tuple[dict[str, str], dict[str, list[str]]]:
         """Per source: the fields its tools were seen returning, and the tools never seen working."""
         by_server: dict[str, list[dict]] = {}
@@ -1291,10 +1382,14 @@ class AgentRunner:
             ctx.check_cancelled()
             spec = tools.get(call.name)
             mcp_tool = None if spec else self.c.mcp.resolve(call.name)
+            # A batch reads from the source it batches: that is whose content it carries.
+            batched = (self.c.mcp.resolve(str((call.arguments or {}).get("tool") or ""))
+                       if call.name == "batch_call" else None)
             block = {"type": "tool", "index": len(ctx.blocks), "id": call.id or new_id("t"),
                      "ref": ctx.next_ref(),
                      "name": call.name, "args": call.arguments,
                      "server": (mcp_tool["server_name"] if mcp_tool else
+                                batched["server_name"] if batched else
                                 (spec.group if spec else "unknown")),
                      "kind": "mcp" if mcp_tool else "builtin",
                      "status": "running", "ok": None, "summary": "", "text": "", "ms": 0}
@@ -1596,7 +1691,7 @@ class AgentRunner:
         # A tool that only reads this app's own workspace returns what this app wrote.
         # Everything else — the web, a database, another process — is someone else's.
         untrusted = spec is None or trust.NET in spec.capabilities or call.name in (
-            "workspace_read", "workspace_list")
+            "workspace_read", "workspace_list", "batch_call")
         if not untrusted or not cleaned.strip():
             return cleaned, self._offloaded(ctx, call, block, cleaned)
 
@@ -2137,20 +2232,55 @@ class AgentRunner:
                           f"here that the results below confirm is yours to reuse; anything "
                           f"they contradict, drop.)")
             spent += len(working)
+        # Three kinds of result, budgeted differently. Exploration — schemas, notes, tool
+        # searches — told the agent how to ask, not what the answer is: one line each. Small
+        # results — a price, a rate, a count — are the facts answers are made of, and they
+        # are kept whole, all of them: newest-first truncation once dropped two prices a
+        # run had fetched and the answer said no price was available. Large results share
+        # what is left, newest first. A call repeated identically counts once, the latest.
+        seen_calls: set[str] = set()
+        entries: list[tuple[dict, str, str]] = []
         for block in reversed(tools):
             args = json.dumps(block.get("args") or {}, ensure_ascii=False, default=str)[:300]
+            key = f"{block['name']}{args}"
+            if key in seen_calls:
+                continue
+            seen_calls.add(key)
             head = f"## {block.get('ref', '')} {block['name']}({args})"
             if not block.get("ok"):
-                chunks.append(f"{head}\nFAILED: {block.get('summary', '')[:300]}")
+                kind = "failed"
+            elif _EXPLORATION.search(block["name"]):
+                kind = "explore"
+            elif len(block.get("text") or "") <= 900:
+                kind = "small"
+            else:
+                kind = "large"
+            entries.append((block, head, kind))
+        spent += sum(len(b.get("text") or "") for b, _, kind in entries if kind == "small")
+        rendered: dict[int, str] = {}
+        for block, head, kind in entries:
+            if kind == "failed":
+                rendered[block["index"]] = f"{head}\nFAILED: {block.get('summary', '')[:300]}"
+            elif kind == "explore":
+                rendered[block["index"]] = f"{head}\n(exploration: {str(block.get('summary') or '')[:160]})"
+            elif kind == "small":
+                rendered[block["index"]] = f"{head}\n{block.get('text') or ''}"
+        omitted = 0
+        for block, head, kind in entries:
+            if kind != "large":
                 continue
-            room = max(600, budget - spent)
+            room = budget - spent
+            if room < 600:
+                omitted += 1
+                rendered[block["index"]] = f"{head}\n(omitted for length: {str(block.get('summary') or '')[:160]})"
+                continue
             body = builtin.truncate_for_model(block.get("text") or "", min(room, 6000))
             spent += len(body)
-            chunks.append(f"{head}\n{body}")
-            if spent >= budget:
-                chunks.append("[earlier calls omitted for length]")
-                break
-        return "\n\n".join(reversed(chunks))
+            rendered[block["index"]] = f"{head}\n{body}"
+        ordered = [rendered[b["index"]] for b in tools if b["index"] in rendered]
+        if omitted:
+            ordered.append(f"[{omitted} large result(s) shortened to their summary for length]")
+        return "\n\n".join([*chunks, *ordered])
 
     async def _maybe_distil(self, ctx: RunContext, question: str) -> None:
         """Turn three successes of the same shape into a procedure.

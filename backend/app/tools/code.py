@@ -66,6 +66,13 @@ def _profile(workspace: Path) -> str:
     walking through it.
     """
     root = str(workspace)
+    # Reads are fenced too, for what the model must not reach around the sources: the
+    # SQLite file behind a governed MCP server, the app's own store and `.env`, anyone's
+    # home directory. Code reads the workspace, and the interpreter reads itself; data
+    # arrives through the sources, where it is audited — never straight off the disk.
+    # Last matching rule wins, so the re-allows come after the denies.
+    readable = sorted({str(Path(p).resolve()) for p in (sys.prefix, sys.base_prefix, root)})
+    allow_reads = " ".join(f'(subpath "{p}")' for p in readable)
     return f"""(version 1)
 (allow default)
 (deny network*)
@@ -74,6 +81,10 @@ def _profile(workspace: Path) -> str:
     (subpath "{root}")
     (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr")
     (regex #"^/dev/tty"))
+(deny file-read-data
+    (subpath "/Users") (subpath "/private/tmp") (subpath "/tmp") (subpath "/Volumes")
+    (subpath "/private/var/root") (subpath "/opt") (subpath "/srv") (subpath "/data"))
+(allow file-read-data {allow_reads})
 """
 
 

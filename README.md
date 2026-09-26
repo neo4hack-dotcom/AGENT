@@ -171,10 +171,12 @@ Built-in tools only ever write inside the workspace, so they are gated in "alway
 alone: asking to approve every `run_python` would make the agent useless exactly when it is
 most useful. A trusted MCP server can be auto-approved, server by server.
 
-`run_python` deserves to be named for what it is: a guard against runaway and accident —
-separate process, bounded working directory, a watchdog that kills it past the timeout —
-**not a security sandbox**. Code runs with this app's own rights. The switch is in
-*Guardrails*.
+`run_python` runs in a separate process with CPU, memory and wall-clock limits. On macOS
+it also runs in a kernel sandbox: no network, writes only in the workspace, and no reads of
+home directories or data folders beyond the workspace — data arrives through the sources,
+never straight off the disk. Elsewhere there is no kernel sandbox, and the code runs with
+this app's own rights: treat it as a guard against runaway and accident there. The switch
+is in *Guardrails*.
 
 ---
 

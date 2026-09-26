@@ -378,7 +378,7 @@ const PHASES: Record<string, string> = {
 /**
  * One line, only when there is something to say: this answer read things from outside.
  *
- * Not a warning — reading the web is the job. It is provenance, in the place where a
+ * Not a warning — reading sources is the job. It is provenance, in the place where a
  * reader decides how much weight to give an answer, and it expands into exactly which
  * sources and whether any of them tried to give the agent orders.
  */
@@ -394,13 +394,13 @@ function TrustLine({ trust }: { trust: NonNullable<Message['trust']> }) {
         {flagged ? <ShieldAlert size={11} /> : <ShieldQuestion size={11} />}
         {flagged
           ? `${trust.injections.length} source tried to instruct the agent`
-          : `read ${trust.sources.length} outside source${trust.sources.length > 1 ? 's' : ''}`}
+          : `from ${trust.sources.length} source${trust.sources.length > 1 ? 's' : ''}`}
         <ChevronRight size={10} className={cls('transition-transform', open && 'rotate-90')} />
       </button>
       {open && (
         <div className="mt-1.5 space-y-1 border-l-2 border-zinc-200 pl-3 text-2xs leading-relaxed dim dark:border-white/10 animate-fade-in">
           {trust.sources.length > 0 && (
-            <p>Content entered this answer from: <b>{trust.sources.join(', ')}</b>. It was
+            <p>Data in this answer came from: <b>{trust.sources.join(', ')}</b>. It was
               fenced as data — the agent could read it, not take orders from it.</p>
           )}
           {trust.injections.map((hit, i) => (

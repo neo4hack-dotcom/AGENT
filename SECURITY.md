@@ -121,6 +121,13 @@ between looks wrong. A monkeypatched `socket` module would not do; `ctypes` walk
 past it. Verified by trying: sockets, `subprocess curl` and writes outside the workspace all
 fail; pandas, numpy and workspace writes all work.
 
+Reads are fenced as well. Code reads the workspace and the Python installation, and nothing
+under `/Users`, `/tmp`, `/Volumes`, `/opt`, `/srv` or `/data` besides. That closes the way
+around the sources: an agent that knows where a server's SQLite file lives could otherwise
+open it directly — unaudited, ungoverned — and the app's own `.env` and store sit in the
+same home directory. Verified by trying: the trade store's database, `backend/.env` and
+`data/agent.json` all refuse; pandas still imports and workspace files still read.
+
 Where that boundary is unavailable the tool says so rather than implying it is there.
 
 ## Memory

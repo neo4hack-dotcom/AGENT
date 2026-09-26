@@ -126,6 +126,40 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                                         **(reviewed.get("fields") or {})})
         return fields, reviewed
 
+    def _block_of(ref: str) -> dict | None:
+        label = ref.strip()
+        for scope in [ctx.blocks, *history()]:
+            for block in scope:
+                if block.get("type") == "tool" and block.get("ref") == label:
+                    return block
+        return None
+
+    def _json_of(ref: str) -> Any:
+        block = _block_of(ref)
+        if not block or not block.get("ok"):
+            return None
+        text = (block.get("text") or "").strip()
+        if text[:1] not in "[{":
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            return None
+
+    def _tabular_refs() -> str:
+        """The calls of this run that do hold rows — what a wrong #ref should have been."""
+        found = []
+        for block in ctx.blocks:
+            if block.get("type") != "tool" or not block.get("ok") or block.get("name") in ("plan", "run_python"):
+                continue
+            try:
+                rows, _ = resolve(block.get("ref", ""))
+            except rows_lib.SourceError:
+                continue
+            if rows:
+                found.append(f"{block['ref']} {block['name']} ({len(rows)} rows)")
+        return ("Calls in this run that hold rows: " + "; ".join(found[-12:]) + ".") if found else ""
+
     def revision_target() -> dict | None:
         """The chart the reader is pointing at, when they plainly point at one.
 
@@ -182,7 +216,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                                               "file. Only values the reader typed may be passed "
                                               "as a JSON array of objects."}
         except rows_lib.SourceError as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
         if typed and len(rows) > 60:
             return {"ok": False, "error": f"{len(rows)} rows were typed into the call. Name them "
                                           f"instead — data='#N' for the call that returned "
@@ -272,7 +306,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 rows, _label = resolve(ref)
                 resolved.append((name, rows))
         except rows_lib.SourceError as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
         try:
             info = await asyncio.to_thread(export_lib.export, resolved, format,
                                            workspace / "exports", filename, title)
@@ -339,7 +373,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                     used.update(int(n) for n in _REF_NUMBER.findall(label))
                 clean.append(entry)
         except rows_lib.SourceError as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
         notes = source_notes()
         path = export_lib.unique_path(workspace / "reports",
                                       export_lib.safe_name(filename or title, "pdf"))
@@ -388,7 +422,11 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                     try:
                         data, _label = resolve(ref)
                     except rows_lib.SourceError as exc:
-                        return {"ok": False, "error": f"rows({ref!r}): {exc}"}
+                        # Not a table, but perhaps an object — a rating scale, a curve's header:
+                        # the program gets the parsed JSON rather than an error to argue with.
+                        data = _json_of(ref)
+                        if data is None:
+                            return {"ok": False, "error": f"rows({ref!r}): {exc} {_tabular_refs()}"}
                     path = folder / f"{ctx.run_id}-{re.sub(r'[^A-Za-z0-9]+', '_', ref)}.json"
                     path.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
                     files[ref] = str(path)
@@ -409,7 +447,8 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         head, _, rest = python.description.partition(". ")
         python.description = (
             f"{head}. rows('#4') inside the code returns the full rows of call #4 as a list of "
-            "dicts (also rows('chart:c1'), rows('file.csv')) — combine results from different "
+            "dicts — or, for a result that is not a table, its parsed JSON object (also "
+            "rows('chart:c1'), rows('file.csv')) — combine results from different "
             "servers with it; never paste data into the code. To chart or export what you "
             "computed, print JSON rows (print(df.to_json(orient='records'))) and use this "
             f"call's #ref. {rest}")
