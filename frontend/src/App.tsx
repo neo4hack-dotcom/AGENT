@@ -29,6 +29,8 @@ interface Live {
   plan: PlanStep[];
   usage: Usage;
   phase: string;
+  /** Prose not yet known to be the answer: shown as a one-line ticker, never as the answer. */
+  draft: string;
   notices: { text: string; quiet?: boolean }[];
   approval: ApprovalRequest | null;
   ask: AskRequest | null;
@@ -49,7 +51,7 @@ function rememberConversation(id: string | null): void {
 
 const emptyLive = (runId: string, conversationId: string, messageId: string): Live => ({
   runId, conversationId, messageId,
-  blocks: new Map(), plan: [], usage: {}, phase: 'starting', notices: [],
+  blocks: new Map(), plan: [], usage: {}, phase: 'starting', draft: '', notices: [],
   approval: null, ask: null, files: [], error: null,
   trust: { sources: [], injections: [], compactions: 0 },
 });
@@ -185,8 +187,15 @@ export default function App() {
     // updater runs twice, and reloading the conversation twice is a visible flicker.
     const running = liveRef.current;
     liveRef.current = null;   // released here, not one commit later
+    // The saved answer first, then the live view let go — in the same render. The other
+    // order shows the empty placeholder for the length of a round trip: the answer
+    // vanished and came back at the end of every run.
+    let saved: Conversation | null = null;
+    if (running) {
+      try { saved = await api.getConversation(running.conversationId); } catch { /* deleted mid-run */ }
+    }
+    if (saved) setConversation(saved);
     setLive(null);
-    if (running) await reloadConversation(running.conversationId);
     void refreshConversations();
   }, [reloadConversation, refreshConversations]);
 
@@ -449,6 +458,7 @@ export default function App() {
                       message={rendered}
                       live={isLive}
                       phase={live?.phase}
+                      draft={isLive ? live!.draft : ''}
                       approval={isLive ? live!.approval : null}
                       onApprove={(approved) => void resolveApproval(approved)}
                       ask={isLive ? live!.ask : null}
@@ -634,10 +644,17 @@ function applyEvent(live: Live, event: StreamEvent): void {
       if (block) live.blocks.set(event.index, { ...block, superseded: true });
       break;
     }
+    case 'draft.delta':
+      live.draft = (live.draft + event.text).slice(-600);
+      break;
+    case 'draft.clear':
+      live.draft = '';
+      break;
     case 'plan':
       live.plan = event.steps;
       break;
     case 'tool.start':
+      live.draft = '';
       live.blocks.set(event.index, {
         index: event.index, type: 'tool', id: event.id, name: event.name, args: event.args,
         server: event.server, kind: event.kind, by: event.by, ref: event.ref,

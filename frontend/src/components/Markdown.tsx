@@ -17,7 +17,7 @@ import { CopyButton, cls } from './ui';
 // The 【…】 alternative is not decoration: some models (gpt-oss among them) cite sources
 // with CJK lenticular brackets around a bare URL. Left alone they render as literal
 // punctuation wrapped around a link, which looks like a rendering bug in every answer.
-const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|\[[^\]]*\]\([^)\s]+\)|[[【]#\d{1,3}[\]】]|【[^】]+】|https?:\/\/[^\s<>()]+)/g;
+const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|!\[[^\]]*\]\([^)\s]+\)|\[[^\]]*\]\([^)\s]+\)|[[【]#\d{1,3}[\]】]|【[^】]+】|https?:\/\/[^\s<>()]+)/g;
 
 /** Plain text, with soft line breaks turned into real ones. */
 function withBreaks(text: string, key: string): ReactNode[] {
@@ -92,6 +92,15 @@ function renderInline(text: string, key: string): ReactNode[] {
     }
     if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
       return <em key={k}>{part.slice(1, -1)}</em>;
+    }
+    // An image is never fetched: the page may load nothing from elsewhere, and an image
+    // URL is exactly how an injected instruction would carry data out. Models write one to
+    // point at a chart that is already on screen below the text, so it simply goes.
+    const image = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(part);
+    if (image) {
+      return /^(chart:|#|c\d|[\w./-]+\.(png|svg|jpe?g)$)/i.test(image[2]) || !image[1]
+        ? null
+        : <span key={k} className="dim italic">{image[1]}</span>;
     }
     const link = /^\[([^\]]*)\]\(([^)\s]+)\)$/.exec(part);
     if (link) return <Link key={k} href={link[2]}>{link[1] || link[2]}</Link>;

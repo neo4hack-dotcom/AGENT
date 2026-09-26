@@ -354,7 +354,7 @@ function Blocks({ blocks, live, cite }: { blocks: Block[]; live: boolean; cite?:
         }
         if (!(block.text || '').trim()) return null;
         return (
-          <div key={`b${block.index}`} className={cls(block.superseded && 'hidden')}>
+          <div key={`b${block.index}`} className={cls(block.superseded ? 'hidden' : live && 'animate-fade-in')}>
             <Markdown text={block.text ?? ''} cite={cite} />
           </div>
         );
@@ -366,7 +366,7 @@ function Blocks({ blocks, live, cite }: { blocks: Block[]; live: boolean; cite?:
 const PHASES: Record<string, string> = {
   starting: 'Starting',
   thinking: 'Thinking',
-  checking: 'Checking',
+  checking: 'Checking the answer',
   compacting: 'Compressing context',
   writing: 'Writing',
   cancelled: 'Stopped',
@@ -428,8 +428,16 @@ function TrustLine({ trust }: { trust: NonNullable<Message['trust']> }) {
  * A <details> rather than React state on purpose: a citation in the answer can open its
  * own evidence with node.closest('details'), which needs no wiring between the two.
  */
-function Work({ message, live, phase, cite, log }: {
+/** The tail of the prose being written, on one line: enough to see it move, not to read it. */
+function ticker(draft: string): string {
+  const flat = draft.replace(/[#*_`|>]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return flat.length > 90 ? `…${flat.slice(-90)}` : flat;
+}
+
+function Work({ message, live, phase, cite, log, draft }: {
   message: Message; live: boolean; phase?: string; cite: string;
+  /** Prose the agent is writing that is not yet known to be the answer. */
+  draft?: string;
   /** Bookkeeping the run emitted: kept in full, shown only to whoever opens this. */
   log?: string[];
 }) {
@@ -451,10 +459,13 @@ function Work({ message, live, phase, cite, log }: {
         {live ? (
           <>
             <Spinner size={11} className="text-brand-500" />
-            <span className="text-zinc-600 dark:text-zinc-300">
-              {running?.name ?? PHASES[phase ?? 'starting'] ?? 'Working'}
+            <span className="shrink-0 text-zinc-600 dark:text-zinc-300">
+              {running?.name ?? (draft && phase !== 'checking' ? PHASES.writing : PHASES[phase ?? 'starting'] ?? 'Working')}
             </span>
-            {steps.length > 0 && <span>· step {steps.length}</span>}
+            {steps.length > 0 && <span className="shrink-0">· step {steps.length}</span>}
+            {!running && draft && (
+              <span className="min-w-0 truncate italic opacity-80">{ticker(draft)}</span>
+            )}
           </>
         ) : (
           <>
@@ -491,11 +502,12 @@ function outputsOf(blocks: Block[]): Block[] {
 }
 
 export function AssistantTurn({
-  message, live, phase, approval, onApprove, approving, ask, onAnswer, answering, notices, error,
+  message, live, phase, draft, approval, onApprove, approving, ask, onAnswer, answering, notices, error,
 }: {
   message: Message;
   live?: boolean;
   phase?: string;
+  draft?: string;
   approval?: ApprovalRequest | null;
   onApprove?: (approved: boolean) => void;
   approving?: boolean;
@@ -511,7 +523,7 @@ export function AssistantTurn({
   const cite = `ev-${message.id}-`;
   return (
     <div className="animate-fade-up">
-      <Work message={message} live={!!live} phase={phase} cite={cite}
+      <Work message={message} live={!!live} phase={phase} cite={cite} draft={draft}
         log={(notices ?? []).filter((n) => n.quiet).map((n) => n.text)} />
       <Blocks blocks={answer} live={!!live} cite={cite} />
 

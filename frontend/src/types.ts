@@ -415,6 +415,8 @@ export type StreamEvent =
   | { type: 'status'; phase: string }
   | { type: 'block.open'; kind: 'text' | 'thinking'; index: number }
   | { type: 'block.supersede'; index: number }
+  | { type: 'draft.delta'; text: string }
+  | { type: 'draft.clear' }
   | { type: 'text.delta'; index: number; text: string }
   | { type: 'thinking.delta'; index: number; text: string }
   | { type: 'plan'; steps: PlanStep[] }

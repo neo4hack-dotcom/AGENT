@@ -36,6 +36,10 @@ from app.errors import NotConfigured, RunCancelled
 from app.llm.provider import ToolCall
 from app.store import new_id, now
 
+# Prose shorter than this, written before the agent has used a tool, is held back: it is
+# nearly always a preamble to a tool call, and would be shown only to be taken away.
+PREAMBLE_CHARS = 280
+
 # A model abbreviating its own output is a habit from writing prose, and it does not stop
 # at the boundary of a tool argument. What it produces is unmistakable: a run of spaces —
 # often non-breaking — and then an ellipsis, at the end of a value or alone on a line.
@@ -139,12 +143,38 @@ class RunContext:
         When the loop continues after the model has already written prose — a gap check
         sent it back for more evidence, say — that prose is a draft, not the answer.
         Persisting it alongside the real answer is how a run ends up saying the same
-        thing twice, in two different moods.
+        thing twice, in two different moods. A held draft was never shown as the answer,
+        so replacing it changes nothing on screen: that is the point of holding it.
         """
+        cleared = False
         for block in self.blocks:
             if block["type"] == "text" and not block.get("superseded"):
                 block["superseded"] = True
-                self.emit({"type": "block.supersede", "index": block["index"]})
+                if block.pop("held", False):
+                    cleared = True
+                else:
+                    self.emit({"type": "block.supersede", "index": block["index"]})
+        if cleared:
+            self.emit({"type": "draft.clear"})
+
+    def release_text(self, block: dict | None = None) -> None:
+        """Publish held prose as the answer, now that it is known to be one.
+
+        Text written after the agent has started working is either commentary before its
+        next call or a draft the final check may still send back. Streaming it as the
+        answer and then taking it away is what made answers appear, vanish and come back
+        reworded. So it is held — the reader sees a one-line "writing…" ticker — and
+        published here, whole, once nothing can replace it.
+        """
+        released = False
+        for b in ([block] if block is not None else self.blocks):
+            if b["type"] == "text" and not b.get("superseded") and b.pop("held", False):
+                released = True
+                self.emit({"type": "block.open", "kind": "text", "index": b["index"]})
+                if b.get("text"):
+                    self.emit({"type": "text.delta", "index": b["index"], "text": b["text"]})
+        if released:
+            self.emit({"type": "draft.clear"})
 
     def has_answer(self) -> bool:
         return any(b["type"] == "text" and not b.get("superseded") and (b.get("text") or "").strip()
@@ -644,14 +674,24 @@ class AgentRunner:
             ctx.emit({"type": "status", "phase": "thinking"})
             text_block: dict | None = None
             think_block: dict | None = None
+            # Once the agent has used a tool, prose from a turn is either commentary before
+            # the next call or a draft the final check may still send back: all of it is
+            # held until it is known to be the answer. Before any tool, only the opening is
+            # held — a preamble ("I'll query the sales table") is short, an answer is not.
+            hold_all = tools_used >= settings.critic_min_tools and not reflected and not last_turn
 
             def on_text(piece: str) -> None:
                 nonlocal text_block
                 if text_block is None:
-                    text_block = {"type": "text", "text": "", "index": len(ctx.blocks)}
+                    text_block = {"type": "text", "text": "", "index": len(ctx.blocks), "held": True}
                     ctx.blocks.append(text_block)
-                    ctx.emit({"type": "block.open", "kind": "text", "index": text_block["index"]})
                 text_block["text"] += piece
+                if text_block.get("held"):
+                    if not hold_all and len(text_block["text"].strip()) >= PREAMBLE_CHARS:
+                        ctx.release_text(text_block)
+                    else:
+                        ctx.emit({"type": "draft.delta", "text": piece})
+                    return
                 ctx.emit({"type": "text.delta", "index": text_block["index"], "text": piece})
 
             def on_thinking(piece: str) -> None:
@@ -746,6 +786,7 @@ class AgentRunner:
                         must_compose = True
                 if must_compose:
                     ctx.supersede_text()
+                ctx.release_text()
                 break
 
             assistant_entry: dict[str, Any] = {"role": "assistant", "content": result.content or ""}
@@ -793,6 +834,7 @@ class AgentRunner:
                       "message": f"Ceiling of {settings.max_iterations} tool turns reached — "
                                  f"answering with what has been gathered."})
 
+        ctx.release_text()
         if not ctx.has_answer():
             # Every run ends with something readable, even a run that only failed.
             await self._final_answer(ctx, text, messages, system)
