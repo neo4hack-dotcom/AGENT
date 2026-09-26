@@ -392,8 +392,11 @@ class McpRegistry:
             conn = self.connections.get(server["id"])
             if conn is None or conn.status != "connected":
                 continue
+            # A bundled server's own script is an absolute path too; it is the launcher,
+            # not the scope.
             paths = [a for a in (server.get("args") or [])
-                     if isinstance(a, str) and a.startswith("/") and len(a) > 1]
+                     if isinstance(a, str) and a.startswith("/") and len(a) > 1
+                     and not a.endswith(".py")]
             target = server.get("url") or ""
             if paths or target:
                 out.append({"server": server["name"],

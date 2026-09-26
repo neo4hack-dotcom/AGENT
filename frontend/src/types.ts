@@ -285,7 +285,7 @@ export interface McpServer {
   description: string;
   accent: string;
   category: string;
-  docs: string;
+  docs?: string;
   enabled: boolean;
   auto_approve: boolean;
   created_at: number;

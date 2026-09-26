@@ -124,7 +124,8 @@ async def set_prefs(body: PrefsBody) -> dict:
 # ----------------------------------------------------------------------- MCP
 @guarded.get("/catalog")
 async def catalog() -> dict:
-    return {"entries": CATALOG, "categories": CATEGORIES, "runtimes": runtimes.probe()}
+    used = {s.get("command") for s in c.store.mcp_servers().values() if s.get("enabled", True)}
+    return {"entries": CATALOG, "categories": CATEGORIES, "runtimes": runtimes.probe(used)}
 
 
 @guarded.get("/servers")
@@ -493,16 +494,26 @@ async def diagnostics() -> dict:
             f"{llm.get('model')} does not support tool calling, so the agent cannot use any "
             f"tool — it can only answer from what it already knows. Pick a model with the "
             f"'tools' capability.")
-    missing = [r for r in runtimes.probe().values() if not r["available"]]
+    from app.mcp.catalog import downloads_at_start
+    servers = c.store.mcp_servers()
+    used = {s.get("command") for s in servers.values() if s.get("enabled", True)}
+    missing = [r for r in runtimes.probe(used).values() if not r["available"]]
     for runtime in missing:
         warnings.append(f"{runtime['label']} is not on PATH — {runtime['why']}. "
-                        f"Install it with: {runtime['install']}")
+                        f"To use it: {runtime['install']}")
+    fetching = downloads_at_start(servers)
+    if fetching and network.airgapped():
+        warnings.append(f"{', '.join(fetching)} start{'s' if len(fetching) == 1 else ''} by fetching a "
+                        f"package (npx/uvx), which a private network cannot do unless it is already in "
+                        f"an offline cache. Replace {'it' if len(fetching) == 1 else 'them'} with a "
+                        f"bundled server from the library, or provision the package from your mirror.")
     return {
         "model": {**llm, "capabilities": caps},
         "network": network.summary(),
         "runs": run_metrics(),
         "mcp": c.mcp.summary(),
-        "runtimes": runtimes.probe(),
+        "runtimes": runtimes.probe({s.get("command") for s in servers.values()}),
+        "local_only": not fetching,
         "runtime": runtime,
         "context_window": window,
         "python_modules": available_modules(),

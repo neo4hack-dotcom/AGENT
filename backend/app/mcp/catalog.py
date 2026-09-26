@@ -1,20 +1,15 @@
-"""The MCP library: a curated shelf of servers connectable in two clicks.
+"""The MCP library: servers connectable in two clicks, all of them shipped with this app.
 
-**Everything on this shelf runs as a process on this machine and needs no third-party
-account.** That is the selection rule, and it is the point: the shelf is what you can
-connect without deciding to trust anyone, so browsing it never presents a signup as a
-capability. A server that talks to a hosted API — GitHub, Slack, Notion, a search
-provider — is still one "Custom server" form away, over stdio or HTTP. It is simply a
-decision you make deliberately rather than one the shelf makes look routine.
+**Nothing on this shelf is downloaded.** Every recipe runs a server from `mcp_servers/`
+on the interpreter already serving the API, written against the Python standard library
+(pandas for the dataframe server, pinned in requirements.txt). A private network cannot
+fetch `npx` or `uvx` packages at connect time, and a shelf that only works online is a
+shelf that fails on the first day of a real deployment. Anything else — a governed SQL
+gateway to Oracle or ClickHouse, a market-data service, a risk engine — is one "Custom
+server" form away, over stdio or HTTP, inside the network.
 
-Two entries here do reach the network *at your instruction* rather than on their own:
-Web Fetch opens the URL you name, and Playwright drives a browser to the page you name.
-Both run locally and hold no credentials.
-
-Each entry is a *recipe*, not a connection — it names a published package and the
-parameters it needs. Nothing is bundled or vendored: the command runs against whatever
-`npx`/`uvx` resolves at connect time, and a package that cannot be fetched fails visibly
-on its card rather than silently doing nothing.
+`migrate_to_bundled` moves servers installed from the old download-on-demand recipes
+(filesystem, SQLite, time) onto their bundled equivalents, keeping their paths.
 """
 
 from __future__ import annotations
@@ -23,9 +18,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# The one server that ships with this repository. It runs on the interpreter already
-# serving the API, so there is no launcher to install and nothing to fetch from a
-# registry — and the pandas it imports is the one pinned in requirements.txt.
 BUNDLED = Path(__file__).resolve().parents[3] / "mcp_servers"
 PYTHON = sys.executable
 
@@ -39,44 +31,32 @@ def _p(key: str, label: str, *, required: bool = True, secret: bool = False,
             "placeholder": placeholder, "help": help, "default_from": default_from}
 
 
+def _script(name: str) -> str:
+    return str(BUNDLED / name / "server.py")
+
+
 CATALOG: list[dict[str, Any]] = [
-    # ------------------------------------------------------------- files & local
     {
-        "id": "filesystem", "name": "Filesystem", "vendor": "Model Context Protocol",
+        "id": "filesystem", "name": "Files", "vendor": "Bundled with this app",
         "category": "Files", "accent": "amber",
-        "description": "Read, write and search files inside one directory you choose. Everything outside "
-                       "that path stays invisible to the agent.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "{root_path}"],
-        "params": [_p("root_path", "Directory to expose", placeholder="/Users/you/Documents",
+        "description": "Read and search the files under one directory you choose — CSV, JSON, "
+                       "reports, logs. Read-only: nothing outside that directory is visible, "
+                       "and nothing inside it can be changed.",
+        "transport": "stdio", "command": PYTHON,
+        "args": [_script("files"), "{root_path}", "--read-only"],
+        "params": [_p("root_path", "Directory to expose", placeholder="/data/reports",
                       help="The only folder this server can see.")],
-        "tags": ["read", "write", "local"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
-    },
-    # -------------------------------------------------------------------- data
-    {
-        "id": "sqlite", "name": "SQLite", "vendor": "Model Context Protocol",
-        "category": "Data", "accent": "emerald",
-        "description": "Query and explore a local SQLite database, schema included.",
-        # The published server calls `Server.list_resources`, removed in mcp 1.10 — it
-        # crashes on import against a current SDK. Pinning here is the difference between
-        # a recipe that works and one that fails with an upstream traceback on its card.
-        "transport": "stdio", "command": "uvx",
-        "args": ["--with", "mcp<1.10", "mcp-server-sqlite", "--db-path", "{db_path}"],
-        "params": [_p("db_path", "Database file", placeholder="/Users/you/data/app.db")],
-        "tags": ["sql", "read", "local"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
+        "tags": ["files", "read", "bundled"],
     },
     {
-        "id": "postgres", "name": "PostgreSQL", "vendor": "Model Context Protocol",
+        "id": "sqlite", "name": "SQLite", "vendor": "Bundled with this app",
         "category": "Data", "accent": "emerald",
-        "description": "Read-only SQL access to a Postgres database, with schema introspection.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-postgres", "{connection_string}"],
-        "params": [_p("connection_string", "Connection string", secret=True,
-                      placeholder="postgresql://user:pass@localhost:5432/db")],
-        "tags": ["sql", "read"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/postgres",
+        "description": "Query a SQLite database: tables, schemas, SELECT. Opened read-only by "
+                       "SQLite itself, with a time limit and a row ceiling on every query.",
+        "transport": "stdio", "command": PYTHON,
+        "args": [_script("sqlite_db"), "--db-path", "{db_path}"],
+        "params": [_p("db_path", "Database file", placeholder="/data/trades.db")],
+        "tags": ["sql", "read", "bundled"],
     },
     {
         "id": "pandas-frames", "name": "Pandas Frames", "vendor": "Bundled with this app",
@@ -86,57 +66,79 @@ CATALOG: list[dict[str, Any]] = [
                        "audited expression sandbox. Every operation runs in a killable worker "
                        "with memory and CPU ceilings, and every call is logged with what it ran.",
         "transport": "stdio", "command": PYTHON,
-        "args": [str(BUNDLED / "pandas_frames" / "server.py"), "--workspace", "{workspace}"],
+        "args": [_script("pandas_frames"), "--workspace", "{workspace}"],
         "params": [_p("workspace", "Data directory", required=False, default_from="workspace",
                       placeholder="leave blank to use this app's own workspace",
                       help="The only directory the server may read from or export into. Left "
                            "blank it uses the app's workspace — the same directory "
                            "workspace_write writes to, so data the agent fetches and saves is "
                            "immediately loadable here.")],
-        "tags": ["pandas", "data", "local", "bundled"],
-        "docs": "https://pandas.pydata.org/docs/",
+        "tags": ["pandas", "data", "bundled"],
     },
-    # --------------------------------------------------------------------- web
-    # ----------------------------------------------------------------- thinking
     {
-        "id": "memory", "name": "Knowledge Graph Memory", "vendor": "Model Context Protocol",
+        "id": "time", "name": "Time & time zones", "vendor": "Bundled with this app",
         "category": "Reasoning", "accent": "violet",
-        "description": "A persistent knowledge graph of entities and relations the agent builds and queries "
-                       "across conversations.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "description": "Current time in any time zone, and conversions between them — from the "
+                       "zone database Python ships with.",
+        "transport": "stdio", "command": PYTHON,
+        "args": [_script("clock")],
         "params": [],
-        "tags": ["memory", "write"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+        "tags": ["time", "read", "bundled"],
     },
-    {
-        "id": "sequential-thinking", "name": "Sequential Thinking",
-        "vendor": "Model Context Protocol", "category": "Reasoning", "accent": "violet",
-        "description": "A structured scratchpad for long chains of reasoning that can branch and revise "
-                       "themselves.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-        "params": [],
-        "tags": ["reasoning"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
-    },
-    {
-        "id": "time", "name": "Time & Timezones", "vendor": "Model Context Protocol",
-        "category": "Reasoning", "accent": "violet",
-        "description": "Current time anywhere, and conversions between timezones.",
-        "transport": "stdio", "command": "uvx",
-        "args": ["mcp-server-time"],
-        "params": [],
-        "tags": ["read"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
-    },
-    # -------------------------------------------------------------------- work
-    # ------------------------------------------------------------------ testing
 ]
+
+
+# Old download-on-demand packages, and the bundled server that replaces each: the
+# argument that carried the path is kept, the launcher is not.
+_REPLACED = {
+    "@modelcontextprotocol/server-filesystem": ("filesystem", "files"),
+    "mcp-server-sqlite": ("sqlite", "sqlite_db"),
+    "mcp-server-time": ("time", "clock"),
+}
+
+
+def migrate_to_bundled(servers: dict[str, dict]) -> list[str]:
+    """Point servers installed from a download-on-demand recipe at the bundled one.
+
+    Returns the names of the servers moved. Servers whose package has no bundled
+    equivalent are left as they are — Diagnostics lists them, since they will not start
+    without network access or an offline package cache.
+    """
+    moved = []
+    for server in servers.values():
+        if server.get("transport") != "stdio" or server.get("command") not in ("npx", "uvx"):
+            continue
+        args = [str(a) for a in server.get("args") or []]
+        package = next((pkg for pkg in _REPLACED if any(a == pkg or a.startswith(pkg + "@") for a in args)), None)
+        if package is None:
+            continue
+        catalog_id, folder = _REPLACED[package]
+        if folder == "files":
+            roots = [a for a in args if a.startswith("/")]
+            new_args = [_script("files"), *roots] if roots else None
+        elif folder == "sqlite_db":
+            db = args[args.index("--db-path") + 1] if "--db-path" in args[:-1] else ""
+            new_args = [_script("sqlite_db"), "--db-path", db] if db else None
+        else:
+            new_args = [_script("clock")]
+        if new_args is None:
+            continue
+        server.update({"command": PYTHON, "args": new_args, "catalog_id": catalog_id,
+                       "migrated_from": package})
+        moved.append(server.get("name") or server.get("id", ""))
+    return moved
+
+
+def downloads_at_start(servers: dict[str, dict]) -> list[str]:
+    """Servers that fetch their package when they start — they fail in a private network."""
+    return [s.get("name") or s.get("id", "") for s in servers.values()
+            if s.get("enabled", True) and s.get("transport") == "stdio"
+            and s.get("command") in ("npx", "uvx", "pipx", "bunx", "pnpm", "yarn", "dlx")]
+
 
 CATALOG_BY_ID: dict[str, dict[str, Any]] = {entry["id"]: entry for entry in CATALOG}
 
-CATEGORIES = ["Files", "Data", "Web", "Reasoning", "Testing"]
+CATEGORIES = ["Files", "Data", "Reasoning"]
 
 
 def instantiate(catalog_id: str, values: dict[str, str],

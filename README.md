@@ -18,8 +18,8 @@ nothing else. See [Air-gapped deployment](#air-gapped-deployment).
 
 ## Getting started
 
-Requires **Python 3.12+**, **Node 20+**, and **[Ollama](https://ollama.com)** with at least
-one model that can call tools.
+Requires **Python 3.12+**, **Ollama** with at least one model that can call tools, and
+**Node 20+** to build the interface (not to run it: production serves the built files).
 
 ```bash
 make install
@@ -73,14 +73,16 @@ Every connected **MCP** server adds its tools to the same index, namespaced by s
 (`filesystem__read_file`), and the built-in file tools are named `workspace_*` so it is
 never ambiguous which directory a call is about.
 
-**The library is offline by selection.** Every recipe runs as a process on your machine,
-needs no account and reaches nothing outside it: **Pandas Frames** (bundled with this
-repository), filesystem, SQLite, Postgres (to an internal database), knowledge-graph
-memory, sequential thinking and time. Packages whose job is the internet — fetch, browsers,
-git hosting, search — are refused by name when the deployment is air-gapped.
+**The library ships with the app.** Files (read-only, scoped to one directory), SQLite
+(read-only at the engine level, with a time limit and a row ceiling), Pandas Frames and
+time zones are servers in `mcp_servers/`, written against the Python standard library
+(pandas for the dataframes) and started on the app's own interpreter: nothing is fetched
+from npm or PyPI at connect time. Servers installed from the old `npx`/`uvx` recipes are
+moved onto them automatically; Diagnostics names any server that still fetches a package
+when it starts.
 
-**Pandas Frames** is the one server that ships here rather than being fetched: it runs on
-the interpreter already serving the API, so there is no launcher to install. It loads CSV,
+**Pandas Frames** runs on the interpreter already serving the API, so there is no launcher
+to install. It loads CSV,
 Excel and Parquet files into real dataframes and lets the agent query them — joins,
 group-bys, statistics — through an expression sandbox, inside a killable worker with memory
 and CPU ceilings, with every call written to an append-only audit log. Its docstring is
