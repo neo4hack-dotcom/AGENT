@@ -153,7 +153,9 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
         </button>
         <h3 className="text-sm font-semibold">{source.name}</h3>
         <span className="font-mono text-2xs dimmer">{source.slug}</span>
-        <span className="ml-auto text-2xs dimmer">profiled {ago(source.profiled_at)}</span>
+        <span className="ml-auto text-2xs dimmer">
+          {source.queryable ? `profiled ${ago(source.profiled_at)}` : `last used ${ago(source.observed?.last_seen ?? null)}`}
+        </span>
       </div>
 
       <ul className={cls('grid grid-cols-1 gap-1.5', source.readiness.of > 1 && 'sm:grid-cols-5')}>
@@ -173,8 +175,10 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
           In plain words: what is in it, what questions it answers, its time coverage, what it
           cannot answer, and how it relates to your other sources.
         </p>
-        <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} maxLength={4000}
-          placeholder="Sales DB holds every order and refund since January 2026, in EUR with VAT. Use it for revenue by region, channel and segment. Campaigns are in the CRM source, joined on customer id."
+        <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={source.queryable ? 4 : 7} maxLength={4000}
+          placeholder={source.queryable
+            ? 'Sales DB holds every order and refund since January 2026, in EUR with VAT. Use it for revenue by region, channel and segment. Campaigns are in the CRM source, joined on customer id.'
+            : 'Market data: daily closes for bonds (clean, % of par) and equities (per share, trading currency), ECB-style FX fixings quoted EURxxx, government curves at month ends. No fixing on TARGET holidays. Identifiers: ISIN or ticker, as in the trade store.'}
           className="focus-ring w-full resize-y rounded-xl border bg-white px-3 py-2.5 text-[13px] leading-relaxed hairline outline-none dark:bg-black/20" />
       </section>
 
@@ -225,9 +229,11 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
             : 'Describe this service from its tool schemas, what the agent has seen it return, and the read-only calls that need no arguments.'}>
           Draft with AI
         </Button>
-        <span className="ml-auto flex items-center gap-1 text-2xs dimmer">
-          <FlaskConical size={11} /> Read-only queries only
-        </span>
+        {source.queryable && (
+          <span className="ml-auto flex items-center gap-1 text-2xs dimmer">
+            <FlaskConical size={11} /> Read-only queries only
+          </span>
+        )}
       </div>
 
       {source.observed && source.observed.coverage.total > 0 && (

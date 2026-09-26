@@ -135,6 +135,20 @@ true. Recalled memories are themselves fenced when injected: by the time a memor
 back, nothing distinguishes a fact the user stated from one a document talked the agent into
 storing.
 
+## The atlas, and notes about sources
+
+The atlas remembers what tools returned, across conversations, and part of it is written
+into every system prompt — which makes it the same kind of target as memory. So it keeps
+structure only: field names that look like identifiers, kinds, a few short example values
+that match a plain-value pattern, argument shapes, the gist of errors. No sentence from a
+reply is ever stored, so no reply can plant an instruction there.
+
+Interpretation — "this parameter takes book ids, not desk names" — does come from the
+model, from a note it writes or from a review of a run that had to correct itself. Those
+notes are stored as *proposed*, offered only inside `source_info` results (fenced like any
+tool output, labelled unconfirmed), and reach the system prompt only once a person has
+confirmed them in Admin.
+
 ## The audit log
 
 Every action is appended to `data/audit.jsonl`: which tool, with which arguments (redacted),

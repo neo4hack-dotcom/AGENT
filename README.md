@@ -91,6 +91,12 @@ read.
 Your own servers — a risk engine, a market data service, a positions database — are one
 "custom server" form away, over stdio or HTTP, as long as they live inside the network.
 
+**Twenty servers, one question.** The prompt carries a source map — every source, what
+its tools do, what they were seen returning, what is still unexplored — and past the tool
+budget the fast model routes each question to the sources it needs, by meaning rather than
+shared words. What calls return is remembered across conversations (the atlas), so the
+next question starts where the last one finished; see [`DATA.md`](DATA.md).
+
 **Describe each source once** (*Admin → Data sources*): what it holds and what it cannot
 answer, in plain words, plus for a SQL source a model the app measures from the data itself —
 tables, values, ranges, joins — and the metrics you define once and want computed the same

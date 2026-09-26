@@ -103,6 +103,7 @@ def ask(question: str, conversation_id: str = "", answers: list[str] | None = No
     answer = "\n".join(b.get("text", "") for b in message.get("blocks") or []
                        if b["type"] == "text" and not b.get("superseded"))
     return {"conversation_id": started["conversation_id"], "status": status,
+            "error": message.get("error") or "",
             "seconds": round(time.time() - t0, 1), "calls": calls, "charts": charts,
             "files": files, "asked": asked, "answer": answer,
             "llm_calls": usage.get("llm_calls"), "tool_calls": usage.get("tool_calls"),

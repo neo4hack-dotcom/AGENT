@@ -108,6 +108,50 @@ The five readiness marks — description, profiled, metrics, caveats, two checke
 to, and open the folded work under each answer: the queries should use your view, your
 filters, and few calls.
 
+## Services made of tools, not tables
+
+Market data, reference data, a risk engine: most of a bank's MCP estate answers through
+predefined tools rather than SQL. There is nothing to profile, and the description is
+what matters — the one place the agent learns that bond prices are clean and in % of par,
+that FX is fixed as EURxxx, that VaR exists at month ends only, that `book` means
+`RAT-EUR` and not "Rates".
+
+- **Draft with AI** writes that description from the tool schemas, from what the agent
+  has already seen the tools return, and from the tools that are safe to call unprompted
+  (read-only by the server's own declaration, no arguments). Read it, correct it, save.
+- **Observed by the agent** lists every tool: how often it worked, the fields it returns,
+  when it was last seen — and the tools never explored. This is the atlas (below).
+- **What the agent learned** lists notes the agent proposed: conventions and pitfalls it
+  had to investigate. Confirm the true ones — they then reach every question; discard the
+  rest. Unconfirmed notes are only offered inside `source_info`, marked as such.
+
+## The atlas: what the agent remembers between questions
+
+Every MCP call teaches something about the tool: its fields, their kinds and units, the
+arguments that worked, the errors. The atlas keeps that across conversations, so the tenth
+question about market data does not start by rediscovering it. Three rules keep a cache of
+past answers from narrowing future ones:
+
+- **Coverage is explicit.** The source map shows, per source, which tools were never seen
+  working. "Not in the atlas" never reads as "not in the source", and the agent is told to
+  check unexplored tools before concluding that data does not exist.
+- **Declared and observed stay separate**, each labelled as what it is.
+- **A changed tool is re-checked.** Observations carry a fingerprint of the tool's schema;
+  when the server changes it, what was learned about the old one stops being trusted.
+
+Only structure is kept — never text from a reply (see SECURITY.md). **Forget** clears a
+source's observations; the agent relearns from use.
+
+## Twenty servers at once
+
+The prompt carries a *source map*: every source, its tools with the first words of their
+descriptions, the fields they were seen returning, what is unexplored. Past the tool
+budget, one call to the fast model routes each question to the sources it needs — by
+meaning, so a job "position" in HR or an office "desk" in facilities is not taken for a
+trading one — and proposes a route when several sources must be crossed. Only those
+sources' tools are offered in full; `find_tools('<source>')` brings in any other. The
+routing, its reason and the route are in the folded work of every answer.
+
 ## Model reference
 
 ```yaml
@@ -152,4 +196,17 @@ python evals/testbed.py                       # data + ground truth
 python evals/setup_sources.py                 # prepared sources (--bare: none)
 python evals/run.py --label prepared          # 12 scenarios, graded
 python evals/report.py bare prepared          # side by side
+```
+
+`evals/finance/` is the CIB testbed: market data, reference data and risk as tool servers,
+a versioned trade store over SQL, and eight look-alike corporate servers (HR "positions",
+facilities "desks", procurement "ratings" and "limits") — eighteen servers and ninety tools
+with the sales and CRM databases. Ten questions cross them: exposure by rating in EUR, VaR
+limit usage, counterparties by notional at trade-date FX, a price on a TARGET holiday, an
+ambiguous entity, a leading question.
+
+```bash
+python evals/finance/data.py                              # the world
+python evals/finance/setup.py --base URL --estate         # connect it
+python evals/finance/run.py --base URL --label cib         # 10 scenarios, graded
 ```

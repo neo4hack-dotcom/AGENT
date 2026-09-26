@@ -60,7 +60,9 @@ def grade(sid: str, turns: list[dict]) -> tuple[bool, list[str]]:
         ok &= check(millions(a, t["F1"]["total_eur"]), f"total {t['F1']['total_eur']:,.0f} EUR", notes)
         ok &= check({"trade_store", "reference_data", "market_data"} <= used, f"used {sorted(used)}", notes)
     elif sid == "F2":
-        ok &= check(t["F2"]["desk"].lower() in a.lower(), f"desk {t['F2']['desk']}", notes)
+        head = a.strip().split("\n")[0].lower()
+        ok &= check(t["F2"]["desk"].lower() in head or t["F2"]["desk"].lower() in a.lower()[:300],
+                    f"desk {t['F2']['desk']}", notes)
         ok &= check(has_number(a, t["F2"]["usage"], 1) or has_number(a, round(t["F2"]["usage"]), 0),
                     f"usage {t['F2']['usage']}%", notes)
     elif sid == "F3":
@@ -131,16 +133,21 @@ def main() -> None:
         print(f"▶ {sid} {label}", flush=True)
         attempts = []
         for _ in range(max(1, args.repeat)):
-            turns, conversation = [], ""
-            for question in questions:
-                try:
-                    turn = harness.ask(question, conversation, answers)
-                except Exception as exc:  # noqa: BLE001
-                    turn = {"status": f"harness error: {exc}", "answer": "", "calls": [], "charts": [],
-                            "files": [], "asked": [], "seconds": 0, "tool_calls": 0, "llm_calls": 0,
-                            "failed_calls": 0, "conversation_id": conversation}
-                conversation = turn["conversation_id"]
-                turns.append(turn)
+            for infra_retry in range(3):
+                turns, conversation = [], ""
+                for question in questions:
+                    try:
+                        turn = harness.ask(question, conversation, answers)
+                    except Exception as exc:  # noqa: BLE001
+                        turn = {"status": f"harness error: {exc}", "answer": "", "calls": [], "charts": [],
+                                "files": [], "asked": [], "seconds": 0, "tool_calls": 0, "llm_calls": 0,
+                                "failed_calls": 0, "conversation_id": conversation}
+                    conversation = turn["conversation_id"]
+                    turns.append(turn)
+                # A hosted model's 500 measures the host, not the agent: run it again.
+                if not any("HTTP 5" in (t.get("error") or "") for t in turns):
+                    break
+                print(f"  (model host error, rerunning: {turns[-1].get('error', '')[:80]})", flush=True)
             passed, notes = grade(sid, turns)
             attempts.append({"passed": passed, "notes": notes, "turns": turns,
                              "seconds": sum(t["seconds"] for t in turns),

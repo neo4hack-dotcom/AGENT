@@ -315,7 +315,7 @@ class OllamaProvider(LLMProvider):
         # one retry a second later often lands in the same burst. Thinking already streamed
         # does not block a retry — it is shown folded, and a repeated paragraph there costs
         # less than a lost run. Answer text or a tool call does.
-        delays = (1.5, 4.0)
+        delays = (2.0, 5.0, 12.0)
         for attempt in range(len(delays) + 1):
             last = attempt == len(delays)
             try:

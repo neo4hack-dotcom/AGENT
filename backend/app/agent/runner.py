@@ -47,6 +47,34 @@ _LEAK = re.compile(
     r"[^.!?\n]*[.!?]?\s*", re.IGNORECASE)
 
 
+_BARE_JSON = re.compile(r"^\{[^{}]{0,600}\}$", re.S)
+
+
+def recover_bare_arguments(content: str, functions: list[dict]) -> ToolCall | None:
+    """A tool call whose name the model forgot to write: arguments alone, as the reply."""
+    text = (content or "").strip()
+    if not _BARE_JSON.match(text):
+        return None
+    try:
+        arguments = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(arguments, dict) or not arguments:
+        return None
+    keys = set(arguments)
+    fits = []
+    for function in functions or []:
+        spec = function.get("function") or {}
+        params = spec.get("parameters") or {}
+        accepted = set((params.get("properties") or {}))
+        required = set(params.get("required") or [])
+        if keys <= accepted and required <= keys:
+            fits.append(spec.get("name"))
+    if len(fits) != 1:
+        return None
+    return ToolCall(id=new_id("t"), name=fits[0], arguments=arguments)
+
+
 def strip_leaked_reasoning(text: str) -> str:
     """The answer without the model's own leading plan ("We need to call get_price…")."""
     out = text
@@ -883,6 +911,26 @@ class AgentRunner:
                 ctx.usage["ttft_ms"] = result.latency_ms
             ctx.emit({"type": "usage", **ctx.usage})
 
+            if not result.tool_calls and not last_turn:
+                # gpt-oss sometimes writes a call's arguments as its answer —
+                # {"date": "2026-06-30", "identifier": "FR0000130809"} — and that JSON was
+                # published as the reply. When the keys fit exactly one offered tool, it is
+                # that call; otherwise it is a stall, handled like an empty turn.
+                recovered = recover_bare_arguments(result.content or "", functions)
+                if recovered is not None or _BARE_JSON.match((result.content or "").strip()):
+                    if text_block is not None:
+                        if text_block in ctx.blocks:
+                            ctx.blocks.remove(text_block)
+                        ctx.emit({"type": "draft.clear"})
+                        text_block = None
+                    ctx.emit({"type": "notice", "quiet": True,
+                              "message": ("Recovered a tool call the model wrote as text: "
+                                          f"{recovered.name}" if recovered else
+                                          "The model wrote tool arguments as text; asked it to call the tool.")})
+                    result.content = ""
+                    if recovered is not None:
+                        result.tool_calls = [recovered]
+                        result.native_tools = False
             if not result.tool_calls and text_block is not None and text_block.get("held") \
                     and not last_turn:
                 # gpt-oss sometimes writes its plan instead of calling it: "We need to fetch
