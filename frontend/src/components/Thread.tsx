@@ -6,10 +6,11 @@
 // feel like watching a build run instead of reading an answer.
 
 import {
-  AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileText, FolderOpen, Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
+  AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileDown, FileText, FolderOpen, Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
   Sparkles, Terminal, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { adminToken, api } from '../api';
 import type { AskRequest, Block, Message, PlanStep, Usage } from '../types';
 import { ChartView } from './Chart';
 import { Markdown } from './Markdown';
@@ -563,12 +564,12 @@ export function AssistantTurn({
 
       {!live && conversationId && <Provenance message={message} conversationId={conversationId} />}
       {!live && message.trust && <TrustLine trust={message.trust} />}
-      {!live && <TurnFooter message={message} />}
+      {!live && <TurnFooter message={message} conversationId={conversationId} />}
     </div>
   );
 }
 
-function TurnFooter({ message }: { message: Message }) {
+function TurnFooter({ message, conversationId }: { message: Message; conversationId?: string }) {
   const usage: Usage = message.usage ?? {};
   const answer = (message.blocks ?? [])
     .filter((b) => b.type === 'text' && !b.superseded)
@@ -581,7 +582,7 @@ function TurnFooter({ message }: { message: Message }) {
     : null;
   if (!answer.trim() && !interrupted) return null;
   return (
-    <div className={cls('mt-2.5 flex items-center gap-3 text-2xs dimmer transition-opacity duration-200',
+    <div className={cls('mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 whitespace-nowrap text-2xs dimmer transition-opacity duration-200',
       // A finished answer hides its metadata until you look for it; an interrupted one
       // must say so without being hovered — that is the whole point of saying it.
       interrupted ? 'opacity-100' : 'opacity-0 group-hover/turn:opacity-100 focus-within:opacity-100')}>
@@ -591,6 +592,7 @@ function TurnFooter({ message }: { message: Message }) {
         </span>
       )}
       {answer.trim() && <CopyAnswer text={answer} />}
+      {answer.trim() && conversationId && <AnswerPdf conversationId={conversationId} messageId={message.id} />}
       {message.model && <span className="font-mono">{message.model}</span>}
       {message.mode === 'direct' && (
         <span title={message.servers?.length ? `MCP: ${message.servers.join(', ')}` : 'No MCP server'}>
@@ -628,9 +630,13 @@ function ContextMeter({ usage }: { usage: Usage }) {
   if (!limit || !used) return null;
   const share = Math.min(1, used / limit);
   if (share < 0.5) return null;
+  const parts = usage.context_parts;
+  const split = parts
+    ? ` Instructions and source notes ${parts.system.toLocaleString()}, tool schemas ${parts.tools.toLocaleString()}, conversation ${parts.messages.toLocaleString()}.`
+    : '';
   return (
     <span className="flex items-center gap-1.5"
-      title={`${used.toLocaleString()} of ${limit.toLocaleString()} tokens. Past ~90% the oldest turns are summarised away.`}>
+      title={`${used.toLocaleString()} of ${limit.toLocaleString()} tokens.${split} Past ~90% the oldest turns are summarised away.`}>
       <span className="h-1 w-8 overflow-hidden rounded-full bg-zinc-200 dark:bg-white/10">
         <span className={cls('block h-full rounded-full transition-[width] duration-500',
           share > 0.9 ? 'bg-red-500' : share > 0.75 ? 'bg-amber-500' : 'bg-brand-500')}
@@ -638,6 +644,46 @@ function ContextMeter({ usage }: { usage: Usage }) {
       </span>
       {Math.round(share * 100)}% context
     </span>
+  );
+}
+
+/** The answer as a PDF — text, charts, sources, provenance — built from the stored run. */
+function AnswerPdf({ conversationId, messageId }: { conversationId: string; messageId: string }) {
+  const [state, setState] = useState<'idle' | 'busy' | string>('idle');
+  const save = async () => {
+    setState('busy');
+    try {
+      const token = adminToken();
+      const res = await fetch(api.pdfUrl(conversationId, messageId), {
+        credentials: 'same-origin', headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      // A name with accents comes as RFC 5987 (filename*=utf-8''…), a plain one quoted.
+      const disposition = res.headers.get('content-disposition') ?? '';
+      const encoded = /filename\*=utf-8''([^;]+)/i.exec(disposition)?.[1];
+      const name = encoded ?? /filename="?([^";]+)"?/.exec(disposition)?.[1] ?? 'answer.pdf';
+      const url = URL.createObjectURL(await res.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = decodeURIComponent(name);
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      setState('idle');
+    } catch (e) {
+      setState((e as Error).message || 'PDF failed');
+    }
+  };
+  const failed = state !== 'idle' && state !== 'busy';
+  return (
+    <button onClick={() => void save()} disabled={state === 'busy'}
+      title={failed ? state : 'Download this answer as a PDF: text, charts, sources and provenance'}
+      className={cls('focus-ring flex items-center gap-1 rounded px-1 py-0.5 hover:text-zinc-700 dark:hover:text-zinc-200',
+        failed && 'text-red-600 dark:text-red-400')}>
+      {state === 'busy' ? <Spinner size={10} /> : <FileDown size={11} />} PDF
+    </button>
   );
 }
 

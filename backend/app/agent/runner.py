@@ -182,6 +182,15 @@ _ELISION_LINE = re.compile(r"^[\s\u00a0]*(?:\.{3,}|…)[\s\u00a0]*$", re.M)
 
 _URL = re.compile(r"https?://[^\s<>\"')\]]+", re.I)
 
+# Built-in tools whose arguments are drawn, written or stored — never fetched. A URL in them
+# is data: the `$schema` line models put at the top of every Vega-Lite spec, a link in a
+# report's text, an address in a note. Chart specs are stripped of anything that loads
+# (data.url, image marks, href channels) before they are drawn, the renderer's URL allowlist
+# is empty and the page's CSP allows no outside connection — so sending these calls through
+# the egress policy refused a bar chart for naming vega.github.io, and fixed nothing.
+_NO_REQUEST_TOOLS = frozenset({"chart", "create_report", "export_data", "profile_data", "ask_user",
+                               "plan", "workspace_write", "remember", "note_source"})
+
 
 def _urls_in(value: Any) -> list[str]:
     """Every URL anywhere in a call's arguments, however deeply nested."""
@@ -250,6 +259,8 @@ class RunContext:
         # Direct mode: the model and the chosen servers' tools, no agent layer on top.
         self.direct = False
         self.direct_servers: list[str] = []
+        # create_report refusals for a missing chart or table — capped, see data_tools.
+        self.report_refusals = 0
         # What was verified along the way, kept with the answer for whoever audits it.
         self.checks: list[dict] = []
         # ISIN → name, learned from this run's results; answers show "Name (ISIN)".
@@ -493,6 +504,14 @@ class AgentRunner:
                           self.c.settings.run_timeout_s,
                           self.c.settings.stagnation_limit)
         ctx = RunContext(new_id("r"), conversation_id, assistant_message["id"], self.c.bus, guard)
+        # Evidence labels run on across the conversation, so "#1" in a follow-up means one
+        # thing. Restarting at #1 on every question made "the table, #1" — last answer's
+        # computation — resolve to the very call that was asking for it.
+        earlier = self.c.store.conversation(conversation_id) or {}
+        ctx._refs = max((int(str(b["ref"])[1:]) for m in earlier.get("messages") or []
+                         for b in m.get("blocks") or []
+                         if b.get("type") == "tool" and re.fullmatch(r"#\d+", str(b.get("ref") or ""))),
+                        default=0)
         ctx.direct = mode == "direct"
         ctx.direct_servers = direct_servers
         self.runs[ctx.run_id] = ctx
@@ -1028,6 +1047,10 @@ class AgentRunner:
         giveup_nudged = False
         must_compose = False
         window = 0
+        # Set after a turn the window cut off: the next request is squeezed — compact
+        # schemas, fewer tools in full, older results masked, the middle compacted.
+        squeeze = False
+        squeezed = False
         empty_turns = 0
         tools_used = 0
         pending_hint: str | None = None
@@ -1068,11 +1091,38 @@ class AgentRunner:
                 budget=int(settings.tool_budget), routed=routed)
             # Full schemas while the catalogue is small; compressed once it is not, which
             # is exactly when the tokens are needed elsewhere.
-            dense = len(tools) + len(offered) > int(settings.tool_budget)
-            functions = [context.compress_schema(spec.as_function(), dense)
-                         for spec in tools.values()]
-            functions += [context.compress_schema(f, dense)
-                          for f in self.c.mcp.ollama_tools(offered)]
+            dense = len(tools) + len(offered) > int(settings.tool_budget) or squeeze
+
+            def schemas(chosen: list[dict], compact: bool) -> list[dict]:
+                return ([context.compress_schema(spec.as_function(), compact) for spec in tools.values()]
+                        + [context.compress_schema(f, compact) for f in self.c.mcp.ollama_tools(chosen)])
+
+            functions = schemas(offered, dense)
+            if not window:
+                window = await self._context_window()
+            # The window has three tenants: what every request pays up front (instructions,
+            # source notes, tool schemas), the conversation, and the model's own turn. When
+            # they do not fit, the schemas give way first — compact, then fewer offered in
+            # full (find_tools still reaches every one) — and the conversation after.
+            reserve = context.output_reserve(window)
+            overhead = context.text_tokens(system) + context.text_tokens(json.dumps(functions, default=str))
+            tight = squeeze or (window > 0 and overhead + context.estimate_tokens(messages) + reserve > window)
+            if tight and not dense:
+                dense = True
+                functions = schemas(offered, True)
+                overhead = context.text_tokens(system) + context.text_tokens(json.dumps(functions, default=str))
+            if tight and window > 0:
+                keep = set(ctx.pinned_tools) | set(ctx.recent_tools)
+                while (overhead + context.estimate_tokens(messages) + reserve > window
+                       and len(offered) > 6):
+                    drop = next((t for t in reversed(offered) if t["qualified_name"] not in keep), None)
+                    if drop is None:
+                        break
+                    offered = [t for t in offered if t is not drop]
+                    omitted += 1
+                    functions = schemas(offered, True)
+                    overhead = (context.text_tokens(system)
+                                + context.text_tokens(json.dumps(functions, default=str)))
             ctx.bridge_names = ([n for n in tools if n != "run_python"]
                                 + [t["qualified_name"] for t in offered])
             if omitted and iteration == 0:
@@ -1083,13 +1133,11 @@ class AgentRunner:
                           f"{omitted} of {len(mcp_tools)} MCP tools are not offered this turn; "
                           f"the agent can reach them with find_tools."})
 
-            if not window:
-                window = await self._context_window()
-
-            messages, masked = context.mask_observations(messages)
+            messages, masked = context.mask_observations(messages, keep_full=2 if tight else 4)
             if masked:
                 ctx.usage["masked_chars"] = ctx.usage.get("masked_chars", 0) + masked
-            messages = await self._maybe_compact(ctx, messages, text)
+            messages = await self._maybe_compact(ctx, messages, text, overhead=overhead, force=squeeze)
+            squeeze = False
             ctx.emit({"type": "status", "phase": "thinking"})
             text_block: dict | None = None
             think_block: dict | None = None
@@ -1153,6 +1201,12 @@ class AgentRunner:
             # predicts a compaction before it happens.
             ctx.usage["context_tokens"] = sent
             ctx.usage["context_limit"] = window
+            # Where the window goes: the instructions and source notes, the tool schemas, and
+            # the conversation itself — the first two are paid again on every turn.
+            ctx.usage["context_parts"] = {"system": context.text_tokens(system),
+                                          "tools": int(schema_chars / context.CHARS_PER_TOKEN),
+                                          "messages": context.estimate_tokens(messages),
+                                          "reserve": context.output_reserve(window)}
             if iteration == 0:
                 ctx.usage["ttft_ms"] = result.latency_ms
             ctx.emit({"type": "usage", **ctx.usage})
@@ -1203,6 +1257,13 @@ class AgentRunner:
                     # spending its whole budget on a model that could not answer.
                     empty_turns += 1
                     truncated = result.stop_reason == "length"
+                    if truncated and not squeezed:
+                        # Once, before giving up: the same turn again, in a smaller prompt.
+                        squeeze = squeezed = True
+                        ctx.emit({"type": "notice", "quiet": True, "message":
+                                  f"Cut off at {result.tokens_in} prompt tokens of a {window}-token "
+                                  f"window — retrying with a smaller prompt."})
+                        continue
                     ctx.emit({"type": "notice", "quiet": True,
                               "message": f"Empty model turn (stop: {result.stop_reason or 'none'}, "
                                          f"{result.tokens_out} tokens out"
@@ -1213,7 +1274,7 @@ class AgentRunner:
                         ctx.emit({"type": "notice", "message":
                                   f"The model was cut off mid-turn: the prompt takes "
                                   f"{result.tokens_in} tokens of a {window}-token window. Connect "
-                                  f"fewer MCP servers, or raise the context window in Admin."})
+                                  f"fewer MCP servers, or raise the context window in Admin → Guardrails."})
                     if truncated or empty_turns >= 3:
                         must_compose = True
                         break
@@ -1369,7 +1430,7 @@ class AgentRunner:
                 "error": outcome.get("error", "")}
 
     async def _maybe_compact(self, ctx: RunContext, messages: list[dict],
-                             question: str) -> list[dict]:
+                             question: str, overhead: int = 0, force: bool = False) -> list[dict]:
         """Compress the middle of the transcript when it stops fitting, keeping the two
         things that compression is known to lose.
 
@@ -1381,7 +1442,7 @@ class AgentRunner:
         summariser ever sees.
         """
         window = await self._context_window()
-        plan = context.plan_compaction(messages, window)
+        plan = context.plan_compaction(messages, window, overhead=overhead, force=force)
         if plan is None:
             return messages
         start, end = plan
@@ -1700,7 +1761,10 @@ class AgentRunner:
         produced_chart = any(b.get("chart") for b in ctx.blocks if b.get("type") == "tool")
         produced_file = any(b.get("file") for b in ctx.blocks if b.get("type") == "tool")
         wants_chart = bool(re.search(r"\b(graph|graphique|chart|courbe|visuali|plot|diagramme|histogramme)", lowered))
-        wants_file = bool(re.search(r"\b(extract|extrait|export|excel|xlsx|csv|fichier|pdf|rapport|report)\b", lowered))
+        # "report" only as a noun: "report the VaR" asks for an answer, "a report" for a file.
+        wants_file = bool(re.search(r"\b(extract\w*|extrait\w*|export\w*|excel|xlsx|csv|fichiers?|pdf|"
+                                    r"rapports?|download|télécharg\w*|(?:an?|the|this|pdf|my)\s+reports?)\b",
+                                    lowered))
         if wants_chart and not produced_chart:
             return ("The reader asked for a chart and none has been drawn. Call the `chart` tool now, "
                     "with data='#N' naming the call that returned the rows (compute them first if "
@@ -2084,6 +2148,8 @@ class AgentRunner:
         them while giving it no way to — so it stalled, every time. That case comes back
         as "ask", and the caller puts the decision in front of the user.
         """
+        if call.name in _NO_REQUEST_TOOLS:
+            return "", "", ""
         for value in _urls_in(call.arguments):
             verdict, reason = ctx.egress.verdict(value, ctx.taint.tainted, network.airgapped())
             shape = trust.looks_like_exfiltration(value)

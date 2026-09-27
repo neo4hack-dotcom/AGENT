@@ -143,6 +143,8 @@ export interface Usage {
   /** How full the window was on the last turn, not a running total. */
   context_tokens?: number;
   context_limit?: number;
+  /** Where that window went on the last turn: paid-every-turn overhead versus conversation. */
+  context_parts?: { system: number; tools: number; messages: number; reserve?: number };
 }
 
 export interface Artifact {
