@@ -168,6 +168,10 @@ export const api = {
   explainAnswer: (conversationId: string, messageId: string) =>
     request<{ text: string; model?: string; at?: number }>(
       `/conversations/${conversationId}/messages/${messageId}/explain`, { method: 'POST' }),
+  rerunStep: (conversationId: string, messageId: string, number: string, args: Record<string, unknown>) =>
+    request<{ ok: boolean; text: string; error: string; ms: number; truncated: boolean; redacted: number; tool: string }>(
+      `/conversations/${conversationId}/messages/${messageId}/steps/${number}/rerun`,
+      { method: 'POST', body: JSON.stringify({ arguments: args }) }),
   pdfUrl: (conversationId: string, messageId: string) =>
     `/api/conversations/${conversationId}/messages/${messageId}/pdf`,
   trailUrl: (conversationId: string, messageId: string, format: 'md' | 'json' = 'md') =>

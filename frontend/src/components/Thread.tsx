@@ -6,14 +6,15 @@
 // feel like watching a build run instead of reading an answer.
 
 import {
-  AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileDown, FileText, FolderOpen, Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
+  AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, CornerDownLeft, FileDown, FileText, FolderOpen, Play, Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
   Sparkles, Terminal, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { adminToken, api } from '../api';
 import type { AskRequest, Block, Message, PlanStep, Usage } from '../types';
 import { ChartView } from './Chart';
-import { Markdown } from './Markdown';
+import { DataTable, ResultExport, useResultExport } from './DataTable';
+import { CodeBlock, Markdown } from './Markdown';
 import { Provenance } from './Provenance';
 import { AskCard, FileCard } from './Outputs';
 import { Badge, Button, Spinner, cls } from './ui';
@@ -138,7 +139,7 @@ function asTable(raw: string): { columns: string[]; rows: unknown[][] } | null {
       if (Array.isArray(inner)) { value = inner; break; }
     }
   }
-  if (!Array.isArray(value) || value.length === 0 || value.length > 500) return null;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 5000) return null;
   const scalar = (v: unknown) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
   if (!value.every((row) => row && typeof row === 'object' && !Array.isArray(row)
                    && Object.values(row as object).every(scalar))) return null;
@@ -150,53 +151,80 @@ function asTable(raw: string): { columns: string[]; rows: unknown[][] } | null {
   return { columns, rows: (value as Record<string, unknown>[]).map((r) => columns.map((c) => r[c])) };
 }
 
-function ResultTable({ table }: { table: { columns: string[]; rows: unknown[][] } }) {
-  const [all, setAll] = useState(false);
-  const rows = all ? table.rows : table.rows.slice(0, 50);
+/**
+ * The reader's own run of a step: the query as the agent wrote it, editable, run against
+ * the same source without the model. Read-only tools only — the server refuses the rest.
+ */
+function Rerun({ block, target, onClose }: {
+  block: Block; target: { conversationId: string; messageId: string }; onClose: () => void;
+}) {
+  const codeKey = Object.entries(block.args ?? {}).find(([key, value]) =>
+    typeof value === 'string' && ['query', 'sql', 'statement', 'expression'].includes(key))?.[0];
+  const [draft, setDraft] = useState(() => codeKey ? String(block.args![codeKey])
+                                                   : JSON.stringify(block.args ?? {}, null, 2));
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string; error: string; ms: number } | null>(null);
+  const run = async () => {
+    let args: Record<string, unknown>;
+    try {
+      args = codeKey ? { ...(block.args ?? {}), [codeKey]: draft } : JSON.parse(draft);
+    } catch {
+      setResult({ ok: false, text: '', error: 'The arguments are not valid JSON.', ms: 0 });
+      return;
+    }
+    setBusy(true);
+    try {
+      setResult(await api.rerunStep(target.conversationId, target.messageId, block.ref!.slice(1), args));
+    } catch (e) {
+      setResult({ ok: false, text: '', error: (e as Error).message, ms: 0 });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const table = result?.ok ? asTable(result.text.trim()) : null;
   return (
-    <div>
-      <div className="max-h-80 overflow-auto rounded-lg border hairline">
-        <table className="w-full border-collapse text-[11px]">
-          <thead className="sticky top-0 bg-zinc-100/95 backdrop-blur dark:bg-zinc-900/95">
-            <tr>
-              {table.columns.map((column) => (
-                <th key={column}
-                  className="whitespace-nowrap border-b px-2.5 py-1.5 text-left font-mono font-semibold hairline dim">
-                  {column}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr key={i} className="even:bg-zinc-50/60 dark:even:bg-white/[0.02]">
-                {row.map((cell, j) => (
-                  <td key={j} className={cls('max-w-[22rem] truncate px-2.5 py-1 font-mono dim',
-                    typeof cell === 'number' && 'text-right tabular-nums')}
-                    title={cell === null ? '' : String(cell)}>
-                    {cell === null ? <span className="dimmer">null</span> : String(cell)}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="space-y-2 rounded-lg border border-brand-300/50 bg-white/70 p-2.5 dark:border-brand-500/20 dark:bg-black/20">
+      <div className="flex items-center gap-2 text-2xs">
+        <span className="font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">Your run</span>
+        <span className="dimmer">{codeKey ? `edit the ${codeKey}` : 'edit the arguments'} · ⌘/Ctrl+Enter to run · not part of the answer's evidence</span>
+        <button onClick={onClose} className="focus-ring ml-auto rounded px-1 dimmer hover:text-zinc-700 dark:hover:text-zinc-200">close</button>
       </div>
-      <div className="mt-1 flex items-center gap-2 text-2xs dimmer">
-        <span>{table.rows.length} row{table.rows.length > 1 ? 's' : ''} × {table.columns.length} columns</span>
-        {table.rows.length > 50 && (
-          <button onClick={() => setAll((v) => !v)}
-            className="focus-ring rounded px-1 hover:text-zinc-700 dark:hover:text-zinc-200">
-            {all ? 'Show first 50' : `Show all ${table.rows.length}`}
-          </button>
-        )}
+      <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false}
+        onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void run(); } }}
+        rows={Math.min(14, Math.max(3, draft.split('\n').length + 1))}
+        className="focus-ring w-full resize-y rounded-md border bg-zinc-50/80 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed hairline dark:bg-black/30" />
+      <div className="flex items-center gap-2">
+        <Button size="xs" busy={busy} onClick={() => void run()}>Run</Button>
+        {result && <span className="text-2xs dimmer">{result.ok ? `${result.ms} ms` : ''}</span>}
       </div>
+      {result && !result.ok && (
+        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-red-600 dark:text-red-400">{result.error}</pre>
+      )}
+      {result?.ok && (table
+        ? <DataTable columns={table.columns} rows={table.rows as (string | number | boolean | null)[][]}
+            name={`${block.name}-rerun`} />
+        : <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] dim">{result.text.slice(0, 20000)}</pre>)}
     </div>
+  );
+}
+
+/** A result parked on disk whole, not shown as a table here: still one click to Excel. */
+function FullDownload({ href }: { href: (format: 'xlsx' | 'csv') => string }) {
+  return (
+    <span className="flex items-center gap-2 text-2xs dimmer">
+      <a href={href('xlsx')} download className="focus-ring rounded px-1.5 py-0.5 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.06]">
+        Full result · Excel
+      </a>
+      <a href={href('csv')} download className="focus-ring rounded px-1.5 py-0.5 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.06]">
+        CSV
+      </a>
+    </span>
   );
 }
 
 function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   const Icon = toolIcon(block);
   const running = block.status === 'running' || block.status === 'awaiting_approval';
   const failed = block.ok === false;
@@ -206,6 +234,14 @@ function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
   const table = useMemo(
     () => (open && !failed ? asTable((block.text || '').trim()) : null),
     [open, failed, block.text]);
+  const exportTo = useResultExport();
+  const full = exportTo && block.ref && !running
+    ? { href: (format: 'xlsx' | 'csv') => `/api/conversations/${exportTo.conversationId}/messages/${exportTo.messageId}/results/${block.ref!.slice(1)}?format=${format}` }
+    : undefined;
+  // The query or the code is the part an analyst reuses: shown as code, with its own copy.
+  const code = Object.entries(block.args ?? {}).find(([key, value]) =>
+    typeof value === 'string' && ['query', 'sql', 'code', 'expression', 'statement'].includes(key) && value.length > 0);
+  const rest = code ? Object.fromEntries(Object.entries(block.args ?? {}).filter(([key]) => key !== code[0])) : block.args ?? {};
 
   return (
     <div className="my-1.5" id={cite && block.ref ? `${cite}${block.ref.slice(1)}` : undefined}>
@@ -249,12 +285,30 @@ function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
       {open && (
         <div className="mt-1 space-y-2 rounded-lg border px-3 py-2.5 hairline bg-zinc-50/60 dark:bg-black/20 animate-fade-in">
           <div>
-            <div className="mb-1 text-2xs font-semibold uppercase tracking-wider dimmer">
+            <div className="mb-1 flex items-center text-2xs font-semibold uppercase tracking-wider dimmer">
               Call{block.server ? ` · ${block.server}` : ''}
+              <span className="ml-auto" />
+              {block.ref && block.ok && !running && (
+                <button onClick={() => window.dispatchEvent(new CustomEvent('agent:insert', { detail: `${block.ref} ` }))}
+                  title="Put this step's reference in your next question — e.g. “chart #5 by desk”"
+                  className="focus-ring flex items-center gap-1 rounded px-1.5 py-0.5 font-medium normal-case tracking-normal dim hover:bg-zinc-100 dark:hover:bg-white/[0.06]">
+                  <CornerDownLeft size={10} /> Ask about {block.ref}
+                </button>
+              )}
+              {exportTo && block.kind === 'mcp' && block.ref && !running && !editing && (
+                <button onClick={() => setEditing(true)} title="Edit the query or arguments and run it yourself, without the agent"
+                  className="focus-ring flex items-center gap-1 rounded px-1.5 py-0.5 font-medium normal-case tracking-normal text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-500/10">
+                  <Play size={10} /> Edit &amp; run
+                </button>
+              )}
             </div>
-            <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed dim">
-              {JSON.stringify(block.args ?? {}, null, 2)}
-            </pre>
+            {editing && exportTo && <div className="mb-2"><Rerun block={block} target={exportTo} onClose={() => setEditing(false)} /></div>}
+            {code && <CodeBlock lang={code[0] === 'code' ? 'python' : 'sql'} code={String(code[1])} />}
+            {(!code || Object.keys(rest).length > 0) && (
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed dim">
+                {JSON.stringify(rest, null, 2)}
+              </pre>
+            )}
           </div>
           {flagged && (
             <div className="rounded-lg border border-amber-300/70 bg-amber-50/60 px-2.5 py-2 text-2xs leading-relaxed text-amber-900 dark:border-amber-500/25 dark:bg-amber-500/[0.07] dark:text-amber-200">
@@ -273,11 +327,19 @@ function ToolBlock({ block, cite }: { block: Block; cite?: string }) {
               <div className="mb-1 text-2xs font-semibold uppercase tracking-wider dimmer">
                 {failed ? 'Error' : 'Result'}
               </div>
-              {table ? <ResultTable table={table} /> : (
-                <pre className={cls('max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed',
-                  failed ? 'text-red-600 dark:text-red-400' : 'dim')}>
-                  {(block.text || block.summary || '').slice(0, 6000)}
-                </pre>
+              {table ? <DataTable columns={table.columns} rows={table.rows as (string | number | boolean | null)[][]}
+                                  name={`${block.name}-${(block.ref ?? '').slice(1)}`} full={full} /> : (
+                <>
+                  <pre className={cls('max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed',
+                    failed ? 'text-red-600 dark:text-red-400' : 'dim')}>
+                    {(block.text || block.summary || '').slice(0, 6000)}
+                  </pre>
+                  {full && block.offloaded && (
+                    <div className="mt-1 flex justify-end">
+                      <FullDownload href={full.href} />
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -527,7 +589,10 @@ export function AssistantTurn({
   const answer = blocks.filter((b) => b.type === 'text');
   const outputs = outputsOf(blocks);
   const cite = `ev-${message.id}-`;
+  const exportTo = useMemo(() => (!live && conversationId ? { conversationId, messageId: message.id } : null),
+    [live, conversationId, message.id]);
   return (
+    <ResultExport.Provider value={exportTo}>
     <div className="animate-fade-up">
       <Work message={message} live={!!live} phase={phase} cite={cite} draft={draft}
         log={(notices ?? []).filter((n) => n.quiet).map((n) => n.text)} />
@@ -566,6 +631,7 @@ export function AssistantTurn({
       {!live && message.trust && <TrustLine trust={message.trust} />}
       {!live && <TurnFooter message={message} conversationId={conversationId} />}
     </div>
+    </ResultExport.Provider>
   );
 }
 

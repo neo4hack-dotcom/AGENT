@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import mimetypes
 import re
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -393,6 +395,100 @@ async def audit_trail(conv_id: str, message_id: str, format: str = "md"):
     text = lineage.markdown(question, _answer_text(message), message, chain)
     return PlainTextResponse(text, media_type="text/markdown",
                              headers={"Content-Disposition": f'attachment; filename="{name}.md"'})
+
+
+class RerunBody(BaseModel):
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/conversations/{conv_id}/messages/{message_id}/steps/{number}/rerun")
+async def rerun_step(conv_id: str, message_id: str, number: int, body: RerunBody) -> dict:
+    """Run one of the answer's steps again, with the reader's own edits — no model involved.
+
+    The analyst's loop: read the query the agent wrote, change the date or the filter, run
+    it, look. Waiting two minutes for a model to make a one-word edit is the wrong tool for
+    that. Read-only tools only (one that changes data stays with the agent, behind its
+    approval); the air gap applies to any URL in the arguments; secrets are stripped from
+    the result; every run is in the audit log. Not added to the answer's lineage — it is the
+    reader's exploration, not the agent's evidence.
+    """
+    import time as _time
+    from app import network
+    from app.agent import trust
+    _conv, message, _question = _message_pair(conv_id, message_id)
+    ref = f"#{number}"
+    block = next((b for b in message.get("blocks") or []
+                  if b.get("type") == "tool" and b.get("ref") == ref), None)
+    if block is None:
+        raise HTTPException(404, f"No step {ref} in this answer.")
+    tool = c.mcp.resolve(str(block.get("name") or "")) if block.get("kind") == "mcp" else None
+    if tool is None:
+        raise HTTPException(409, "Only a step that called a connected source can be run again by hand.")
+    if tool.get("write"):
+        raise HTTPException(403, f"{tool['qualified_name']} can change data: ask the agent, which "
+                                 f"runs it behind an approval.")
+    blob = json.dumps(body.arguments, ensure_ascii=False, default=str)
+    if len(blob) > 50_000:
+        raise HTTPException(413, "Arguments too large.")
+    for url in re.findall(r"https?://[^\s<>\"')\]]+", blob):
+        host = trust.host_of(url)
+        if network.airgapped() and host and not network.is_internal_host(host):
+            raise HTTPException(403, f"{host} is outside the private network; this deployment is air-gapped.")
+    started = _time.time()
+    result = await c.mcp.call(tool["qualified_name"], body.arguments)
+    text = str(result.get("text") or result.get("error") or "")
+    text, redacted = trust.redact(text, c.secret_values())
+    elapsed = int((_time.time() - started) * 1000)
+    c.audit.record("step.rerun", conversation=conv_id, message=message_id, ref=ref,
+                   tool=tool["qualified_name"], ok=bool(result.get("ok")), ms=elapsed,
+                   args=trust.redact(blob[:300], c.secret_values())[0])
+    return {"ok": bool(result.get("ok")), "text": text[:400_000], "truncated": len(text) > 400_000,
+            "error": "" if result.get("ok") else text[:2000], "ms": elapsed, "redacted": redacted,
+            "tool": tool["qualified_name"]}
+
+
+@router.get("/conversations/{conv_id}/messages/{message_id}/results/{number}")
+async def result_file(conv_id: str, message_id: str, number: int, format: str = "xlsx"):
+    """Every row of one step's result, as a file — without asking the model.
+
+    What the reader sees under a step is an excerpt (the first rows, or what fitted in the
+    context); a result too large for the context was parked on disk whole. This reads the
+    whole of it and writes it the way extracts are written: Excel with a Provenance sheet
+    naming the query, or CSV with its provenance beside it.
+    """
+    import asyncio
+    import time as _time
+    from fastapi.responses import FileResponse
+    from app.agent import lineage
+    from app.data import exports as export_lib
+    from app.data import rows as rows_lib
+    if format not in ("xlsx", "csv"):
+        raise HTTPException(400, "format is xlsx or csv.")
+    _conv, message, question = _message_pair(conv_id, message_id)
+    ref = f"#{number}"
+    blocks = message.get("blocks") or []
+    block = next((b for b in blocks if b.get("type") == "tool" and b.get("ref") == ref), None)
+    if block is None:
+        raise HTTPException(404, f"No step {ref} in this answer.")
+    try:
+        rows, label = rows_lib._rows_of_block(block, ref)
+    except rows_lib.SourceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    provenance = {"question": question, "generated_at": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                  "model": message.get("model") or "",
+                  "tables": [{"sheet": f"Step {number}", "source": label,
+                              "chain": lineage.for_ref(blocks, ref)}]}
+    name = f"{block.get('name', 'result')}-step{number}-{message_id[-6:]}"
+    try:
+        info = await asyncio.to_thread(export_lib.export, [(f"Step {number}", rows)], format,
+                                       c.workspace() / "exports", name, label, provenance, True)
+    except export_lib.ExportError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    c.audit.record("result.export", conversation=conv_id, message=message_id, ref=ref,
+                   rows=len(rows), format=format)
+    media = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if format == "xlsx"
+             else "text/csv")
+    return FileResponse(info["path"], filename=info["name"], media_type=media)
 
 
 @router.get("/conversations/{conv_id}/messages/{message_id}/pdf")

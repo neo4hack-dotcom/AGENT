@@ -283,23 +283,11 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
     def _evidence_for_figures(charts: dict[str, dict], tables: dict[str, tuple[list[dict], str]]) -> list[float]:
         """Every number the conversation's results hold — and the reader's own questions."""
         from app.data import figures as figures_lib
-        texts: list[str] = []
-        for scope in [ctx.blocks, *history()]:
-            for block in scope:
-                if block.get("type") != "tool" or not block.get("ok"):
-                    continue
-                text = str(block.get("text") or "")
-                texts.append(text)
-                # A large result is parked in the workspace with a handle left in its place;
-                # its numbers are evidence too.
-                for parked in list(dict.fromkeys(re.findall(r"\.results/[\w.\-]+", text)))[:6]:
-                    target = workspace / parked
-                    if target.is_file() and target.stat().st_size <= 2_000_000:
-                        texts.append(target.read_text(errors="ignore"))
+        conv = c.store.conversation(ctx.conversation_id) or {}
+        asked = [str(m.get("content") or "") for m in conv.get("messages") or [] if m.get("role") == "user"]
+        texts = figures_lib.evidence_texts([ctx.blocks, *history()], workspace, asked)
         texts += [json.dumps(chart.get("data") or [], default=str) for chart in charts.values()]
         texts += [json.dumps(rows, default=str) for rows, _ in tables.values()]
-        conv = c.store.conversation(ctx.conversation_id) or {}
-        texts += [str(m.get("content") or "") for m in conv.get("messages") or [] if m.get("role") == "user"]
         return figures_lib.evidence_numbers(texts)
 
     def _ungrounded_in_report(title: str, subtitle: str, sections: list[dict],

@@ -92,3 +92,30 @@ def ungrounded(text: str, evidence: list[float]) -> list[str]:
         if not _matches(value, decimals, evidence) and raw not in missing:
             missing.append(raw)
     return missing
+
+
+def evidence_texts(scopes: list[list[dict]], workspace=None, extra: list[str] | None = None) -> list[str]:
+    """The texts whose numbers count as evidence: every successful tool result in these
+    block lists (with a result parked on disk read whole), chart data, and `extra` — the
+    reader's own questions."""
+    import json as _json
+    import re as _re
+    texts: list[str] = list(extra or [])
+    for scope in scopes:
+        for block in scope:
+            if block.get("type") != "tool" or not block.get("ok"):
+                continue
+            text = str(block.get("text") or "")
+            texts.append(text)
+            chart = block.get("chart")
+            if isinstance(chart, dict) and chart.get("data"):
+                texts.append(_json.dumps(chart["data"], default=str))
+            if workspace is not None:
+                parked_paths = list(dict.fromkeys(_re.findall(r"\.results/[\w.\-]+", text)))[:6]
+                if block.get("offloaded"):
+                    parked_paths.insert(0, str(block["offloaded"]))
+                for parked in parked_paths:
+                    target = workspace / parked
+                    if target.is_file() and target.stat().st_size <= 2_000_000:
+                        texts.append(target.read_text(errors="ignore"))
+    return texts

@@ -92,6 +92,24 @@ def _provenance_sheet(book, provenance: dict) -> None:
         row[5].alignment = Alignment(wrap_text=True, vertical="top")
 
 
+def _decimals(rows: list[dict], column: str, floor: int = 0) -> str:
+    """The decimals a column needs, as a number-format suffix: none for whole numbers, as
+    many as the values carry (up to four) otherwise, at least `floor`."""
+    places = 0
+    for row in rows:
+        value = row.get(column)
+        if isinstance(value, float) and not isinstance(value, bool) and not value.is_integer():
+            text = f"{round(value, 6):.6f}".rstrip("0")
+            places = max(places, len(text.split(".")[1]) if "." in text else 0)
+    places = min(4, max(places, floor if places or floor else 0))
+    return "." + "0" * places if places else ""
+
+
+def _signed(fmt: str) -> str:
+    """Negatives in red with their minus sign — how a P&L column is read on a desk."""
+    return f"{fmt};[Red]-{fmt}"
+
+
 def write_xlsx(sheets: list[tuple[str, list[dict]]], path: Path, title: str = "",
                provenance: dict | None = None) -> None:
     from openpyxl import Workbook
@@ -153,11 +171,11 @@ def write_xlsx(sheets: list[tuple[str, list[dict]]], path: Path, title: str = ""
             elif info.get("kind") == "currency" and isinstance(sample, (int, float)):
                 symbol = {"EUR": ' "€"', "USD": ' "$"', "GBP": ' "£"', "CHF": ' "CHF"', "JPY": ' "¥"'}.get(
                     (info.get("unit") or "").upper(), "")
-                fmt = f"#,##0.00{symbol}"
-            elif isinstance(sample, float):
-                fmt = "#,##0.00"
-            elif isinstance(sample, int):
-                fmt = "#,##0"
+                fmt = _signed(f"#,##0{_decimals(rows, column, floor=2)}{symbol}")
+            elif isinstance(sample, (int, float)):
+                # From every value, not the first: [35, 41.5] formatted from 35 showed 41.5 bp
+                # as "42" — a display that rounds a spread is a wrong number on screen.
+                fmt = _signed(f"#,##0{_decimals(rows, column)}")
             elif isinstance(sample, str) and _ISO_DAY.match(sample):
                 fmt = "yyyy-mm-dd"
             if fmt:
@@ -174,7 +192,7 @@ def write_xlsx(sheets: list[tuple[str, list[dict]]], path: Path, title: str = ""
 
 
 def export(sheets: list[tuple[str, list[dict]]], fmt: str, folder: Path, filename: str,
-           title: str = "", provenance: dict | None = None) -> dict:
+           title: str = "", provenance: dict | None = None, overwrite: bool = False) -> dict:
     fmt = (fmt or "xlsx").lower().strip(".")
     if fmt not in ("csv", "xlsx", "json"):
         raise ExportError(f"Unknown format '{fmt}'. Use csv, xlsx or json.")
@@ -183,7 +201,11 @@ def export(sheets: list[tuple[str, list[dict]]], fmt: str, folder: Path, filenam
     if fmt != "xlsx" and len(sheets) > 1:
         raise ExportError(f"A {fmt.upper()} file holds one table. Use xlsx for several sheets, "
                           f"or export them one at a time.")
-    path = unique_path(folder, safe_name(filename or title or "export", fmt))
+    if overwrite:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / safe_name(filename or title or "export", fmt)
+    else:
+        path = unique_path(folder, safe_name(filename or title or "export", fmt))
     if fmt == "csv":
         write_csv(sheets[0][1], path)
     elif fmt == "json":

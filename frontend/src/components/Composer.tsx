@@ -72,6 +72,22 @@ export function Composer({
     return () => window.removeEventListener('agent:prefill', onPrefill);
   }, []);
 
+  // A step's "Ask about #N": its reference lands where the reader is typing, ready for
+  // "chart #5 by desk" — the cheapest way to point the agent at an exact result.
+  useEffect(() => {
+    const onInsert = (event: Event) => {
+      const piece = String((event as CustomEvent<string>).detail || '');
+      if (!piece || disabled) return;
+      setText((current) => (current && !/\s$/.test(current) ? `${current} ${piece}` : `${current}${piece}`));
+      requestAnimationFrame(() => {
+        const el = area.current;
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    };
+    window.addEventListener('agent:insert', onInsert);
+    return () => window.removeEventListener('agent:insert', onInsert);
+  }, [disabled]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // "/" focuses the input the way it does in a search-first product, but never while
