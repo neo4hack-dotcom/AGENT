@@ -18,8 +18,8 @@ nothing else. See [Air-gapped deployment](#air-gapped-deployment).
 
 ## Getting started
 
-Requires **Python 3.12+**, **Node 20+**, and **[Ollama](https://ollama.com)** with at least
-one model that can call tools.
+Requires **Python 3.12+**, **Ollama** with at least one model that can call tools, and
+**Node 20+** to build the interface (not to run it: production serves the built files).
 
 ```bash
 make install
@@ -63,7 +63,10 @@ different model (`qwen3.5:4b` and `gemma4:e4b` both see).
 | `chart` | a professional Vega-Lite chart, validated against the data, revisable in place |
 | `export_data` / `create_report` | an Excel/CSV/JSON extract, or a PDF report with charts and numbered sources |
 | `ask_user` | a question with options, when the request is ambiguous (which "Kerner"?) |
-| `source_info` | what a connected source holds: its description, model, metrics and caveats |
+| `source_info` | what a connected source holds: its description, model, metrics and caveats, and what its tools were seen returning |
+| `batch_call` | one read-only tool for many items at once — or for every row of an earlier result (`rows_from='#N'`) |
+| `profile_data` | a data-quality profile of any result: nulls, duplicates, robust outliers per instrument, weekend/holiday dates, values missing from reference data |
+| `note_source` | a convention or pitfall learned about a source, proposed for an administrator to confirm |
 | `read_file` / `write_file` / `list_files` | the workspace, and nothing else |
 | `remember` / `recall` | durable memory across conversations |
 | `plan` | the checklist you watch tick over |
@@ -73,14 +76,16 @@ Every connected **MCP** server adds its tools to the same index, namespaced by s
 (`filesystem__read_file`), and the built-in file tools are named `workspace_*` so it is
 never ambiguous which directory a call is about.
 
-**The library is offline by selection.** Every recipe runs as a process on your machine,
-needs no account and reaches nothing outside it: **Pandas Frames** (bundled with this
-repository), filesystem, SQLite, Postgres (to an internal database), knowledge-graph
-memory, sequential thinking and time. Packages whose job is the internet — fetch, browsers,
-git hosting, search — are refused by name when the deployment is air-gapped.
+**The library ships with the app.** Files (read-only, scoped to one directory), SQLite
+(read-only at the engine level, with a time limit and a row ceiling), Pandas Frames and
+time zones are servers in `mcp_servers/`, written against the Python standard library
+(pandas for the dataframes) and started on the app's own interpreter: nothing is fetched
+from npm or PyPI at connect time. Servers installed from the old `npx`/`uvx` recipes are
+moved onto them automatically; Diagnostics names any server that still fetches a package
+when it starts.
 
-**Pandas Frames** is the one server that ships here rather than being fetched: it runs on
-the interpreter already serving the API, so there is no launcher to install. It loads CSV,
+**Pandas Frames** runs on the interpreter already serving the API, so there is no launcher
+to install. It loads CSV,
 Excel and Parquet files into real dataframes and lets the agent query them — joins,
 group-bys, statistics — through an expression sandbox, inside a killable worker with memory
 and CPU ceilings, with every call written to an append-only audit log. Its docstring is
@@ -147,6 +152,18 @@ that refuses anything outside the private network and by a kernel sandbox that d
 them, and every action lands in a hash-chained log that cannot hide being edited.
 
 [`SECURITY.md`](SECURITY.md) is the whole model, including what it does not claim.
+
+### Traceability
+
+Every answer carries its lineage, derived from the run rather than from the model's account
+of itself: the evidence it cites and everything that evidence depended on — each step with
+its source, the exact SQL, code or arguments, the number of rows, the time, and a SHA-256
+fingerprint of the result, so a re-run can be compared. Under the answer, *based on …*
+opens the steps and the checks that ran (source routing, the Critic's verdict, SQL filter
+values verified against the source, flags raised on results); *Explain the method* writes
+the method in plain words from that chain; *Audit trail* downloads the whole of it as
+Markdown or JSON. Excel extracts carry a *Provenance* sheet, CSV and JSON a
+`.provenance.json` beside them, PDF reports a *Method and provenance* appendix.
 
 ### Honesty before completeness
 

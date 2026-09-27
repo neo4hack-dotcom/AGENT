@@ -193,6 +193,45 @@ export interface Message {
   /** What this answer rests on: outside sources read, manipulation attempts, compactions. */
   trust?: { sources: string[]; injections: { tool: string; patterns: string[] }[];
             compactions: number };
+  /** What the answer rests on, derived from the run: see backend agent/lineage.py. */
+  lineage?: Lineage;
+  /** What was verified along the way: routing, the final check, flags raised on results. */
+  checks?: { name: string; result: string; detail?: string }[];
+  /** The method in plain words, written on request from the lineage. */
+  method?: { text: string; model?: string; at?: number };
+}
+
+export interface LineageNode {
+  ref: string;
+  tool: string;
+  source: string;
+  kind: 'retrieval' | 'computation' | 'output' | 'exploration' | 'other';
+  ok: boolean;
+  at?: number | null;
+  ms?: number;
+  operation: string;
+  summary?: string;
+  fingerprint: string;
+  /** Hash of this step's entry in the tamper-evident audit log. */
+  audit?: string;
+  depends_on: string[];
+  rows?: number;
+  columns?: string[];
+  output?: string;
+  /** A possible input of a computation whose inputs could not be traced exactly. */
+  inferred?: boolean;
+  /** Inputs could not be traced; depends_on lists the retrievals that came before. */
+  inputs_inferred?: boolean;
+}
+
+export interface Lineage {
+  cited: string[];
+  implicit: boolean;
+  nodes: LineageNode[];
+  sources: string[];
+  exploration: { ref: string; tool: string; source: string; summary: string }[];
+  failed: { ref: string; tool: string; error: string }[];
+  calls: number;
 }
 
 export interface Conversation {
@@ -285,7 +324,7 @@ export interface McpServer {
   description: string;
   accent: string;
   category: string;
-  docs: string;
+  docs?: string;
   enabled: boolean;
   auto_approve: boolean;
   created_at: number;

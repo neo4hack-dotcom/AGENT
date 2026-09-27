@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AskRequest, Block, Message, PlanStep, Usage } from '../types';
 import { ChartView } from './Chart';
 import { Markdown } from './Markdown';
+import { Provenance } from './Provenance';
 import { AskCard, FileCard } from './Outputs';
 import { Badge, Button, Spinner, cls } from './ui';
 
@@ -505,8 +506,10 @@ function outputsOf(blocks: Block[]): Block[] {
 
 export function AssistantTurn({
   message, live, phase, draft, approval, onApprove, approving, ask, onAnswer, answering, notices, error,
+  conversationId,
 }: {
   message: Message;
+  conversationId?: string;
   live?: boolean;
   phase?: string;
   draft?: string;
@@ -558,6 +561,7 @@ export function AssistantTurn({
         </div>
       )}
 
+      {!live && conversationId && <Provenance message={message} conversationId={conversationId} />}
       {!live && message.trust && <TrustLine trust={message.trust} />}
       {!live && <TurnFooter message={message} />}
     </div>

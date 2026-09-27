@@ -294,8 +294,10 @@ function InstallDialog({
           </p>
         )}
         <div className="flex items-center justify-between gap-2 pt-1">
-          <a href={entry.docs} target="_blank" rel="noreferrer noopener"
-             className="text-2xs dimmer underline underline-offset-2 hover:text-zinc-600">Documentation</a>
+          {entry.docs ? (
+            <a href={entry.docs} target="_blank" rel="noreferrer noopener"
+               className="text-2xs dimmer underline underline-offset-2 hover:text-zinc-600">Documentation</a>
+          ) : <span className="text-2xs dimmer">Bundled — nothing to download</span>}
           <div className="flex gap-2">
             <Button variant="outline" onClick={onClose}>Cancel</Button>
             <Button busy={busy} onClick={() => void submit()} icon={PlugZap}>Connect</Button>
@@ -312,7 +314,7 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
   const toast = useToast();
   const [transport, setTransport] = useState<'stdio' | 'http'>('stdio');
   const [name, setName] = useState('');
-  const [command, setCommand] = useState('npx');
+  const [command, setCommand] = useState('');
   const [args, setArgs] = useState('');
   const [url, setUrl] = useState('');
   const [env, setEnv] = useState('');
@@ -359,9 +361,9 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
         <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My server" /></Field>
         {transport === 'stdio' ? (
           <>
-            <Field label="Command"><Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx" /></Field>
+            <Field label="Command" hint="An executable already installed here — nothing is downloaded when it starts."><Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="/opt/risk-mcp/bin/server or python3" /></Field>
             <Field label="Arguments" hint="Whitespace-separated; quote a path that contains spaces.">
-              <Input value={args} onChange={(e) => setArgs(e.target.value)} placeholder="-y my-mcp-server --flag value" />
+              <Input value={args} onChange={(e) => setArgs(e.target.value)} placeholder="/opt/risk-mcp/server.py --config /etc/risk.yaml" />
             </Field>
             <Field label="Network" hint="Offline servers run in a sandbox that allows this machine only. Choose internal for a server that queries a database or service elsewhere in your network.">
               <div className="flex gap-1.5">

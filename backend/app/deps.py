@@ -61,6 +61,11 @@ class Container:
         # one file is one thing to back up.
         self.skills = Skills(self.memory._db, self.store)
         self.mcp = McpRegistry(self.store, self.bus, self.settings)
+        # Servers installed from the old download-on-demand recipes start on the bundled
+        # ones instead: a private network cannot fetch npm or PyPI packages at connect time.
+        from app.mcp.catalog import migrate_to_bundled
+        if migrate_to_bundled(self.store.mcp_servers()):
+            self.store.touch()
         # What each source holds and how to read it — written once in Admin, read by
         # every run. See app/data/knowledge.py.
         from app.data.atlas import Atlas

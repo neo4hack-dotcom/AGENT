@@ -18,6 +18,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PYTHON = str(Path(sys.executable))
+SQLITE = str(HERE.parents[1] / "mcp_servers" / "sqlite_db" / "server.py")
 SERVERS = [
     ("market_data", "Market data", "market"),
     ("refdata", "Reference data", "refdata"),
@@ -78,15 +79,13 @@ def main() -> None:
         for name, db in (("Sales DB", "analytics.db"), ("CRM", "crm.db")):
             if name not in existing:
                 server = call(args.base, "POST", "/servers", {
-                    "name": name, "transport": "stdio", "command": "uvx", "network": "local",
-                    "args": ["--with", "mcp<1.10", "mcp-server-sqlite", "--db-path",
-                             f"/tmp/agent-testbed/data/{db}"], "connect": True})
+                    "name": name, "transport": "stdio", "command": PYTHON, "network": "local",
+                    "args": [SQLITE, "--db-path", f"/tmp/agent-testbed/data/{db}"], "connect": True})
                 print(f"{name}: {server.get('status')} · {server.get('tool_count')} tools")
     if "Trade store" not in existing:
         server = call(args.base, "POST", "/servers", {
-            "name": "Trade store", "transport": "stdio", "command": "uvx", "network": "local",
-            "args": ["--with", "mcp<1.10", "mcp-server-sqlite", "--db-path", f"{args.data}/trades.db"],
-            "connect": True})
+            "name": "Trade store", "transport": "stdio", "command": PYTHON, "network": "local",
+            "args": [SQLITE, "--db-path", f"{args.data}/trades.db"], "connect": True})
         print(f"Trade store: {server.get('status')} · {server.get('tool_count')} tools · {server.get('error') or ''}")
 
 

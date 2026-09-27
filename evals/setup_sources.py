@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import urllib.request
 from pathlib import Path
 
 import yaml
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 SOURCES = {
     "analytics_db": {"name": "Sales DB", "db": "analytics.db", "model": "sales"},
     "crm": {"name": "CRM", "db": "crm.db", "model": "crm"},
@@ -40,8 +42,8 @@ def ensure_servers(base: str, testbed: str) -> dict[str, dict]:
     for slug, spec in SOURCES.items():
         if slug not in servers:
             call(base, "POST", "/servers", {
-                "name": spec["name"], "slug": slug, "transport": "stdio", "command": "uvx",
-                "args": ["--with", "mcp<1.10", "mcp-server-sqlite", "--db-path",
+                "name": spec["name"], "slug": slug, "transport": "stdio", "command": sys.executable,
+                "args": [str(ROOT / "mcp_servers" / "sqlite_db" / "server.py"), "--db-path",
                          f"{testbed}/data/{spec['db']}"], "enabled": True})
     return {s["slug"]: s for s in call(base, "GET", "/servers")}
 

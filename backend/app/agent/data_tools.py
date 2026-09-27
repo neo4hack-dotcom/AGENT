@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import time
 import re
 import uuid
 from pathlib import Path
@@ -91,6 +92,11 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 if m.get("role") == "assistant" and m.get("id") != ctx.message_id]
 
     def resolve(source: Any) -> tuple[list[dict], str]:
+        ref = str(source).strip() if isinstance(source, str) else ""
+        reason = getattr(ctx, "flagged_refs", {}).get(ref)
+        if reason:
+            raise rows_lib.SourceError(f"{ref} was flagged as wrong when it came back: {reason} Use the "
+                                       f"result of the corrected query instead.")
         return rows_lib.resolve(source, blocks=ctx.blocks, history=history(), workspace=workspace,
                                 charts=store, conversation_id=ctx.conversation_id)
 
@@ -240,6 +246,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 final_title = (reviewed.get("title") or "").strip()[:140] or title
                 final_subtitle = subtitle or (reviewed.get("subtitle") or "").strip()[:160]
             full = chart_lib.assemble(spec, rows, final_title, final_subtitle, fields, locale)
+            chart_lib.label_codes(full, rows, getattr(ctx, "code_names", {}) or {})
             chart_lib.validate_fields(full, columns)
             await chart_lib.check_renders(full, locale)
         except chart_lib.ChartError as exc:
@@ -307,9 +314,19 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 resolved.append((name, rows))
         except rows_lib.SourceError as exc:
             return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
+        # Where every exported table came from, down to the query — written into the file
+        # itself, so the extract still explains itself once it has left this app.
+        from app.agent import lineage as lineage_lib
+        everything = [*[b for scope in reversed(history()) for b in scope], *ctx.blocks]
+        provenance = {"question": question(), "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                      "model": getattr(c.llm, "model", ""),
+                      "tables": [{"sheet": name, "source": str(ref),
+                                  "chain": lineage_lib.for_ref(everything, str(ref))
+                                  if isinstance(ref, str) and (ref.startswith("#") or ref.startswith("chart:")) else []}
+                                 for name, ref in wanted]}
         try:
             info = await asyncio.to_thread(export_lib.export, resolved, format,
-                                           workspace / "exports", filename, title)
+                                           workspace / "exports", filename, title, provenance)
         except export_lib.ExportError as exc:
             return {"ok": False, "error": str(exc)}
         info["path"] = relative(info["path"])
@@ -319,6 +336,62 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 "text": (f"Saved {info['name']} ({detail}, {info['bytes']:,} bytes). A download "
                          f"card is shown under your answer; mention the file in one line."),
                 "file": info}
+
+    # ------------------------------------------------------------ profile_data
+    async def h_profile(source: Any = None, reference: Any = None, holidays: Any = None,
+                        key: str = "", by: str = "", **_: Any) -> dict:
+        from app.data import profiling
+        try:
+            rows, label = resolve(_as_obj(source))
+        except rows_lib.SourceError as exc:
+            return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
+        references: dict[str, list] = {}
+        reference = _as_obj(reference)
+        if isinstance(reference, dict):
+            for column, target in reference.items():
+                ref, _, ref_column = str(target).partition(":") if not str(target).startswith("chart:") else (str(target), "", "")
+                try:
+                    ref_rows, _ = resolve(ref)
+                except rows_lib.SourceError as exc:
+                    return {"ok": False, "error": f"reference for {column}: {exc}"}
+                pick = ref_column or (column if ref_rows and column in ref_rows[0] else
+                                      next(iter(ref_rows[0]), "") if ref_rows else "")
+                references[column] = [r.get(pick) for r in ref_rows if r.get(pick) is not None]
+        holiday_set: set[str] = set()
+        holidays = _as_obj(holidays)
+        if isinstance(holidays, list):
+            holiday_set = {str(h)[:10] for h in holidays}
+        elif isinstance(holidays, str) and holidays.strip():
+            try:
+                found, _ = resolve(holidays)
+                for row in found:
+                    holiday_set.update(str(v)[:10] for v in row.values() if re.match(r"^\d{4}-\d{2}-\d{2}", str(v)))
+            except rows_lib.SourceError:
+                value = _json_of(holidays)
+                if isinstance(value, dict):
+                    for item in value.values():
+                        if isinstance(item, list):
+                            holiday_set.update(str(v)[:10] for v in item if re.match(r"^\d{4}-\d{2}-\d{2}", str(v)))
+        text = await asyncio.to_thread(profiling.profile, rows, key=key, by=by, reference=references,
+                                       holidays=holiday_set or None, label=label)
+        return {"ok": True, "summary": f"profiled {len(rows):,} rows from {label}", "text": text}
+
+    tools["profile_data"] = builtin.ToolSpec(
+        "profile_data",
+        "Profile the rows of an earlier result for data quality and shape: nulls, distinct "
+        "values, duplicates and repeated keys, range of every number and date, robust outliers "
+        "(overall and within each instrument or group), dates on weekends or on given holidays, "
+        "and values missing from reference data. The first step of any data-quality review, "
+        "anomaly search or unfamiliar dataset.",
+        {"type": "object",
+         "properties": {
+             "source": {"type": "string", "description": "'#N' — the rows to profile."},
+             "reference": {"type": "object", "description": "Column → '#M' (or '#M:column') whose rows list the valid values, e.g. {\"counterparty_id\": \"#7\"}."},
+             "holidays": {"description": "'#M' or a list of YYYY-MM-DD dates to flag."},
+             "key": {"type": "string", "description": "The id column (guessed when omitted)."},
+             "by": {"type": "string", "description": "Group column for outliers (instrument-like column guessed when omitted)."}},
+         "required": ["source"]},
+        h_profile, group="Data", capabilities=(trust.FS_READ,))
 
     # ---------------------------------------------------------- create_report
     def source_notes() -> dict[int, str]:
@@ -377,11 +450,18 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         notes = source_notes()
         path = export_lib.unique_path(workspace / "reports",
                                       export_lib.safe_name(filename or title, "pdf"))
+        from app.agent import lineage as lineage_lib
+        everything = [*[b for scope in reversed(history()) for b in scope], *ctx.blocks]
+        provenance: list[dict] = []
+        for number in sorted(used):
+            for node in lineage_lib.for_ref(everything, f"#{number}"):
+                if node["ref"] not in {n["ref"] for n in provenance}:
+                    provenance.append(node)
         try:
             info = await asyncio.to_thread(
                 report_lib.build, path, title=title.strip(), subtitle=subtitle.strip(),
                 sections=clean, sources=notes, used=used, charts=charts_needed, tables=tables,
-                generated=dt.datetime.now())
+                generated=dt.datetime.now(), provenance=provenance)
         except Exception as exc:  # noqa: BLE001 - a layout failure must reach the model, not kill the run
             return {"ok": False, "error": f"The PDF could not be built: {type(exc).__name__}: {exc}"}
         info["path"] = relative(info["path"])

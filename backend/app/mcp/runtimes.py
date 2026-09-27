@@ -1,10 +1,9 @@
-"""Which launchers the catalog needs, and whether this machine actually has them.
+"""Launchers a *custom* server may need, and whether this machine has them.
 
-Most stdio MCP servers are not installed at all: they are fetched on demand by a
-launcher — `npx` for the npm ones, `uvx` for the Python ones. If the launcher is missing,
-every server that depends on it fails at connect time with a message about a command
-nobody deliberately installed. Detecting it up front turns that into one sentence on the
-card, before the click.
+Nothing the app ships needs one: every catalog server runs on the app's own Python. A
+custom stdio server started through `npx` or `uvx` does — and in a private network those
+launchers can only start packages already provisioned from an internal mirror or cache.
+Only launchers some configured server actually uses are reported.
 """
 
 from __future__ import annotations
@@ -16,20 +15,17 @@ import sys
 RUNTIMES: dict[str, dict[str, str]] = {
     "npx": {
         "label": "Node.js",
-        "why": "runs the npm-published MCP servers",
-        # Homebrew is the path of least resistance on macOS; the site covers everyone else.
-        "install_macos": "brew install node",
-        "install_other": "Install Node.js 18 or newer",
-        "url": "https://nodejs.org",
+        "why": "starts npm-packaged MCP servers",
+        "install_macos": "install Node.js from your internal software catalogue",
+        "install_other": "install Node.js from your internal software catalogue",
+        "url": "",
     },
     "uvx": {
         "label": "uv",
-        # The trap worth naming explicitly: the missing command is uvx, the thing you
-        # install is uv. Telling someone to "install uvx" sends them nowhere.
-        "why": "runs the Python-published MCP servers (uvx ships with uv)",
-        "install_macos": "brew install uv",
-        "install_other": "curl -LsSf https://astral.sh/uv/install.sh | sh",
-        "url": "https://docs.astral.sh/uv/",
+        "why": "starts Python-packaged MCP servers (uvx ships with uv)",
+        "install_macos": "install uv from your internal software catalogue",
+        "install_other": "install uv from your internal software catalogue",
+        "url": "",
     },
 }
 
@@ -42,7 +38,7 @@ def install_hint(command: str) -> str:
     return runtime["install_macos"] if sys.platform == "darwin" else runtime["install_other"]
 
 
-def probe() -> dict[str, dict]:
+def probe(used: set[str] | None = None) -> dict[str, dict]:
     """Resolve each launcher against the PATH a spawned server will actually inherit.
 
     Looking it up any other way would report on the wrong environment: a launcher present
@@ -52,6 +48,8 @@ def probe() -> dict[str, dict]:
     path = os.environ.get("PATH", "")
     out: dict[str, dict] = {}
     for name, meta in RUNTIMES.items():
+        if used is not None and name not in used:
+            continue
         resolved = shutil.which(name, path=path)
         out[name] = {
             "name": name,

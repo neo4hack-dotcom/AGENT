@@ -19,6 +19,8 @@ from typing import Any
 import httpx
 
 from app.errors import McpError
+
+STDIO_LINE_LIMIT = 64 * 1024 * 1024
 from app.mcp.runtimes import install_hint
 
 CLIENT_INFO = {"name": "lumen", "title": "Agent Super-Agent", "version": "1.0.0"}
@@ -77,6 +79,10 @@ class StdioTransport(Transport):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env, cwd=self.cwd,
+                # One JSON-RPC message is one line, and a query result can be megabytes. The
+                # default 64 KiB line limit killed the reader on the first large result and
+                # left the call waiting for its timeout.
+                limit=STDIO_LINE_LIMIT,
             )
         except FileNotFoundError as exc:
             # "Install it" is a dead end when the missing command is a launcher nobody
@@ -92,7 +98,18 @@ class StdioTransport(Transport):
     async def _read_stdout(self) -> None:
         assert self._proc and self._proc.stdout
         while True:
-            line = await self._proc.stdout.readline()
+            try:
+                line = await self._proc.stdout.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                # A message longer than even the raised limit: fail the call that is waiting
+                # for it, loudly, and keep reading — never leave it hanging.
+                for fut in self._pending.values():
+                    if not fut.done():
+                        fut.set_exception(McpError(
+                            f"The server sent a reply larger than {STDIO_LINE_LIMIT // 1_000_000} MB. "
+                            f"Ask for less: aggregate, filter or page the query."))
+                self._pending.clear()
+                continue
             if not line:
                 break
             try:

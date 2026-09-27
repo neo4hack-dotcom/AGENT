@@ -344,6 +344,82 @@ async def export_conversation(conv_id: str):
     return PlainTextResponse("\n".join(lines), media_type="text/markdown")
 
 
+def _message_pair(conv_id: str, message_id: str) -> tuple[dict, dict, str]:
+    conv = c.store.conversation(conv_id)
+    if conv is None:
+        raise HTTPException(404, "No such conversation.")
+    messages = conv.get("messages") or []
+    index = next((i for i, m in enumerate(messages) if m["id"] == message_id), None)
+    if index is None or messages[index]["role"] != "assistant":
+        raise HTTPException(404, "No such answer.")
+    question = next((m.get("content", "") for m in reversed(messages[:index]) if m["role"] == "user"), "")
+    return conv, messages[index], question
+
+
+def _answer_text(message: dict) -> str:
+    return "\n".join(b.get("text") or "" for b in message.get("blocks") or []
+                     if b["type"] == "text" and not b.get("superseded"))
+
+
+def _lineage_of(message: dict) -> dict:
+    from app.agent import lineage
+    return message.get("lineage") or lineage.build(message.get("blocks") or [], _answer_text(message))
+
+
+@router.get("/conversations/{conv_id}/messages/{message_id}/trail")
+async def audit_trail(conv_id: str, message_id: str, format: str = "md"):
+    """One answer's audit trail: question, answer, every query behind it, fingerprints, checks."""
+    from fastapi.responses import JSONResponse, PlainTextResponse
+    from app.agent import lineage
+    _conv, message, question = _message_pair(conv_id, message_id)
+    chain = _lineage_of(message)
+    c.audit.record("answer.trail", conversation=conv_id, message=message_id, format=format)
+    name = f"audit-trail-{message_id}"
+    if format == "json":
+        body = {"question": question, "answer": _answer_text(message), "model": message.get("model"),
+                "created_at": message.get("created_at"), "status": message.get("status"),
+                "usage": message.get("usage"), "lineage": chain, "checks": message.get("checks") or [],
+                "method": message.get("method") or {}, "trust": message.get("trust") or {}}
+        return JSONResponse(body, headers={"Content-Disposition": f'attachment; filename="{name}.json"'})
+    text = lineage.markdown(question, _answer_text(message), message, chain)
+    return PlainTextResponse(text, media_type="text/markdown",
+                             headers={"Content-Disposition": f'attachment; filename="{name}.md"'})
+
+
+@router.post("/conversations/{conv_id}/messages/{message_id}/explain")
+async def explain_answer(conv_id: str, message_id: str) -> dict:
+    """How this answer was produced, in plain words — written once, then kept with it.
+
+    Built from the lineage (the exact queries and computations), never from the answer's
+    own account of itself: an explanation that restates the answer's claims explains
+    nothing. The fast model writes it; the facts it may use are the ones listed.
+    """
+    from app.agent import prompts
+    _conv, message, question = _message_pair(conv_id, message_id)
+    if (message.get("method") or {}).get("text"):
+        return message["method"]
+    chain = _lineage_of(message)
+    facts = []
+    for n in chain.get("nodes") or []:
+        shape = f", {n['rows']} rows" if n.get("rows") is not None else ""
+        uses = f", uses {', '.join(n['depends_on'])}" if n.get("depends_on") else ""
+        facts.append(f"{n['ref']} [{n['kind']}] {n['tool']} on {n['source'] or 'app'}{shape}{uses}:\n{n['operation'][:900]}")
+    checks = "\n".join(f"- {x.get('name')}: {x.get('result')} {x.get('detail') or ''}" for x in message.get("checks") or [])
+    prompt = (f"Question: {question[:600]}\n\nAnswer given:\n{_answer_text(message)[:2500]}\n\n"
+              f"Evidence chain (exact operations):\n" + "\n\n".join(facts)[:9000]
+              + (f"\n\nChecks:\n{checks}" if checks else ""))
+    try:
+        result = await c.fast_llm.chat([{"role": "user", "content": prompt}], system=prompts.EXPLAIN_SYSTEM,
+                                       temperature=0.1, think=False)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"The model could not write the explanation: {exc}") from exc
+    method = {"text": (result.content or "").strip(), "model": getattr(c.fast_llm, "model", ""), "at": now()}
+    message["method"] = method
+    c.store.touch()
+    await c.store.save()
+    return method
+
+
 class RetryBody(BaseModel):
     message_id: str
     text: str = ""

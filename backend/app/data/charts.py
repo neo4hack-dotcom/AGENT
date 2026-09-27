@@ -522,6 +522,45 @@ def assemble(spec: dict, rows: list[dict], title: str = "", subtitle: str = "",
     return full
 
 
+def label_codes(spec: dict, rows: list[dict], names: dict[str, str]) -> None:
+    """Axes and legends show an instrument's name where the rows carry only its code.
+
+    The data keeps the ISIN — it is the key — and the labels read the way the reader knows
+    the instrument. Only codes whose name a result gave are relabelled.
+    """
+    if not names or not rows:
+        return
+    import json as _json
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        encoding = node.get("encoding")
+        if isinstance(encoding, dict):
+            for channel in ("x", "y", "color", "column", "row"):
+                d = encoding.get(channel)
+                if not isinstance(d, dict) or d.get("type") not in ("nominal", "ordinal") or not d.get("field"):
+                    continue
+                values = {str(r.get(d["field"])) for r in rows if r.get(d["field"]) is not None}
+                mapping = {v: names[v] for v in values if v in names}
+                if not mapping or len(mapping) < 0.8 * len(values):
+                    continue
+                expr = f"({_json.dumps(mapping, ensure_ascii=False)})[datum.value] || datum.value"
+                target = "legend" if channel == "color" else ("header" if channel in ("column", "row") else "axis")
+                block = d.get(target)
+                if block is None or isinstance(block, dict):
+                    block = block or {}
+                    block.setdefault("labelExpr", expr)
+                    d[target] = block
+        for key in ("layer", "hconcat", "vconcat", "concat"):
+            for child in node.get(key) or []:
+                walk(child)
+        if isinstance(node.get("spec"), dict):
+            walk(node["spec"])
+
+    walk(spec)
+
+
 def fields_used(spec: dict) -> list[str]:
     """The columns the chart encodes, in the order a reader meets them."""
     used: set[str] = set()

@@ -164,6 +164,11 @@ export const api = {
     request<SourceDetail>(`/admin/sources/${id}/draft`, { method: 'POST' }),
   setSourceNote: (id: string, noteId: string, status: 'confirmed' | 'discarded') =>
     request<SourceSummary>(`/admin/sources/${id}/notes/${noteId}`, { method: 'POST', body: body({ status }) }),
+  explainAnswer: (conversationId: string, messageId: string) =>
+    request<{ text: string; model?: string; at?: number }>(
+      `/conversations/${conversationId}/messages/${messageId}/explain`, { method: 'POST' }),
+  trailUrl: (conversationId: string, messageId: string, format: 'md' | 'json' = 'md') =>
+    `/api/conversations/${conversationId}/messages/${messageId}/trail?format=${format}`,
   forgetObservations: (id: string) =>
     request<SourceDetail>(`/admin/sources/${id}/observations`, { method: 'DELETE' }),
 

@@ -340,7 +340,8 @@ class _NumberedCanvas(pdfcanvas.Canvas):
 
 def build(path: Path, *, title: str, subtitle: str = "", sections: list[dict],
           sources: dict[int, str], charts: dict[str, dict], tables: dict[str, tuple[list[dict], str]],
-          used: set[int] | None = None, generated: dt.datetime | None = None) -> dict:
+          used: set[int] | None = None, generated: dt.datetime | None = None,
+          provenance: list[dict] | None = None) -> dict:
     """Write the PDF. `sections` are already resolved: charts and tables are looked up by
     the keys the caller put in them, so a missing one was refused before this is called."""
     styles = _styles()
@@ -379,6 +380,20 @@ def build(path: Path, *, title: str, subtitle: str = "", sections: list[dict],
             text = sources.get(number)
             if text:
                 story.append(Paragraph(f"<b>{number}.</b> " + _inline(text, []), styles["source"]))
+
+    if provenance:
+        # How each figure was obtained, down to the query: the appendix an auditor reads.
+        from xml.sax.saxutils import escape
+        story.append(Paragraph("Method and provenance", styles["h2"]))
+        for node in provenance:
+            head = (f"<b>{escape(node.get('ref', ''))}</b> · {escape(node.get('source') or 'app')} · "
+                    f"{escape(node.get('tool', ''))}"
+                    + (f" · {node['rows']} rows" if node.get("rows") is not None else "")
+                    + (f" · uses {escape(', '.join(node['depends_on']))}" if node.get("depends_on") else "")
+                    + f" · sha256 {escape(node.get('fingerprint', ''))}")
+            story.append(Paragraph(head, styles["source"]))
+            operation = escape(str(node.get("operation") or "")[:900]).replace("\n", "<br/>")
+            story.append(Paragraph(f"<font face='Courier' size='7'>{operation}</font>", styles["source"]))
 
     doc = SimpleDocTemplate(str(path), pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
                             topMargin=16 * mm, bottomMargin=20 * mm, title=_printable(title),

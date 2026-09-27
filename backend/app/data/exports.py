@@ -61,7 +61,39 @@ def write_json(rows: list[dict], path: Path) -> None:
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
 
 
-def write_xlsx(sheets: list[tuple[str, list[dict]]], path: Path, title: str = "") -> None:
+def _provenance_sheet(book, provenance: dict) -> None:
+    """A last sheet that says where every other sheet came from."""
+    from openpyxl.styles import Alignment, Font
+    sheet = book.create_sheet("Provenance")
+    bold = Font(bold=True)
+    rows = [("Question", provenance.get("question") or ""),
+            ("Generated at", provenance.get("generated_at") or ""),
+            ("Model", provenance.get("model") or ""), ("", "")]
+    for key, value in rows:
+        sheet.append([key, value])
+        sheet.cell(sheet.max_row, 1).font = bold
+    sheet.append(["Sheet", "Step", "Ref", "Source", "Tool", "Operation (query, code or arguments)",
+                  "Rows", "Uses", "Retrieved at", "Result fingerprint (sha256)", "Audit log entry"])
+    for cell in sheet[sheet.max_row]:
+        cell.font = bold
+    for table in provenance.get("tables") or []:
+        chain = table.get("chain") or []
+        if not chain:
+            sheet.append([table.get("sheet"), 1, "", "", "", f"source: {table.get('source')}"])
+        for step, node in enumerate(chain, start=1):
+            at = node.get("at")
+            sheet.append([table.get("sheet"), step, node.get("ref"), node.get("source"), node.get("tool"),
+                          node.get("operation"), node.get("rows"), ", ".join(node.get("depends_on") or []),
+                          dt.datetime.fromtimestamp(at).strftime("%Y-%m-%d %H:%M:%S") if at else "",
+                          node.get("fingerprint"), node.get("audit")])
+    for letter, width in zip("ABCDEFGHIJK", (14, 6, 7, 18, 26, 90, 8, 12, 20, 20, 20)):
+        sheet.column_dimensions[letter].width = width
+    for row in sheet.iter_rows(min_row=5):
+        row[5].alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def write_xlsx(sheets: list[tuple[str, list[dict]]], path: Path, title: str = "",
+               provenance: dict | None = None) -> None:
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -134,13 +166,15 @@ def write_xlsx(sheets: list[tuple[str, list[dict]]], path: Path, title: str = ""
         sheet.freeze_panes = "A2"
         if rows:
             sheet.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(rows) + 1}"
+    if provenance:
+        _provenance_sheet(book, provenance)
     book.properties.title = title or "AGENT export"
     book.properties.creator = "AGENT"
     book.save(path)
 
 
 def export(sheets: list[tuple[str, list[dict]]], fmt: str, folder: Path, filename: str,
-           title: str = "") -> dict:
+           title: str = "", provenance: dict | None = None) -> dict:
     fmt = (fmt or "xlsx").lower().strip(".")
     if fmt not in ("csv", "xlsx", "json"):
         raise ExportError(f"Unknown format '{fmt}'. Use csv, xlsx or json.")
@@ -155,7 +189,12 @@ def export(sheets: list[tuple[str, list[dict]]], fmt: str, folder: Path, filenam
     elif fmt == "json":
         write_json(sheets[0][1], path)
     else:
-        write_xlsx(sheets, path, title)
+        write_xlsx(sheets, path, title, provenance)
+    if provenance and fmt in ("csv", "json"):
+        # A CSV or JSON file has no room for a second table: its provenance travels beside it.
+        import json as _json
+        path.with_name(path.stem + ".provenance.json").write_text(
+            _json.dumps(provenance, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     return {"path": str(path), "name": path.name, "format": fmt, "bytes": path.stat().st_size,
             "rows": sum(len(rows) for _, rows in sheets),
             "sheets": [name for name, _ in sheets] if fmt == "xlsx" else []}

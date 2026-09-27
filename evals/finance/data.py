@@ -132,8 +132,20 @@ def build() -> dict:
     # Equities: a few with a clear trend, so "lost more than 10%" has an answer.
     drifts = {"GLE FP": -0.0012, "TSLA US": -0.0016, "CAP FP": -0.0011, "ASML NA": 0.0012,
               "SAP GY": 0.0004, "MC FP": -0.0003}
+    # Returns share a sector factor, so "which two move together" has an answer: the two
+    # French banks load heavily on one, the European tech names on another. Tesla is left
+    # on its own and noisier, so the volatility ranking has a clear leader.
+    factor = {name: [rng.gauss(0, 0.012) for _ in days] for name in ("banks", "tech")}
+    loads = {"BNP FP": ("banks", 0.95, 0.004), "GLE FP": ("banks", 1.05, 0.005),
+             "SAP GY": ("tech", 0.7, 0.008), "ASML NA": ("tech", 0.9, 0.009),
+             "CAP FP": ("tech", 0.6, 0.010), "TSLA US": (None, 0.0, 0.032)}
     for isin, ticker, _n, _c, _ccy, _s, start in EQUITIES:
-        series = walk(rng, start, len(days), 0.014, drifts.get(ticker, 0.0002))
+        sector, beta, idio = loads.get(ticker, (None, 0.0, 0.013))
+        value, series = start, []
+        for i in range(len(days)):
+            common = beta * factor[sector][i] if sector else 0.0
+            value *= 1 + drifts.get(ticker, 0.0002) + common + rng.gauss(0, idio)
+            series.append(value)
         prices[isin] = {d.isoformat(): round(p, 2) for d, p in zip(days, series)}
     fx = {}
     for pair, start in FX_START.items():
@@ -149,8 +161,21 @@ def build() -> dict:
     return {"days": [d.isoformat() for d in days], "prices": prices, "fx": fx, "curves": curves}
 
 
-def build_trades(rng: random.Random) -> list[dict]:
-    """Versioned trades. The latest version of a trade is the trade; CANCELLED ones are not."""
+# Operational habits: how often each trader's tickets end up amended or cancelled.
+TRADER_ERROR_RATE = {"A. Moreau": 0.10, "L. Schmidt": 0.12, "P. Rossi": 0.42, "K. Nguyen": 0.08,
+                     "D. Walsh": 0.14, "E. Laurent": 0.11}
+OFF_MARKET = ["T00037", "T00121", "T00188", "T00256", "T00333"]   # executed far from the close
+
+
+def build_trades(rng: random.Random, prices: dict | None = None) -> list[dict]:
+    """Versioned trades. The latest version of a trade is the trade; CANCELLED ones are not.
+
+    Each trade carries its execution price (bonds in % of par, equities per share), close to
+    that day's close — except five executed several percent away from it, the pattern a
+    best-execution or rogue-trading review looks for. Three data-quality defects are planted
+    too: a trade dated on a TARGET holiday, a counterparty id missing from reference data,
+    and a quantity a thousand times its peers.
+    """
     days = business_days()
     trades: list[dict] = []
     books_for = {"bond": ["RAT-EUR", "RAT-USD", "CRD-IG", "CRD-HY"],
@@ -184,17 +209,49 @@ def build_trades(rng: random.Random) -> list[dict]:
         day = rng.choice(days)
         side = "BUY" if rng.random() < 0.68 else "SELL"
         counterparty = rng.choice(COUNTERPARTIES)[0]
-        trade = {"trade_id": f"T{n:05d}", "version": 1, "trade_date": day.isoformat(),
+        trader = rng.choice(traders)
+        trade_id = f"T{n:05d}"
+        close = (prices or {}).get(isin, {}).get(day.isoformat())
+        price = None
+        if close is not None:
+            if trade_id in OFF_MARKET:
+                price = close * (1 + rng.choice([-1, 1]) * rng.uniform(0.045, 0.11))
+            else:
+                price = close * (1 + rng.gauss(0, 0.001 if kind == "bond" else 0.002))
+            price = round(price, 3 if kind == "bond" else 2)
+        trade = {"trade_id": trade_id, "version": 1, "trade_date": day.isoformat(),
                  "book_id": book, "instrument_id": isin, "counterparty_id": counterparty,
-                 "side": side, "quantity": quantity, "currency": ccy, "status": "NEW",
-                 "trader": rng.choice(traders)}
+                 "side": side, "quantity": quantity, "price": price, "currency": ccy,
+                 "status": "NEW", "trader": trader}
         trades.append(trade)
         roll = rng.random()
-        if roll < 0.10:        # amended: the quantity changed, version 2 is the trade
+        rate = TRADER_ERROR_RATE[trader]
+        if trade_id in OFF_MARKET:
+            continue           # the anomalies stay live, or there is nothing to find
+        if roll < rate * 0.6:  # amended: the quantity changed, version 2 is the trade
             trades.append({**trade, "version": 2, "status": "AMENDED",
                            "quantity": round(trade["quantity"] * rng.choice([0.5, 1.5, 2]), 2)})
-        elif roll < 0.16:      # cancelled: version 2 says it never happened
+        elif roll < rate:      # cancelled: version 2 says it never happened
             trades.append({**trade, "version": 2, "status": "CANCELLED"})
+    # Planted data-quality defects.
+    lvmh = next(e for e in EQUITIES if e[1] == "MC FP")[0]
+    total = next(e for e in EQUITIES if e[1] == "TTE FP")[0]
+    bund = "DE0001102580"
+    planted = [
+        {"trade_id": "T09001", "trade_date": "2026-05-01", "book_id": "EQC-EU", "instrument_id": total,
+         "counterparty_id": "CP005", "side": "BUY", "quantity": 2500, "price": 57.4, "currency": "EUR",
+         "trader": "K. Nguyen"},                                           # booked on a holiday
+        {"trade_id": "T09002", "trade_date": "2026-03-12", "book_id": "RAT-EUR", "instrument_id": bund,
+         "counterparty_id": "CP099", "side": "BUY", "quantity": 5_000_000,
+         "price": (prices or {}).get(bund, {}).get("2026-03-12"), "currency": "EUR",
+         "trader": "A. Moreau"},                                           # unknown counterparty
+        {"trade_id": "T09003", "trade_date": "2026-02-18", "book_id": "EQC-EU", "instrument_id": lvmh,
+         "counterparty_id": "CP003", "side": "BUY", "quantity": 2_500_000,
+         "price": (prices or {}).get(lvmh, {}).get("2026-02-18"), "currency": "EUR",
+         "trader": "D. Walsh"},                                            # fat finger
+    ]
+    for trade in planted:
+        trades.append({"version": 1, "status": "NEW", **trade})
     return trades
 
 
@@ -244,7 +301,7 @@ def risk(world: dict, positions: list[dict]) -> dict:
 def write(out: Path) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     world = build()
-    trades = build_trades(random.Random(SEED + 2))
+    trades = build_trades(random.Random(SEED + 2), world["prices"])
     positions = positions_from(trades)
     world["risk"] = risk(world, positions)
     world["refdata"] = {
@@ -267,7 +324,7 @@ def write(out: Path) -> dict:
         CREATE TABLE books (book_id TEXT PRIMARY KEY, desk TEXT REFERENCES desks(desk), currency TEXT);
         CREATE TABLE trades (trade_id TEXT, version INTEGER, trade_date TEXT, book_id TEXT,
                              instrument_id TEXT, counterparty_id TEXT, side TEXT, quantity REAL,
-                             currency TEXT, status TEXT, trader TEXT,
+                             price REAL, currency TEXT, status TEXT, trader TEXT,
                              PRIMARY KEY (trade_id, version));
         CREATE TABLE positions_eod (asof_date TEXT, book_id TEXT, instrument_id TEXT, quantity REAL,
                                     PRIMARY KEY (asof_date, book_id, instrument_id));
@@ -275,8 +332,8 @@ def write(out: Path) -> dict:
     con.executemany("INSERT INTO desks VALUES (:desk, :head, :region)", DESKS)
     con.executemany("INSERT INTO books VALUES (:book_id, :desk, :currency)", BOOKS)
     con.executemany("INSERT INTO trades VALUES (:trade_id, :version, :trade_date, :book_id, "
-                    ":instrument_id, :counterparty_id, :side, :quantity, :currency, :status, :trader)",
-                    trades)
+                    ":instrument_id, :counterparty_id, :side, :quantity, :price, :currency, :status, "
+                    ":trader)", trades)
     con.executemany("INSERT INTO positions_eod VALUES (:asof_date, :book_id, :instrument_id, :quantity)",
                     positions)
     con.commit()

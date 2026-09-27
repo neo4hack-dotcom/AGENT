@@ -152,6 +152,24 @@ trading one — and proposes a route when several sources must be crossed. Only 
 sources' tools are offered in full; `find_tools('<source>')` brings in any other. The
 routing, its reason and the route are in the folded work of every answer.
 
+## Mining, not only querying
+
+Data-quality reviews, anomaly searches, rankings and segmentations follow the same pattern,
+and the agent has tools for each step:
+
+- **Profile first.** `profile_data('#N', reference={column: '#M'}, holidays=…)` measures
+  nulls, duplicates, repeated keys, ranges, robust outliers (median and MAD, overall and
+  within each instrument), dates on weekends or holidays and values absent from reference
+  data. The model then judges what it reports instead of improvising the measurements.
+- **Enrich every row.** `batch_call(tool, rows_from='#N', arguments={param: column})` looks
+  something up for each distinct row — the close on each trade's date — without copying a
+  single value into the call.
+- **Compute in code.** `run_python` with `rows('#N')` for correlation, volatility,
+  clustering — pandas and numpy, in the sandbox.
+- **Filters are checked.** Each quoted value a SQL query filters on is checked against the
+  source (case included); a status filter placed before the latest-version selection is
+  flagged.
+
 ## Model reference
 
 ```yaml

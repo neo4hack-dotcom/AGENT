@@ -21,13 +21,22 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import run as harness  # noqa: E402
 from run import check, has_number  # noqa: E402
-from truth import compute  # noqa: E402
+from truth import compute, compute_mining  # noqa: E402
 
 TRUTH = compute()
+MINING = compute_mining()
 
 
 def servers_used(turns: list[dict]) -> set[str]:
-    return {(c.get("name") or "").split("__")[0] for t in turns for c in t["calls"] if "__" in (c.get("name") or "")}
+    names = []
+    for t in turns:
+        for c in t["calls"]:
+            name = c.get("name") or ""
+            if name == "batch_call":
+                name = str((c.get("args") or {}).get("tool") or "")
+            if "__" in name:
+                names.append(name.split("__")[0])
+    return set(names)
 
 
 def millions(text: str, value: float, tolerance: float = 0.02) -> bool:
@@ -100,6 +109,98 @@ def grade(sid: str, turns: list[dict]) -> tuple[bool, list[str]]:
     return ok, notes
 
 
+def _xlsx_sheets(path: str) -> list[str]:
+    import io
+    import urllib.parse
+    import urllib.request
+    try:
+        from openpyxl import load_workbook
+        url = f"{harness.BASE}/api/artifacts/{urllib.parse.quote(path)}?download=1"
+        with urllib.request.urlopen(url, timeout=30) as response:
+            return load_workbook(io.BytesIO(response.read()), read_only=True).sheetnames
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _chart_total(chart: dict) -> float:
+    rows = chart.get("data") or []
+    if not rows:
+        return 0.0
+    numeric = [k for k, v in rows[0].items() if isinstance(v, (int, float)) and not re.search(r"year|month|mois", k, re.I)]
+    return sum(float(r.get(numeric[0]) or 0) for r in rows) if numeric else 0.0
+
+
+def grade_mining(sid: str, turns: list[dict]) -> tuple[bool, list[str]]:
+    m = MINING
+    notes: list[str] = []
+    last = turns[-1]
+    a = re.sub(r"[\u00a0\u202f\u2009]", " ", last["answer"] or "")
+    used = servers_used(turns)
+    ok = check(last["status"] == "completed", f"status {last['status']}", notes)
+    ok &= check(not (used & DISTRACTOR_SERVERS), "no distractor server", notes)
+    ok &= check(bool(re.search(r"#\d+", a)), "cites its evidence (#N)", notes)
+    if sid == "M1":
+        ids = [r["trade_id"] for r in m["M1"]]
+        found = [i for i in ids if i in a]
+        ok &= check(len(found) == len(ids), f"off-market trades {ids} (found {found})", notes)
+    elif sid == "M2":
+        hits = [bool(re.search(r"T09001|f[ée]ri|holiday|1er mai|01/05|2026-05-01", a, re.I)),
+                "CP099" in a,
+                bool(re.search(r"T09003|2[\s.,]?500[\s.,]?000", a))]
+        ok &= check(sum(hits) >= 2, f"defects found: holiday {hits[0]}, orphan {hits[1]}, fat finger {hits[2]}", notes)
+    elif sid == "M3":
+        head = a[:600].lower()
+        ok &= check("bnp" in head and ("générale" in head or "generale" in head or "gle" in head),
+                    f"pair {m['M3']['pair']}", notes)
+    elif sid == "M4":
+        ok &= check(bool(last["charts"]), "chart drawn", notes)
+        ok &= check("tesla" in a.lower()[:700], f"most volatile {m['M4']['top']}", notes)
+    elif sid == "M5":
+        ok &= check("rossi" in a.lower(), f"trader {m['M5']['trader']}", notes)
+        ok &= check(has_number(a, m["M5"]["rate_pct"], 1) or has_number(a, round(m["M5"]["rate_pct"]), 0),
+                    f"rate {m['M5']['rate_pct']}%", notes)
+    elif sid == "M6":
+        ok &= check(has_number(a, m["M6"]["share_pct"], 1) or has_number(a, round(m["M6"]["share_pct"]), 0),
+                    f"share {m['M6']['share_pct']}%", notes)
+        ok &= check(all(n.split()[0].lower() in a.lower() for n in m["M6"]["top3"]), f"top3 {m['M6']['top3']}", notes)
+    elif sid == "M7":
+        ok &= check(bool(last["charts"]), "chart drawn", notes)
+        total = _chart_total(last["charts"][-1]) if last["charts"] else 0
+        ok &= check(abs(total - m["M7"]["total"]) < 0.5, f"chart counts sum to {m['M7']['total']} (got {total:.0f})", notes)
+    elif sid == "M8":
+        groups = len(re.findall(r"groupe|segment|cluster", a, re.I))
+        named = sum(1 for cp in m["M8"]["counterparties"] if cp in a) + len(re.findall(
+            r"Générale|Deutsche|Goldman|Citadel|Amundi|AXA|Millennium|Allianz|Norges|Kerner|Santander|Paris", a))
+        ok &= check(groups >= 3, f"three groups described ({groups} mentions)", notes)
+        ok &= check(named >= 10, f"counterparties assigned ({named})", notes)
+    elif sid == "M9":
+        files = [f for t in turns for f in t["files"]]
+        xlsx = [f for f in files if f.get("format") == "xlsx"]
+        ok &= check(bool(xlsx), "Excel file produced", notes)
+        if xlsx:
+            ok &= check(xlsx[-1].get("rows") == m["M9"]["rows"], f"{m['M9']['rows']} rows (got {xlsx[-1].get('rows')})", notes)
+            sheets = _xlsx_sheets(xlsx[-1]["path"])
+            ok &= check(any("provenance" in s.lower() for s in sheets), f"provenance sheet ({sheets})", notes)
+    elif sid == "M10":
+        ok &= check(millions(a, abs(m["M10"]["impact"]), 0.02), f"impact {m['M10']['impact']:,.0f}", notes)
+        ok &= check(bool(re.search(r"dv01", a, re.I)), "states the method (DV01)", notes)
+    return ok, notes
+
+
+MINING_SCENARIOS = [
+    ("M1", "off-market trades", ["Détecte les trades exécutés à un prix qui s'écarte de plus de 3 % du cours de clôture du jour (dernière version des trades, hors annulés). Liste-les avec l'écart."], []),
+    ("M2", "data quality audit", ["Fais un contrôle qualité des données de trades : anomalies, incohérences avec le référentiel ou le calendrier, valeurs aberrantes."], []),
+    ("M3", "correlation", ["Quelles sont les deux actions les plus corrélées sur le S1 2026, en rendements quotidiens ?"], []),
+    ("M4", "volatility ranking + chart", ["Classe les actions par volatilité annualisée sur le S1 2026 et montre-le en graphique."], []),
+    ("M5", "operational risk by trader", ["Quel trader a le taux d'amendement ou d'annulation de ses trades le plus élevé ? Donne les taux par trader."], []),
+    ("M6", "issuer concentration", ["Quelle part du nominal obligataire détenu (positions longues au 30 juin 2026, converti en EUR au fixing du jour) est concentrée sur les 3 premiers émetteurs ?"], []),
+    ("M7", "monthly activity chart", ["Montre en graphique l'évolution mensuelle du nombre de trades par desk sur le S1 2026 (dernière version, hors annulés)."], []),
+    ("M8", "counterparty segmentation", ["Segmente les contreparties en 3 groupes selon leur activité (nombre de trades, nominal moyen, part d'obligations) et décris chaque groupe."], []),
+    ("M9", "export with provenance", ["Prépare un extract Excel des trades dont le prix d'exécution s'écarte de plus de 3 % du cours de clôture de leur date de trade (dernière version, hors annulés), avec l'écart en %."], []),
+    ("M10", "what-if with method", ["Quel serait l'impact d'une hausse parallèle de 50 pb des taux sur le desk Rates, au 30 juin 2026 ? Explique ta méthode et tes hypothèses."], []),
+]
+
+
 SCENARIOS = [
     ("F1", "exposure: SQL × refdata × prices × FX",
      ["Quelle est la valeur de marché en EUR des positions du desk Credit au 30 juin 2026 sur les obligations notées BBB+ ou moins ?"], []),
@@ -122,12 +223,14 @@ def main() -> None:
     parser.add_argument("--label", default="cib")
     parser.add_argument("--base", default="http://localhost:3045")
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--suite", choices=["cib", "mining", "all"], default="cib")
     args = parser.parse_args()
+    suites = {"cib": SCENARIOS, "mining": MINING_SCENARIOS, "all": SCENARIOS + MINING_SCENARIOS}
     harness.BASE = args.base
     out_path = HERE.parent / "results" / f"{args.label}.json"
     out_path.parent.mkdir(exist_ok=True)
     results = json.loads(out_path.read_text()) if out_path.exists() else {}
-    for sid, label, questions, answers in SCENARIOS:
+    for sid, label, questions, answers in suites[args.suite]:
         if args.ids and sid not in args.ids:
             continue
         print(f"▶ {sid} {label}", flush=True)
@@ -148,7 +251,7 @@ def main() -> None:
                 if not any("HTTP 5" in (t.get("error") or "") for t in turns):
                     break
                 print(f"  (model host error, rerunning: {turns[-1].get('error', '')[:80]})", flush=True)
-            passed, notes = grade(sid, turns)
+            passed, notes = (grade_mining if sid.startswith("M") else grade)(sid, turns)
             attempts.append({"passed": passed, "notes": notes, "turns": turns,
                              "seconds": sum(t["seconds"] for t in turns),
                              "tool_calls": sum(t["tool_calls"] or 0 for t in turns),

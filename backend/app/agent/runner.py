@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app import network
-from app.agent import builtin, data_tools, context, prompts, skills, trust
+from app.agent import builtin, data_tools, context, lineage, prompts, skills, trust
 from app.agent.guard import LoopGuard, signature
 from app.errors import NotConfigured, RunCancelled
 from app.llm.provider import ToolCall
@@ -76,6 +76,87 @@ def recover_bare_arguments(content: str, functions: list[dict]) -> ToolCall | No
     if len(fits) != 1:
         return None
     return ToolCall(id=new_id("t"), name=fits[0], arguments=arguments)
+
+
+_ISIN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b")
+
+_SQL_WORDS = {"where", "on", "join", "left", "right", "inner", "outer", "full", "cross", "group", "order",
+              "limit", "using", "select", "union", "having", "as", "natural", "lateral", "and", "or"}
+
+
+def _literal_filters(sql: str) -> list[tuple[str, str, str]]:
+    """(table, column, text value) for every `col = 'x'`, `col <> 'x'`, `col IN ('x', …)`."""
+    ctes = {m.lower() for m in re.findall(r"(?:\bwith\b|,)\s*([A-Za-z_]\w*)\s+as\s*\(", sql, re.I)}
+    aliases: dict[str, str] = {}
+    tables: list[str] = []
+    for table, alias in re.findall(r"\b(?:from|join)\s+([A-Za-z_][\w.]*)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?", sql, re.I):
+        if table.lower() in ctes or table.lower() in _SQL_WORDS:
+            continue
+        tables.append(table)
+        aliases[table.lower()] = table
+        if alias and alias.lower() not in _SQL_WORDS:
+            aliases[alias.lower()] = table
+    pairs: list[tuple[str, str]] = []
+    for column, _op, literal in re.findall(
+            r"((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(=|!=|<>)\s*'((?:[^']|'')*)'", sql):
+        pairs.append((column, literal.replace("''", "'")))
+    for column, inside in re.findall(r"((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s+(?:not\s+)?in\s*\(([^)]*)\)", sql, re.I):
+        for literal in re.findall(r"'((?:[^']|'')*)'", inside):
+            pairs.append((column, literal.replace("''", "'")))
+    out: list[tuple[str, str, str]] = []
+    for column, literal in pairs:
+        if not literal or re.fullmatch(r"[\d\-:./ T]+", literal) or len(literal) > 60:
+            continue      # dates, numbers and long strings are not the case-mismatch kind
+        if "." in column:
+            alias, name = column.split(".", 1)
+            table = aliases.get(alias.lower())
+        else:
+            name = column
+            distinct_tables = list(dict.fromkeys(tables))
+            table = distinct_tables[0] if len(distinct_tables) == 1 else None
+        if table and re.fullmatch(r"[A-Za-z_]\w*", name):
+            item = (table, name, literal)
+            if item not in out:
+                out.append(item)
+    return out
+
+
+def _learn_code_names(text: str, names: dict[str, str]) -> None:
+    """Remember instrument names seen next to their ISIN in a result."""
+    if "isin" not in text.lower() and not _ISIN.search(text):
+        return
+    from app.data.rows import SourceError, rows_from_text
+    try:
+        rows = rows_from_text(text) or []
+    except (SourceError, ValueError):
+        return
+    for row in rows[:2000]:
+        code = row.get("isin") or row.get("instrument_id") or row.get("identifier")
+        name = row.get("name") or row.get("issuer") or row.get("instrument_name")
+        if isinstance(code, str) and _ISIN.fullmatch(code) and isinstance(name, str) and name.strip():
+            names.setdefault(code, name.strip())
+
+
+def name_codes(text: str, names: dict[str, str]) -> str:
+    """Show an instrument by name, its ISIN in brackets — where the answer gave only the code.
+
+    Deterministic, and only for codes whose name a result of this run gave: nothing is
+    looked up, nothing guessed. A code already standing next to its name is left alone.
+    """
+    if not names or not text:
+        return text
+
+    def swap(match: re.Match) -> str:
+        code = match.group(0)
+        name = names.get(code)
+        if not name:
+            return code
+        around = text[max(0, match.start() - 80): match.end() + 80].lower()
+        if name.split()[0].lower() in around:
+            return code
+        return f"{name} ({code})"
+
+    return _ISIN.sub(swap, text)
 
 
 def strip_leaked_reasoning(text: str) -> str:
@@ -166,6 +247,12 @@ class RunContext:
         self.workspace_before: dict[str, tuple[int, float]] = {}
         self.question = ""
         self.route_plan: list[str] = []
+        # What was verified along the way, kept with the answer for whoever audits it.
+        self.checks: list[dict] = []
+        # ISIN → name, learned from this run's results; answers show "Name (ISIN)".
+        self.code_names: dict[str, str] = {}
+        # Results a check found to be wrong, by ref, with the reason.
+        self.flagged_refs: dict[str, str] = {}
         # Progressive tool disclosure: what has been used, and what the model asked for by
         # name. Both survive the turn that established them — a task that needed a tool
         # once usually needs it again, and making it search twice is a wasted turn.
@@ -222,7 +309,7 @@ class RunContext:
         released = False
         for b in ([block] if block is not None else self.blocks):
             if b["type"] == "text" and not b.get("superseded") and b.pop("held", False):
-                b["text"] = strip_leaked_reasoning(b.get("text") or "")
+                b["text"] = name_codes(strip_leaked_reasoning(b.get("text") or ""), self.code_names)
                 released = True
                 self.emit({"type": "block.open", "kind": "text", "index": b["index"]})
                 if b.get("text"):
@@ -579,6 +666,16 @@ class AgentRunner:
             message["blocks"] = ctx.blocks
             message["plan"] = ctx.plan
             message["usage"] = ctx.usage
+            # What the answer rests on, derived from the run itself: see agent/lineage.py.
+            answer = "\n".join(b.get("text") or "" for b in ctx.blocks
+                               if b["type"] == "text" and not b.get("superseded"))
+            try:
+                message["lineage"] = lineage.build(ctx.blocks, answer)
+            except Exception:  # noqa: BLE001 - provenance must never cost the answer
+                message["lineage"] = {}
+            message["checks"] = ctx.checks + lineage.notes_raised(ctx.blocks)
+            if ctx.route_plan:
+                message["route"] = ctx.route_plan
             # What the answer rests on, kept with the answer: which outside sources were
             # read, whether any tried to give orders, and whether the transcript had to be
             # compressed to fit. Reading an old answer without those is reading it blind.
@@ -691,20 +788,30 @@ class AgentRunner:
                  "required": ["source", "note"]},
                 note_source, group="Data", capabilities=(trust.MEMORY_WRITE,))
 
-            async def batch_call(tool: str = "", calls: Any = None, **_: Any) -> dict:
-                return await self._batch_call(ctx, tool, calls)
+            async def batch_call(tool: str = "", calls: Any = None, rows_from: str = "",
+                                 arguments: Any = None, **_: Any) -> dict:
+                return await self._batch_call(ctx, tool, calls, rows_from, arguments)
 
             tools["batch_call"] = builtin.ToolSpec(
                 "batch_call",
                 "Call one read-only source tool for many items at once — prices of eight ISINs "
                 "at two dates is one batch_call with sixteen argument sets, not sixteen turns. "
+                "For many dates per item, batch the history tool instead (one call per item). "
+                "To look something up for every row of an earlier result — the close on each "
+                "trade's date — give rows_from='#N' and arguments mapping each parameter to a "
+                "column ({\"identifier\": \"instrument_id\", \"date\": \"trade_date\"}); one call per "
+                "distinct combination, nothing to copy. "
                 "Runs them in parallel and returns one table: each row carries the arguments it "
                 "came from, so the result can be charted, exported or read with rows('#N').",
                 {"type": "object",
                  "properties": {"tool": {"type": "string", "description": "Qualified tool name, e.g. market_data__get_price."},
                                 "calls": {"type": "array", "items": {"type": "object"},
-                                          "description": "One argument object per call, at most 60."}},
-                 "required": ["tool", "calls"]},
+                                          "description": "One argument object per call, at most 250."},
+                                "rows_from": {"type": "string",
+                                              "description": "Instead of calls: '#N' whose rows drive the calls."},
+                                "arguments": {"type": "object",
+                                              "description": "With rows_from: parameter → column name (or a fixed value)."}},
+                 "required": ["tool"]},
                 batch_call, group="Data", capabilities=(trust.FS_READ,))
 
             tools["source_info"] = builtin.ToolSpec(
@@ -799,6 +906,9 @@ class AgentRunner:
             image_payload = []
 
         reflected = False
+        deliverable_nudged = False
+        names_nudged = False
+        giveup_nudged = False
         must_compose = False
         window = 0
         empty_turns = 0
@@ -1003,9 +1113,29 @@ class AgentRunner:
                     continue
                 empty_turns = 0
                 turn_temperature = 0.35
+                # Asked for a chart or a file, about to answer without one: a runtime check,
+                # not a request to the Critic. A plotting snippet in the answer is not a chart
+                # and "here is the data" is not an extract.
+                missing = self._missing_deliverable(ctx, text) if not deliverable_nudged and not last_turn else ""
+                if not missing and not names_nudged and not last_turn:
+                    missing = self._unnamed_codes(ctx, text, (text_block or {}).get("text", ""))
+                    names_nudged = bool(missing)
+                if not missing and not giveup_nudged and not last_turn:
+                    missing = self._gave_up(ctx, (text_block or {}).get("text", ""))
+                    giveup_nudged = bool(missing)
+                if missing:
+                    deliverable_nudged = True
+                    ctx.checks.append({"name": "Deliverable", "result": "missing, asked again", "detail": missing})
+                    ctx.supersede_text()
+                    pending_hint = prompts.note(missing)
+                    continue
                 if tools_used >= settings.critic_min_tools and not reflected and not last_turn:
                     reflected = True
                     gap = await self._reflect(ctx, text, tools)
+                    ctx.checks.append({"name": "Final check (Critic)",
+                                       "result": "complete" if gap.get("complete") else "gap found",
+                                       "detail": str(gap.get("missing") or "")[:300]
+                                                 + (f" → ran {gap['tool']}" if gap.get("tool") else "")})
                     if not gap.get("complete"):
                         if gap.get("tool"):
                             await self._run_gap_step(ctx, gap["tool"], gap["arguments"], tools)
@@ -1213,19 +1343,29 @@ class AgentRunner:
         if not isinstance(picked, list):
             picked = next((v for v in data.values() if isinstance(v, list)), []) if isinstance(data, dict) else []
         chosen = {str(p).strip() for p in picked if str(p).strip() in servers}
+        # The agent computes on results itself (run_python, profile_data); a dataframe or file
+        # server is only for questions about files, not an engine to route every analysis to.
+        if not re.search(r"(fichier|file|csv|excel|xlsx|parquet|dossier|folder|document)", question, re.I):
+            compute_only = {slug for slug, (_name, tools_of) in servers.items()
+                            if (self.c.store.mcp_servers().get(tools_of[0]["server_id"]) or {}).get("catalog_id")
+                            in ("pandas-frames", "filesystem")}
+            chosen -= compute_only
         # Continuity: a follow-up keeps the sources that answered the question before it.
         chosen |= {slug for slug in used if slug in servers and last_user}
         reason = str(data.get("reason") or "")[:240] if isinstance(data, dict) else ""
         plan = data.get("plan") if isinstance(data, dict) else None
         ctx.route_plan = [str(step).strip()[:200] for step in (plan or []) if str(step).strip()][:5] \
             if isinstance(plan, list) and len(chosen) > 1 else []
+        ctx.checks.append({"name": "Source routing", "result": ", ".join(sorted(chosen)) or "none",
+                           "detail": reason})
         ctx.emit({"type": "notice", "quiet": True,
                   "message": f"Sources for this question: {', '.join(sorted(chosen)) or 'none'}"
                              + (f" — {reason}" if reason else "")
                              + (" · route: " + " → ".join(ctx.route_plan) if ctx.route_plan else "")})
         return chosen
 
-    async def _batch_call(self, ctx: RunContext, tool: str, calls: Any) -> dict:
+    async def _batch_call(self, ctx: RunContext, tool: str, calls: Any, rows_from: str = "",
+                          mapping: Any = None) -> dict:
         """One read-only tool, many argument sets, one table back.
 
         The same gates as a direct call, applied to every argument set: the egress policy,
@@ -1233,6 +1373,38 @@ class AgentRunner:
         refused outright — a batch is for reading.
         """
         from app.data.rows import SourceError, rows_from_text
+        if rows_from:
+            # Calls built from an earlier result's rows: the model names columns instead of
+            # copying values, so 375 lookups cost one call and none can be mistyped.
+            from app.data import rows as rows_lib
+            if isinstance(mapping, str):
+                try:
+                    mapping = json.loads(mapping)
+                except ValueError:
+                    mapping = None
+            if not isinstance(mapping, dict) or not mapping:
+                return {"ok": False, "error": "With rows_from, give arguments: a map from each tool "
+                                              "parameter to a column of those rows, e.g. "
+                                              "{\"identifier\": \"instrument_id\", \"date\": \"trade_date\"}."}
+            if ctx.flagged_refs.get(str(rows_from).strip()):
+                return {"ok": False, "error": f"{rows_from} was flagged as wrong: "
+                                              f"{ctx.flagged_refs[str(rows_from).strip()]} Use the corrected result."}
+            try:
+                source_rows, _label = rows_lib.resolve(
+                    rows_from, blocks=ctx.blocks, history=[self._earlier_blocks(ctx)],
+                    workspace=self.c.workspace(), conversation_id=ctx.conversation_id)
+            except SourceError as exc:
+                return {"ok": False, "error": str(exc)}
+            columns = set().union(*(r.keys() for r in source_rows)) if source_rows else set()
+            built: list[dict] = []
+            for row in source_rows:
+                args = {param: (row.get(value) if isinstance(value, str) and value in columns else value)
+                        for param, value in mapping.items()}
+                if any(v is None for v in args.values()):
+                    continue
+                if args not in built:
+                    built.append(args)
+            calls = built
         if isinstance(calls, str):
             try:
                 calls = json.loads(calls)
@@ -1251,8 +1423,9 @@ class AgentRunner:
                      and set(c) <= {"arguments", "tool", "name"} else c for c in calls]
         if not isinstance(calls, list) or not calls or not all(isinstance(c, dict) for c in calls):
             return {"ok": False, "error": "calls must be a list of argument objects, e.g. [{\"identifier\": \"FR0000120271\", \"date\": \"2026-06-30\"}]."}
-        if len(calls) > 60:
-            return {"ok": False, "error": f"{len(calls)} calls is more than 60; split them, or find a list or history tool."}
+        if len(calls) > (500 if rows_from else 250):
+            return {"ok": False, "error": f"{len(calls)} calls is more than 250. Use a history or list tool "
+                                          f"(one call per item for all its dates), or split the batch."}
         for arguments in calls:
             action, reason, _host = self._check_egress(ctx, ToolCall(id="", name=target["qualified_name"],
                                                                      arguments=arguments))
@@ -1363,6 +1536,93 @@ class AgentRunner:
                          "or a PDF → draw the charts first, then `create_report`.")
         return ("\n\n" + "\n\n".join(parts)) if parts else ""
 
+    def _missing_deliverable(self, ctx: RunContext, question: str) -> str:
+        """What the reader asked to receive and has not been given, as a runtime note."""
+        lowered = question.lower()
+        produced_chart = any(b.get("chart") for b in ctx.blocks if b.get("type") == "tool")
+        produced_file = any(b.get("file") for b in ctx.blocks if b.get("type") == "tool")
+        wants_chart = bool(re.search(r"\b(graph|graphique|chart|courbe|visuali|plot|diagramme|histogramme)", lowered))
+        wants_file = bool(re.search(r"\b(extract|extrait|export|excel|xlsx|csv|fichier|pdf|rapport|report)\b", lowered))
+        if wants_chart and not produced_chart:
+            return ("The reader asked for a chart and none has been drawn. Call the `chart` tool now, "
+                    "with data='#N' naming the call that returned the rows (compute them first if "
+                    "needed). Plotting code written in the answer is not a chart.")
+        if wants_file and not produced_file:
+            return ("The reader asked for a file and none has been produced. Call `export_data` "
+                    "(extract, Excel, CSV) or `create_report` (PDF) now, from the #ref of the rows.")
+        used = {b.get("name") for b in ctx.blocks if b.get("type") == "tool" and b.get("ok")}
+        if re.search(r"(qualit|anomal|aberran|incoh[ée]ren|outlier|quality|contr[ôo]le des donn|suspect)", lowered) \
+                and "profile_data" not in used:
+            return ("This is a data-quality or anomaly question and the rows have not been profiled. Call "
+                    "`profile_data` on the rows now — with reference={column: '#M'} for every id that has a "
+                    "reference list (counterparties, instruments) and holidays= the market calendar — then "
+                    "judge what it reports.")
+        if re.search(r"(segment|cluster|regroupe|classe les|classify|group(e|s)? de)", lowered):
+            draft = next((b.get("text") or "" for b in reversed(ctx.blocks)
+                          if b.get("type") == "text" and not b.get("superseded")), "")
+            if draft and sum(1 for line in draft.splitlines() if line.strip().startswith("|")) < 6:
+                return ("A segmentation names its members. Add a table listing every member — its name, "
+                        "its group, and the measures that placed it there — after the groups' profiles.")
+        return ""
+
+    def _versioned_tables(self, ctx: RunContext) -> set[str]:
+        """Tables seen to keep a version column — from schemas described in this conversation
+        and from the sources' models."""
+        found: set[str] = set()
+        for block in [*self._earlier_blocks(ctx), *ctx.blocks]:
+            if block.get("type") == "tool" and "describe" in (block.get("name") or "") and \
+                    re.search(r'"name":\s*"(version|revision|version_no|amendment_no)"', block.get("text") or ""):
+                table = str((block.get("args") or {}).get("table_name") or (block.get("args") or {}).get("table") or "")
+                if table:
+                    found.add(table.lower())
+        for server in self.c.store.mcp_servers().values():
+            for table in (self.c.knowledge.get(server["id"])["model"].get("tables") or []):
+                if any(str(c.get("name", "")).lower() in ("version", "revision") for c in table.get("columns") or []):
+                    found.add(str(table.get("name", "")).lower())
+        return found
+
+    def _gave_up(self, ctx: RunContext, draft: str) -> str:
+        """A draft that says it cannot be done, from a run that never asked the reader."""
+        if not draft or any(b.get("name") == "ask_user" for b in ctx.blocks if b.get("type") == "tool"):
+            return ""
+        if not re.search(r"(ne peu[tx]|impossible|pas (possible|disponible)|aucun(e)? .{0,40}(disponible|fourni)|"
+                         r"cannot|can't|not (possible|available)|unable to)", draft[:600], re.I):
+            return ""
+        return ("The draft concludes this cannot be done. Before that: re-read the question against the "
+                "data (a date like 'the day's close' next to a trade means that trade's date; 'at the end "
+                "of the half' is the last date the data covers). If a reasonable reading works, do it. If "
+                "two readings give different answers, ask the reader with ask_user, the readings as "
+                "options. Only if neither works, say what is missing.")
+
+    def _unnamed_codes(self, ctx: RunContext, question: str, draft: str) -> str:
+        """Instruments named only by ISIN in the draft: the names, from the evidence already in hand."""
+        from app.data.rows import SourceError, rows_from_text
+        codes = [c for c in dict.fromkeys(_ISIN.findall(draft or "")) if c not in question]
+        if not codes:
+            return ""
+        names: dict[str, str] = {}
+        for block in [*self._earlier_blocks(ctx), *ctx.blocks]:
+            if block.get("type") != "tool" or not block.get("ok") or "isin" not in (block.get("text") or "").lower():
+                continue
+            try:
+                rows = rows_from_text(block.get("text") or "") or []
+            except (SourceError, ValueError):
+                continue
+            for row in rows:
+                code = row.get("isin") or row.get("instrument_id") or row.get("identifier")
+                name = row.get("name") or row.get("issuer") or row.get("instrument_name")
+                if isinstance(code, str) and isinstance(name, str) and name.strip():
+                    names.setdefault(code, name.strip())
+        missing = [c for c in codes if c in names and names[c].split()[0].lower() not in draft.lower()]
+        if missing:
+            listing = "; ".join(f"{c} = {names[c]}" for c in missing[:20])
+            return (f"The draft names instruments only by ISIN. The reader knows them by name: {listing}. "
+                    f"Write the answer again with the name first and the ISIN in brackets.")
+        if all(c not in names for c in codes):
+            return ("The draft names instruments only by ISIN. Look up their names in the reference data "
+                    "(one list or batch call) and write the answer with the name first, the ISIN in brackets.")
+        return ""
+
     def _data_sources(self) -> list[dict]:
         return [s for s in self.c.store.mcp_servers().values()
                 if self.c.knowledge.get(s["id"])["model"] or self.c.knowledge.get(s["id"])["description"]]
@@ -1386,7 +1646,7 @@ class AgentRunner:
             batched = (self.c.mcp.resolve(str((call.arguments or {}).get("tool") or ""))
                        if call.name == "batch_call" else None)
             block = {"type": "tool", "index": len(ctx.blocks), "id": call.id or new_id("t"),
-                     "ref": ctx.next_ref(),
+                     "ref": ctx.next_ref(), "at": now(),
                      "name": call.name, "args": call.arguments,
                      "server": (mcp_tool["server_name"] if mcp_tool else
                                 batched["server_name"] if batched else
@@ -1596,7 +1856,14 @@ class AgentRunner:
             result = self._note_empty_result(call, result)
             result = self._note_shared_columns(ctx, call, result)
             result = self._note_metric_filters(call, result)
+            result = await self._note_filter_values(ctx, call, result)
+            result = self._note_conventions(result)
+            _learn_code_names(result.get("text") or "", ctx.code_names)
+            if result.get("_flagged"):
+                ctx.flagged_refs[block.get("ref", "")] = result.pop("_flagged")
         text = result.get("text") or result.get("error") or ""
+        if ok and spec is not None and call.name in ("batch_call", "run_python"):
+            _learn_code_names(text, ctx.code_names)
         text, model_body = self._launder(ctx, call, block, text, spec)
         if spec is None:
             # What this call taught about the tool, kept for the next question. Structure
@@ -1624,12 +1891,16 @@ class AgentRunner:
         # done, never enough to become a second place a credential lives.
         preview, _ = trust.redact(json.dumps(call.arguments, ensure_ascii=False,
                                              default=str)[:300], self.c.secret_values())
-        self.c.audit.record("tool.call", run_id=ctx.run_id, tool=call.name,
-                            kind=block.get("kind"), server=block.get("server"),
-                            args=preview, ok=ok, ms=elapsed,
-                            tainted=ctx.taint.tainted,
-                            injection=block.get("injection") or None,
-                            offloaded=block.get("offloaded"))
+        # The entry's hash ties this step of the answer's lineage to the tamper-evident log:
+        # an auditor can check the step against the chain, not just take the trail's word.
+        block["audit"] = self.c.audit.record("tool.call", run_id=ctx.run_id, tool=call.name,
+                                             kind=block.get("kind"), server=block.get("server"),
+                                             args=preview, ok=ok, ms=elapsed,
+                                             tainted=ctx.taint.tainted,
+                                             injection=block.get("injection") or None,
+                                             offloaded=block.get("offloaded"),
+                                             ref=block.get("ref"),
+                                             result_sha256=lineage.fingerprint(text))
         ctx.emit({"type": "tool.end", "index": block["index"], "id": block["id"], "ok": ok,
                   "status": block["status"], "summary": summary, "ms": elapsed,
                   "preview": text[:1200], **outputs})
@@ -1719,14 +1990,19 @@ class AgentRunner:
         The person still sees the whole thing in the transcript — it is only the *context*
         that gets the excerpt, because that is the resource under pressure.
         """
-        off = context.offload(text, self.c.workspace() / ".results",
+        # The runner's own notes ride after the data. Parked with it, they made a JSON result
+        # unparseable — the file became .txt and every program reading it failed — and cut
+        # from the excerpt, they never reached the model at all. So the file gets the data,
+        # and the notes follow the excerpt.
+        body, notes = context.split_notes(text)
+        off = context.offload(body, self.c.workspace() / ".results",
                               block.get("id", "x"), call.name)
         if off is None:
             return text
         block["offloaded"] = off.handle
         ctx.emit({"type": "offload", "index": block["index"], "handle": off.handle,
                   "bytes": off.bytes})
-        return context.offload_note(off, call.name)
+        return context.offload_note(off, call.name) + (f"\n\n{notes}" if notes else "")
 
     # Servers reject a malformed call with a message about the field that was wrong, one
     # field at a time. A model then fixes that field and gets the next complaint — five
@@ -1741,8 +2017,24 @@ class AgentRunner:
     _MISSING_HINTS = ("enoent", "no such file", "not found", "does not exist",
                       "cannot find", "outside allowed", "access denied")
 
+    @staticmethod
+    def _today_note(call: ToolCall) -> str:
+        """A call for today's date that failed or came back empty: the usual misreading."""
+        import datetime as _dt
+        today = _dt.date.today()
+        recent = {(today - _dt.timedelta(days=d)).isoformat() for d in range(0, 4)}
+        values = " ".join(str(v) for v in (call.arguments or {}).values())
+        if not any(day in values for day in recent):
+            return ""
+        return (f" You asked for today's date ({today.isoformat()}); the source may not cover it. If the "
+                f"question's date is relative to the records — the day's close of a trade, the end of the "
+                f"period — use the records' own dates instead.")
+
     def _enrich_error(self, call: ToolCall, result: dict) -> dict:
         """Attach to a failure the one thing that makes the next attempt succeed."""
+        today = self._today_note(call)
+        if today:
+            result = {**result, "error": f"{result.get('error') or 'failed'}{today}"}
         error = (result.get("error") or "").lower()
         tool = self.c.mcp.resolve(call.name)
         if any(hint in error for hint in self._VALIDATION_HINTS):
@@ -1879,6 +2171,101 @@ class AgentRunner:
                 "means, ask with ask_user before building the answer on this one.]")
         return {**result, "text": f"{result.get('text', '')}\n\n{note}"}
 
+    def _note_conventions(self, result: dict) -> dict:
+        """Say what a quoting convention means, where the quoted value arrives.
+
+        Two conventions cost more wrong answers than any other in markets data, and both
+        can be recognised from the result alone: an FX rate quoted as a currency pair (EURGBP
+        0.78 is GBP per 1 EUR — GBP amounts are divided by it, not multiplied), and a price
+        quoted in percent of par (market value is nominal × price / 100).
+        """
+        text = result.get("text") or ""
+        notes = []
+        pairs = dict.fromkeys(re.findall(r'"(?:pair|currency_pair|ccy_pair|cross)"\s*:\s*"([A-Z]{3})/?([A-Z]{3})"', text))
+        rate = re.search(r'"(?:rate|fx_rate|mid|fixing|px_last)"\s*:\s*([0-9.]+)', text)
+        for base, quote in list(pairs)[:2]:
+            value = f" = {rate.group(1)}" if rate and len(pairs) == 1 else ""
+            notes.append(f"{base}{quote}{value} means 1 {base} = that many {quote}: to convert {quote} into "
+                         f"{base}, divide by the rate; {base} into {quote}, multiply.")
+        if re.search(r'"(?:quote|quote_type|price_type|convention)"\s*:\s*"(PCT_OF_PAR|PERCENT_OF_PAR|PCT|CLEAN_PCT)"', text):
+            notes.append("Prices quoted PCT_OF_PAR are percent of the nominal: market value = nominal × price / 100, "
+                         "in the instrument's currency.")
+        if not notes:
+            return result
+        return {**result, "text": f"{text}\n\n[Convention: {' '.join(notes)}]"}
+
+    async def _note_filter_values(self, ctx: RunContext, call: ToolCall, result: dict) -> dict:
+        """Check that the text values a SQL query filters on exist, spelled as written.
+
+        `status <> 'cancelled'` in a table whose value is 'CANCELLED' excludes nothing, and
+        the count that comes back is wrong without a trace of an error — twice in one
+        evaluation. For each quoted value compared with a column, one read-only query asks
+        the source which spellings exist, ignoring case; a value that matches nothing, or
+        matches only in another case, is said where the result lands. And a status filter
+        inside the subquery that picks the latest version is flagged: it resurrects the
+        previous version of every cancelled record.
+        """
+        key = next((k for k in ("query", "sql", "statement") if isinstance((call.arguments or {}).get(k), str)), None)
+        if key is None:
+            return result
+        sql = call.arguments[key]
+        notes: list[str] = []
+        for segment in re.findall(r"\(\s*select\b.*?\bgroup\s+by\b", sql, re.I | re.S):
+            if re.search(r"max\s*\(\s*(\w+\.)?\w*version\w*\s*\)", segment, re.I) and \
+                    re.search(r"\bstatus\b\s*(<>|!=|=|not\s+in|in)\b", segment, re.I):
+                notes.append("A status filter sits inside the subquery that picks the latest version: "
+                             "for a record cancelled in its last version, the previous version is kept "
+                             "and counted. Pick the latest version first, then filter its status.")
+                break
+        flagged = False
+        # A COUNT(*) over a table that keeps several versions per record counts versions.
+        versioned = self._versioned_tables(ctx)
+        if re.search(r"count\s*\(\s*\*\s*\)", sql, re.I) and not re.search(r"\bversion\b|distinct", sql, re.I):
+            touched = [t for t, _alias in re.findall(r"\b(?:from|join)\s+([A-Za-z_]\w*)(?:\s+(\w+))?", sql, re.I)
+                       if t.lower() in versioned]
+            if touched:
+                notes.append(f"{touched[0]} keeps several versions per record: COUNT(*) here counts versions, "
+                             f"not records. Keep the latest version of each record (then its status), or "
+                             f"count DISTINCT ids.")
+        checks = _literal_filters(sql)[:4]
+        seen = ctx.__dict__.setdefault("_filter_probes", {})
+        for table, column, literal in checks:
+            probe_key = (call.name, table, column, literal)
+            if probe_key in seen:
+                matches = seen[probe_key]
+            else:
+                escaped = literal.replace("'", "''")
+                probe = (f"SELECT DISTINCT {column} AS value FROM {table} "
+                         f"WHERE lower({column}) = lower('{escaped}') LIMIT 5")
+                try:
+                    reply = await asyncio.wait_for(self.c.mcp.call(call.name, {**call.arguments, key: probe}), 15)
+                    from app.data.rows import rows_from_text
+                    rows = rows_from_text(reply.get("text") or "") if reply.get("ok") else None
+                except Exception:  # noqa: BLE001 - a check that cannot run is simply not made
+                    rows = None
+                matches = None if rows is None else [str(r.get("value")) for r in rows if r.get("value") is not None]
+                seen[probe_key] = matches
+            if matches is None or literal in matches:
+                continue
+            if matches:
+                notes.append(f"'{literal}' matches no row of {table}.{column} as written — the value is "
+                             f"{', '.join(repr(m) for m in matches)} (comparison is case-sensitive). "
+                             f"The result above is likely wrong: run it again with the exact value.")
+                flagged = True
+            else:
+                notes.append(f"No row of {table}.{column} equals '{literal}', in any case. A filter on it "
+                             f"selects or excludes nothing — check the values the column takes.")
+        if not notes:
+            return result
+        ctx.checks.append({"name": "SQL filter values", "result": "flagged", "detail": " | ".join(notes)[:300]})
+        note = "[" + " ".join(notes) + "]"
+        out = {**result, "text": f"{result.get('text', '')}\n\n{note}"}
+        if flagged:
+            # Remembered under the ref this result gets, so nothing can be drawn, exported or
+            # computed from it without first hearing why it is wrong.
+            out["_flagged"] = " ".join(notes)[:400]
+        return out
+
     def _note_empty_result(self, call: ToolCall, result: dict) -> dict:
         """No rows came back for a filtered call: say that this is not yet an absence.
 
@@ -1906,7 +2293,7 @@ class AgentRunner:
                         if info.get("values") and (arg.lower() in column.lower() or column.lower() in arg.lower()):
                             known.append(f"{column} ∈ {{{', '.join(map(str, info['values'][:10]))}}}")
         passed = ", ".join(f"{k}={v!r}" for k, v in filters.items())
-        note = (f"[No rows for {passed}. That is not yet evidence the data does not exist: the "
+        note = (f"[No rows for {passed}.{self._today_note(call)} That is not yet evidence the data does not exist: the "
                 f"value may not be one this tool uses (a desk instead of a book, a name instead "
                 f"of a code)."
                 + (f" Values seen from this source before: {'; '.join(dict.fromkeys(known))}." if known else
@@ -2127,7 +2514,7 @@ class AgentRunner:
         spec = tools.get(tool_name)
         mcp_tool = None if spec else self.c.mcp.resolve(tool_name)
         block = {"type": "tool", "index": len(ctx.blocks), "id": call.id, "name": tool_name,
-                 "ref": ctx.next_ref(), "args": arguments, "by": "critic",
+                 "ref": ctx.next_ref(), "at": now(), "args": arguments, "by": "critic",
                  "server": mcp_tool["server_name"] if mcp_tool else (spec.group if spec else ""),
                  "kind": "mcp" if mcp_tool else "builtin", "status": "running",
                  "ok": None, "summary": "", "text": "", "ms": 0}
@@ -2157,13 +2544,14 @@ class AgentRunner:
         # empty digest told one user "no data was provided" about a file they had just
         # downloaded — so when this run gathered nothing, fall back to the conversation.
         from_history = not evidence.strip() or evidence.startswith("(no tool")
-        block = {"type": "text", "text": "", "index": len(ctx.blocks)}
+        # Held like any other draft and released whole: the answer is checked (instruments
+        # named, not just coded) before anyone reads it, and it appears once.
+        block = {"type": "text", "text": "", "index": len(ctx.blocks), "held": True}
         ctx.blocks.append(block)
-        ctx.emit({"type": "block.open", "kind": "text", "index": block["index"]})
 
         def on_text(piece: str) -> None:
             block["text"] += piece
-            ctx.emit({"type": "text.delta", "index": block["index"], "text": piece})
+            ctx.emit({"type": "draft.delta", "text": piece})
 
         try:
             payload = ((messages or []) + [{"role": "user", "content": prompts.note(
@@ -2198,7 +2586,7 @@ class AgentRunner:
             if block["text"].strip():
                 note = f"\n\n---\n\n{note}"
             block["text"] += note
-            ctx.emit({"type": "text.delta", "index": block["index"], "text": note})
+        ctx.release_text(block)
 
     def _evidence_digest(self, ctx: RunContext, budget: int = 14000) -> str:
         """What the tools returned, labelled, newest first, within a character budget.
