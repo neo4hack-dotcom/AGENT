@@ -592,6 +592,11 @@ function TurnFooter({ message }: { message: Message }) {
       )}
       {answer.trim() && <CopyAnswer text={answer} />}
       {message.model && <span className="font-mono">{message.model}</span>}
+      {message.mode === 'direct' && (
+        <span title={message.servers?.length ? `MCP: ${message.servers.join(', ')}` : 'No MCP server'}>
+          direct{message.servers?.length ? ` · ${message.servers.join(', ')}` : ''}
+        </span>
+      )}
       {!!usage.tool_calls && <span>{usage.tool_calls} tool{usage.tool_calls > 1 ? 's' : ''}</span>}
       {!!usage.tokens_out && <span>{usage.tokens_in}→{usage.tokens_out} tok</span>}
       {!!usage.ttft_ms && <span title="Time to the first token">{(usage.ttft_ms / 1000).toFixed(1)}s to first word</span>}

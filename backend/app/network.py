@@ -123,18 +123,22 @@ def is_cloud_model(model: str) -> bool:
 
 
 def check_model(model: str, base_url: str) -> str | None:
-    """Why this model may not be used here, or None."""
-    if not airgapped() or bool(_settings().allow_cloud_model):
+    """Why this model may not be used here, or None.
+
+    The model server's host is checked whatever else is allowed: `allow_cloud_model` lets a
+    local Ollama relay its cloud models, it does not open the air gap to any host a URL names.
+    """
+    if not airgapped():
         return None
-    if is_cloud_model(model):
+    host = _host_of(base_url)
+    if host and not is_internal_host(host):
+        return (f"The model server {host} is outside the private network. This deployment is "
+                f"air-gapped — point AGENT at a model server on this machine or your "
+                f"internal network.")
+    if is_cloud_model(model) and not bool(_settings().allow_cloud_model):
         return (f"{model} is an Ollama cloud model: prompts and data would leave the private "
                 f"network for ollama.com. This deployment is air-gapped — pick a model that "
                 f"runs on your own Ollama server.")
-    host = _host_of(base_url)
-    if host and not is_internal_host(host):
-        return (f"The Ollama server {host} is outside the private network. This deployment is "
-                f"air-gapped — point AGENT at an Ollama server on this machine or your "
-                f"internal network.")
     return None
 
 

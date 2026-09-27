@@ -35,6 +35,13 @@ class Settings(BaseSettings):
 
     # --- The model. Local only, by design: Ollama on this machine. ---
     ollama_base_url: str = "http://localhost:11434"
+    # Which server speaks to the model: "ollama" (its native API), or "openai" — any server
+    # with the OpenAI chat-completions API (vLLM, LM Studio, llama.cpp, LocalAI, TGI…), at
+    # openai_base_url (usually ending in /v1). Either must be inside the network when the
+    # deployment is air-gapped.
+    llm_provider: str = "ollama"
+    openai_base_url: str = "http://localhost:8000/v1"
+    openai_api_key: str = ""
     # A model that runs on this Ollama. Cloud tags (`-cloud`) send prompts and data to
     # ollama.com and are refused while the deployment is air-gapped.
     model: str = "gpt-oss:20b"

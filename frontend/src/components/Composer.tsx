@@ -5,6 +5,7 @@
 import { ArrowUp, ImageIcon, Paperclip, Square, X } from 'lucide-react';
 import {
   useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent,
+  type ReactNode,
 } from 'react';
 import type { UploadResult } from '../types';
 import { Spinner, cls } from './ui';
@@ -22,10 +23,12 @@ export interface ComposerProps {
   centred: boolean;
   vision: boolean;
   placeholder?: string;
+  /** A quiet control beside the paperclip — the mode switch. */
+  accessory?: ReactNode;
 }
 
 export function Composer({
-  onSend, onStop, onUpload, running, disabled, disabledReason, centred, vision, placeholder,
+  onSend, onStop, onUpload, running, disabled, disabledReason, centred, vision, placeholder, accessory,
 }: ComposerProps) {
   const [text, setText] = useState('');
   const [files, setFiles] = useState<UploadResult[]>([]);
@@ -169,6 +172,7 @@ export function Composer({
           </button>
           <input ref={fileInput} type="file" multiple hidden
             onChange={(e) => { void attach(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+          {accessory}
 
           <textarea
             ref={area}

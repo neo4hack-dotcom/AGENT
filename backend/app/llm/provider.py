@@ -115,7 +115,14 @@ def runs_remotely(model: str) -> bool:
     return name.endswith("-cloud") or name.endswith(":cloud")
 
 
-def _explain(exc: Exception, base_url: str) -> str:
+def _explain(exc: Exception, base_url: str, kind: str = "ollama") -> str:
+    if kind == "openai":
+        if isinstance(exc, httpx.ConnectError):
+            return (f"Cannot reach the model server at {base_url}. Is it running, and is this its "
+                    f"OpenAI-compatible base URL (usually ending in /v1)?")
+        if isinstance(exc, httpx.TimeoutException):
+            return f"The model server at {base_url} did not answer in time."
+        return f"{type(exc).__name__}: {exc}"
     if isinstance(exc, httpx.ConnectError):
         return (f"Cannot reach Ollama at {base_url}. Start it with `ollama serve`, or point "
                 f"AGENT_OLLAMA_BASE_URL somewhere else.")
@@ -513,13 +520,371 @@ class OllamaProvider(LLMProvider):
         return {"ok": True, "models": models, "error": None}
 
 
+class OpenAIProvider(LLMProvider):
+    """Any server that speaks the OpenAI chat-completions API: vLLM, LM Studio, llama.cpp's
+    server, LocalAI, TGI, Ollama's own /v1 — on this machine or inside the network.
+
+    The rest of the app talks in one message format (Ollama's: tool calls without ids,
+    tool results by name). This class translates at the edge: ids are given to every tool
+    call and threaded to the results that answer them, arguments become JSON strings,
+    images become content parts. What differs between servers — structured output, usage
+    in the stream — is tried, and dropped once if the server refuses it.
+    """
+
+    name = "openai"
+    label = "OpenAI-compatible"
+
+    def __init__(self, base_url: str, model: str, api_key: str = "", timeout_s: int = 900,
+                 num_ctx: int = 0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.api_key = api_key
+        self.timeout_s = timeout_s
+        self.num_ctx = num_ctx
+        self._caps: dict | None = None
+        self._dropped: set[str] = set()     # optional fields this server has refused
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def _models(self) -> tuple[list[dict], str]:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(f"{self.base_url}/models", headers=self._headers())
+        except Exception as exc:
+            return [], _explain(exc, self.base_url, "openai")
+        if resp.status_code in (401, 403):
+            return [], f"HTTP {resp.status_code} from {self.base_url}/models — the API key is missing or refused."
+        if resp.status_code >= 400:
+            return [], (f"HTTP {resp.status_code} from {self.base_url}/models — is this the OpenAI-compatible "
+                        f"base URL (it usually ends in /v1)?")
+        try:
+            body = resp.json()
+        except ValueError:
+            return [], f"{self.base_url}/models did not return JSON."
+        entries = body.get("data") if isinstance(body, dict) else body
+        return [e for e in entries or [] if isinstance(e, dict)], ""
+
+    @staticmethod
+    def _context_of(entry: dict) -> int:
+        for key in ("max_model_len", "context_length", "context_window", "max_context_length", "n_ctx"):
+            value = entry.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+        meta = entry.get("meta") or {}
+        for key in ("n_ctx_train", "n_ctx", "context_length"):
+            if isinstance(meta.get(key), int) and meta[key] > 0:
+                return meta[key]
+        return 0
+
+    async def context_window(self) -> int:
+        if self.num_ctx:
+            return self.num_ctx
+        return (await self.capabilities()).get("context_length") or 8192
+
+    async def capabilities(self) -> dict:
+        """What the server says about the model — little, in this API: the context window
+        at best. Tool calling is assumed and verified by Admin → Test connection."""
+        if self._caps is not None:
+            return self._caps
+        entries, _error = await self._models()
+        entry = next((e for e in entries if e.get("id") == self.model), {})
+        name = self.model.lower()
+        # An embedding model shares the listing with the chat models and answers no chat.
+        embedding = bool(re.search(r"(embed|bge-|e5-|gte-|minilm|nomic-embed|rerank)", name))
+        caps = {
+            "tools": not embedding,
+            "thinking": bool(re.search(r"(r1|qwq|reason|think|gpt-oss|deepseek)", name)),
+            "vision": bool(re.search(r"(vision|vl\b|-vl|llava|pixtral|gemma-3|gemma3|minicpm-v)", name)),
+            "audio": False,
+            "context_length": self._context_of(entry),
+            "declared": [],
+            "source": (f"{self.model} on an OpenAI-compatible server: capabilities are not declared "
+                       f"by this API; tool calling is assumed — Admin → Test connection verifies it."),
+        }
+        self._caps = caps
+        return caps
+
+    # --- messages, translated at the edge ------------------------------------
+    @staticmethod
+    def _convert(messages: list[dict], system: str) -> list[dict]:
+        out: list[dict] = [{"role": "system", "content": system}] if system else []
+        pending: list[str] = []
+        counter = 0
+        for message in messages:
+            role = message.get("role")
+            if role == "assistant" and message.get("tool_calls"):
+                calls = []
+                for call in message["tool_calls"]:
+                    fn = call.get("function") or {}
+                    counter += 1
+                    call_id = str(call.get("id") or f"call_{counter}")
+                    args = fn.get("arguments")
+                    calls.append({"id": call_id, "type": "function",
+                                  "function": {"name": fn.get("name") or "",
+                                               "arguments": args if isinstance(args, str)
+                                               else json.dumps(args or {}, ensure_ascii=False)}})
+                    pending.append(call_id)
+                out.append({"role": "assistant", "content": message.get("content") or None, "tool_calls": calls})
+                continue
+            if role == "tool":
+                if pending:
+                    call_id = str(message.get("tool_call_id") or "")
+                    if call_id in pending:
+                        pending.remove(call_id)
+                    else:
+                        call_id = pending.pop(0)
+                    out.append({"role": "tool", "tool_call_id": call_id, "content": str(message.get("content") or "")})
+                else:
+                    # A result whose call was recovered from text has no call to answer:
+                    # it is handed over as what it is, a message with the result.
+                    out.append({"role": "user", "content": f"[Result of {message.get('name') or 'a tool'}]\n"
+                                                           f"{message.get('content') or ''}"})
+                continue
+            entry = {"role": role if role in ("user", "assistant", "system") else "user",
+                     "content": message.get("content") or ""}
+            if message.get("images"):
+                parts = [{"type": "text", "text": entry["content"]}]
+                parts += [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}}
+                          for image in message["images"]]
+                entry["content"] = parts
+            out.append(entry)
+        return out
+
+    async def chat(self, messages: list[dict], *, system: str = "", tools: list[dict] | None = None,
+                   temperature: float = 0.3, max_tokens: int = 0, json_schema: dict | str | None = None,
+                   think: bool | None = None, on_text: Delta | None = None,
+                   on_thinking: Delta | None = None, images: list[tuple[bytes, str]] | None = None,
+                   should_stop: Callable[[], bool] | None = None) -> LLMResult:
+        started = time.time()
+        converted = [dict(m) for m in messages]
+        if images and converted:
+            converted[-1]["images"] = [base64.b64encode(raw).decode() for raw, _ in images]
+        payload: dict[str, Any] = {"model": self.model, "messages": self._convert(converted, system),
+                                   "stream": True, "temperature": temperature}
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        if json_schema is not None and "response_format" not in self._dropped:
+            payload["response_format"] = (
+                {"type": "json_schema", "json_schema": {"name": "response", "schema": json_schema}}
+                if isinstance(json_schema, dict) else {"type": "json_object"})
+        if "stream_options" not in self._dropped:
+            payload["stream_options"] = {"include_usage": True}
+
+        delays = (2.0, 5.0, 12.0)
+        text_parts: list[str] = []
+        think_parts: list[str] = []
+        calls: dict[int, dict] = {}
+        meta = {"in": 0, "out": 0, "stop": "", "errors": []}
+        for attempt in range(len(delays) + 1):
+            last = attempt == len(delays)
+            try:
+                await self._stream_once(payload, text_parts, think_parts, calls, meta,
+                                        on_text, on_thinking, should_stop)
+            except _Refused as exc:
+                # An optional field the server does not know: drop it once, ask again.
+                optional = [k for k in ("response_format", "stream_options", "tool_choice") if k in payload]
+                if optional and not (text_parts or calls):
+                    for key in optional:
+                        payload.pop(key, None)
+                        self._dropped.add(key)
+                    continue
+                raise NotConfigured(str(exc)) from exc
+            except _Retryable as exc:
+                if not last and not (text_parts or calls):
+                    think_parts.clear()
+                    await asyncio.sleep(delays[attempt])
+                    continue
+                raise NotConfigured(str(exc)) from exc
+            except httpx.HTTPError as exc:
+                if not last and not (text_parts or calls):
+                    think_parts.clear()
+                    await asyncio.sleep(delays[attempt])
+                    continue
+                raise NotConfigured(_explain(exc, self.base_url, "openai")) from exc
+            break
+
+        content = "".join(text_parts)
+        tool_calls: list[ToolCall] = []
+        for index in sorted(calls):
+            raw = calls[index]
+            try:
+                args = json.loads(raw["arguments"]) if raw["arguments"].strip() else {}
+            except json.JSONDecodeError:
+                args = {}
+            if raw["name"]:
+                tool_calls.append(ToolCall(id=raw["id"] or f"call_{index}", name=raw["name"],
+                                           arguments=args if isinstance(args, dict) else {}))
+        native = True
+        if not tool_calls and tools:
+            known = {(t.get("function") or {}).get("name") for t in tools}
+            recovered, leftover = recover_tool_calls(content, {k for k in known if k})
+            if recovered:
+                tool_calls, content, native = recovered, leftover, False
+        return LLMResult(content=content, thinking="".join(think_parts), tool_calls=tool_calls,
+                         tokens_in=meta["in"], tokens_out=meta["out"], model=self.model,
+                         latency_ms=int((time.time() - started) * 1000), native_tools=native,
+                         stop_reason=meta["stop"], error=" | ".join(dict.fromkeys(meta["errors"]))[:600])
+
+    async def _stream_once(self, payload: dict, text_parts: list[str], think_parts: list[str],
+                           calls: dict[int, dict], meta: dict, on_text: Delta | None,
+                           on_thinking: Delta | None, should_stop: Callable[[], bool] | None) -> None:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_s, connect=15)) as client:
+            async with client.stream("POST", f"{self.base_url}/chat/completions", json=payload,
+                                     headers=self._headers()) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode(errors="replace")[:500]
+                    message = f"The model server refused the request (HTTP {resp.status_code}): {body}"
+                    if resp.status_code >= 500:
+                        raise _Retryable(message)
+                    if resp.status_code in (400, 422):
+                        raise _Refused(message)
+                    raise NotConfigured(message)
+                async for line in resp.aiter_lines():
+                    if should_stop is not None and should_stop():
+                        meta["stop"] = "cancelled"
+                        break
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk.get("error"):
+                        meta["errors"].append(str(chunk["error"])[:500])
+                        continue
+                    usage = chunk.get("usage") or {}
+                    if usage:
+                        meta["in"] = usage.get("prompt_tokens") or meta["in"]
+                        meta["out"] = usage.get("completion_tokens") or meta["out"]
+                    for choice in chunk.get("choices") or []:
+                        delta = choice.get("delta") or choice.get("message") or {}
+                        piece = delta.get("content")
+                        if piece:
+                            text_parts.append(piece)
+                            if on_text is not None:
+                                on_text(piece)
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                        if reasoning:
+                            think_parts.append(reasoning)
+                            if on_thinking is not None:
+                                on_thinking(reasoning)
+                        for call in delta.get("tool_calls") or []:
+                            slot = calls.setdefault(int(call.get("index") or 0), {"id": "", "name": "", "arguments": ""})
+                            if call.get("id"):
+                                slot["id"] = call["id"]
+                            fn = call.get("function") or {}
+                            if fn.get("name") and not slot["name"].endswith(fn["name"]):
+                                slot["name"] += fn["name"]
+                            arguments = fn.get("arguments")
+                            if isinstance(arguments, dict):
+                                slot["arguments"] = json.dumps(arguments)
+                            elif arguments:
+                                slot["arguments"] += arguments
+                        if choice.get("finish_reason"):
+                            meta["stop"] = choice["finish_reason"]
+
+    async def healthcheck(self) -> dict:
+        entries, error = await self._models()
+        base = {"provider": self.name, "label": self.label, "model": self.model, "local": True,
+                "base_url": self.base_url}
+        if error:
+            return {**base, "ok": False, "error": error}
+        ids = [e.get("id") for e in entries]
+        present = not ids or self.model in ids
+        return {**base, "ok": present,
+                "error": None if present else f"'{self.model}' is not served here. Served: {', '.join(map(str, ids[:8]))}."}
+
+    async def runtime_status(self) -> dict:
+        return {"loaded": False}
+
+    async def list_models(self) -> dict:
+        entries, error = await self._models()
+        if error:
+            return {"ok": False, "models": [], "error": error}
+        models = [{"name": str(e.get("id")), "size_gb": 0.0, "family": str(e.get("owned_by") or ""),
+                   "parameters": "", "local": True, "context_length": self._context_of(e)}
+                  for e in entries if e.get("id")]
+        models.sort(key=lambda m: m["name"])
+        return {"ok": True, "models": models, "error": None}
+
+
+class _Refused(Exception):
+    """A 4xx the request might not get if it asked for less."""
+
+
 async def describe_model(base_url: str, model: str) -> dict:
     """Capabilities of a model that is not the active one — used by the Admin picker so a
     user can see what a model supports *before* selecting it."""
     return await OllamaProvider(base_url, model).capabilities()
 
 
-def make_provider(base_url: str, model: str, timeout_s: int, num_ctx: int) -> LLMProvider:
+def make_provider(base_url: str, model: str, timeout_s: int, num_ctx: int,
+                  kind: str = "ollama", api_key: str = "") -> LLMProvider:
     if not base_url or not model:
         return UnconfiguredProvider()
+    if kind == "openai":
+        return OpenAIProvider(base_url, model, api_key, timeout_s, num_ctx)
     return OllamaProvider(base_url, model, timeout_s, num_ctx)
+
+
+async def probe_connection(kind: str, base_url: str, api_key: str = "", model: str = "") -> dict:
+    """Admin → Test connection: can the server be reached, which models does it serve, does
+    the model answer, and does it call a tool when offered one. Each step timed."""
+    report: dict[str, Any] = {"provider": kind, "base_url": base_url.rstrip("/")}
+    lister = (OpenAIProvider(base_url, model, api_key) if kind == "openai" else OllamaProvider(base_url, model))
+    started = time.time()
+    listing = await lister.list_models()
+    report["reachable"] = bool(listing.get("ok"))
+    report["list_ms"] = int((time.time() - started) * 1000)
+    report["models"] = [m["name"] for m in listing.get("models") or []]
+    report["error"] = listing.get("error")
+    if not listing.get("ok"):
+        return report
+    model = model or (report["models"][0] if report["models"] else "")
+    report["model"] = model
+    if not model:
+        report["chat"] = {"ok": False, "error": "The server serves no model."}
+        return report
+    provider = make_provider(base_url, model, 120, 0, kind, api_key)
+    try:
+        started = time.time()
+        # Room for a reasoning model to think before it writes the word.
+        result = await asyncio.wait_for(provider.chat(
+            [{"role": "user", "content": "Reply with exactly the word OK."}], temperature=0.0, max_tokens=600), 180)
+        reply = result.content.strip()
+        report["chat"] = {"ok": bool(reply or result.thinking.strip()),
+                          "reply": reply[:80] or ("(reasoned, no final text within the limit)" if result.thinking else ""),
+                          "thinking": bool(result.thinking.strip()),
+                          "ms": int((time.time() - started) * 1000),
+                          "tokens_out": result.tokens_out}
+    except Exception as exc:  # noqa: BLE001
+        report["chat"] = {"ok": False, "error": str(exc)[:400]}
+        return report
+    tool = {"type": "function", "function": {
+        "name": "get_time", "description": "Returns the current time in a time zone.",
+        "parameters": {"type": "object", "properties": {"timezone": {"type": "string"}}, "required": ["timezone"]}}}
+    try:
+        started = time.time()
+        result = await asyncio.wait_for(provider.chat(
+            [{"role": "user", "content": "What time is it in Paris? Use the tool."}], tools=[tool],
+            temperature=0.0, max_tokens=600), 180)
+        called = [c for c in result.tool_calls if c.name == "get_time"]
+        report["tools"] = {"ok": bool(called), "native": result.native_tools,
+                           "arguments": called[0].arguments if called else {},
+                           "ms": int((time.time() - started) * 1000),
+                           "error": None if called else "The model answered without calling the tool: "
+                                                        "the agent needs tool calling."}
+    except Exception as exc:  # noqa: BLE001
+        report["tools"] = {"ok": False, "error": str(exc)[:400]}
+    return report

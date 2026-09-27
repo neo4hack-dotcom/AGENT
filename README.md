@@ -6,11 +6,12 @@ work with nothing configured, and the MCP servers that hold your data — databa
 data services, reference data — connected from a discreet admin page and described once so
 the agent knows what each one is for.
 
-Models run through **Ollama**, on this machine or on a server inside your network.
+Models run through **Ollama**, or any **OpenAI-compatible** server (vLLM, LM Studio,
+llama.cpp, LocalAI, TGI…), on this machine or on a server inside your network.
 
 **Air-gapped by default.** No tool reaches the internet, and the paths out that
-configuration could open are closed where they open: cloud models and external Ollama hosts
-are refused, MCP endpoints must be internal, package managers run offline, and on macOS
+configuration could open are closed where they open: cloud models and model servers outside
+the network are refused, MCP endpoints must be internal, package managers run offline, and on macOS
 every local MCP server runs inside a kernel sandbox that allows the loopback interface and
 nothing else. See [Air-gapped deployment](#air-gapped-deployment).
 
@@ -52,6 +53,46 @@ never guessed from the name:
 
 `gpt-oss` reports tools and thinking but **not vision**, so image attachments need a
 different model (`qwen3.5:4b` and `gemma4:e4b` both see).
+
+### A local model server that is not Ollama
+
+Admin → *Model* → **OpenAI-compatible**, then the server's base URL (usually ending in
+`/v1`) and its API key if it asks for one. Or in `backend/.env`:
+
+```bash
+AGENT_LLM_PROVIDER=openai
+AGENT_OPENAI_BASE_URL=http://gpu-01.internal:8000/v1
+AGENT_OPENAI_API_KEY=            # empty if the server needs none
+AGENT_MODEL=Qwen/Qwen3-32B
+```
+
+Two buttons check it before you rely on it:
+
+- **List models** — what `GET /models` returns, from the URL typed in the form, before saving.
+- **Test connection** — reaches the server, asks the model for a one-word answer, then makes
+  it call a test tool. Each step reports its latency and what came back, so a server that
+  answers but ignores tools (vLLM without `--enable-auto-tool-choice`, a chat template with
+  no tool support) is caught here rather than in the middle of a question.
+
+This API does not declare capabilities as Ollama does: `tools` is assumed, thinking and
+vision are guessed from the name, the context window is read from `/models` when the server
+reports it — **Test connection** is what verifies tool calling. Streaming, reasoning
+(`reasoning_content`), native tool calls, JSON schemas and images all go through the
+standard chat-completions API; the key is sent as a bearer token, masked in Admin and
+redacted from traces. The air gap applies to this URL exactly as to Ollama's.
+
+### Direct LLM mode
+
+The small icon beside the paperclip switches between **Agent** and **Direct LLM**. In direct
+mode the question goes to the model with the tools of the MCP servers you tick in the same
+menu — and nothing else: no routing, plan, critic, gap check or composed answer, no
+built-in tools. One server, several, or none (the model alone). The choice is remembered in
+the browser, a retried question keeps its mode, and the answer's footer says
+`direct · <servers>`.
+
+What does not switch off: approvals, the air gap, the fencing of tool output as data,
+secret redaction, the audit trail (with the mode and servers of each run) and the lineage of
+every tool call.
 
 ---
 
@@ -245,7 +286,7 @@ UI: whoever reaches Admin cannot open a path out.
 
 | Path out | How it is closed |
 |---|---|
-| The model | `-cloud` models and Ollama hosts outside the private network are refused |
+| The model | `-cloud` models are refused, and so is any model server — Ollama or OpenAI-compatible — outside the private network (`AGENT_ALLOW_CLOUD_MODEL` lifts the first rule only) |
 | MCP over HTTP | the endpoint must be internal — loopback, a private address, or a suffix in `AGENT_INTERNAL_DOMAINS` — and so must every redirect |
 | MCP over stdio | `npx`/`uvx`/`pip` run offline; internet packages are refused by name; on macOS the process runs in a kernel sandbox allowing loopback only |
 | MCP needing an internal host | a database client (detected from its configuration, or set to *Internal network* in the server form) keeps the network; the enterprise firewall is what holds it inside |
@@ -279,10 +320,11 @@ backend/app/
 ├── store.py             flat JSON, serialised and debounced writes
 ├── security.py          who may reach the app: local, sign-in, origin and host checks
 ├── network.py           the air gap: model, MCP endpoints, offline launch, kernel sandbox
-├── llm/provider.py      Ollama: streaming, reasoning split out, native tools
+├── llm/provider.py      Ollama and OpenAI-compatible: streaming, reasoning, native tools,
+│                        connection probe
 ├── mcp/                 hand-written JSON-RPC client (stdio + HTTP), registry, catalog
 ├── agent/
-│   ├── runner.py        the loop, approvals, critic, synthesis
+│   ├── runner.py        the loop, approvals, critic, synthesis; direct mode
 │   ├── guard.py         the loop guard
 │   ├── prompts.py       everything the model knows about itself
 │   ├── builtin.py       the built-in tools
@@ -294,7 +336,8 @@ backend/app/
 frontend/src/
 ├── App.tsx              the two states: empty canvas, then conversation
 ├── api.ts               the one typed client (+ a reconnecting SSE stream)
-└── components/          ui, Markdown, Composer, Thread, Sidebar, Admin, McpLibrary
+└── components/          ui, Markdown, Composer, ModeSwitch, Thread, Sidebar, Admin,
+                         McpLibrary
 ```
 
 The MCP client is written **directly against the protocol** (JSON-RPC 2.0, `2025-06-18`)

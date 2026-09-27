@@ -247,6 +247,9 @@ class RunContext:
         self.workspace_before: dict[str, tuple[int, float]] = {}
         self.question = ""
         self.route_plan: list[str] = []
+        # Direct mode: the model and the chosen servers' tools, no agent layer on top.
+        self.direct = False
+        self.direct_servers: list[str] = []
         # What was verified along the way, kept with the answer for whoever audits it.
         self.checks: list[dict] = []
         # ISIN → name, learned from this run's results; answers show "Name (ISIN)".
@@ -455,7 +458,8 @@ class AgentRunner:
                 return run_id
         return ""
 
-    async def start(self, conversation_id: str, text: str, images: list[dict] | None = None) -> dict:
+    async def start(self, conversation_id: str, text: str, images: list[dict] | None = None,
+                    mode: str = "agent", servers: list[str] | None = None) -> dict:
         """Create the run, kick it off in the background, and return its identifiers.
 
         The run lives past the HTTP request on purpose: closing the tab, or losing the
@@ -473,10 +477,15 @@ class AgentRunner:
         }
         self.c.store.append_message(conversation_id, user_message)
 
+        known = self.c.store.mcp_servers()
+        direct_servers = [sid for sid in (servers or []) if sid in known] if mode == "direct" else []
         assistant_message = {
             "id": new_id("m"), "role": "assistant", "content": "", "created_at": now(),
             "blocks": [], "plan": [], "usage": {}, "status": "running", "error": None,
             "model": getattr(self.c.llm, "model", ""),
+            "mode": "direct" if mode == "direct" else "agent",
+            "servers": [known[sid]["name"] for sid in direct_servers],
+            "server_ids": direct_servers,
         }
         self.c.store.append_message(conversation_id, assistant_message)
 
@@ -484,9 +493,12 @@ class AgentRunner:
                           self.c.settings.run_timeout_s,
                           self.c.settings.stagnation_limit)
         ctx = RunContext(new_id("r"), conversation_id, assistant_message["id"], self.c.bus, guard)
+        ctx.direct = mode == "direct"
+        ctx.direct_servers = direct_servers
         self.runs[ctx.run_id] = ctx
         self.c.audit.record("run.start", run_id=ctx.run_id, conversation=conversation_id,
-                            model=getattr(self.c.llm, "model", ""), chars=len(text))
+                            model=getattr(self.c.llm, "model", ""), chars=len(text),
+                            mode=assistant_message["mode"], servers=assistant_message["servers"])
         asyncio.create_task(self._drive(ctx, text, images or []))
         return {"run_id": ctx.run_id, "conversation_id": conversation_id,
                 "user_message_id": user_message["id"], "message_id": assistant_message["id"]}
@@ -513,7 +525,7 @@ class AgentRunner:
         except OSError:
             ctx.workspace_before = {}
         try:
-            await self._run(ctx, text, images)
+            await (self._run_direct(ctx, text, images) if ctx.direct else self._run(ctx, text, images))
             ctx.status = "completed" if not ctx.error else "failed"
         except RunCancelled:
             ctx.status = "cancelled"
@@ -545,7 +557,8 @@ class AgentRunner:
             asyncio.create_task(self._expire(ctx.run_id))
             # After the reader has their answer, never before: what this run had to learn
             # the hard way, proposed as notes for the next question.
-            asyncio.create_task(self._review_lessons(ctx))
+            if not ctx.direct:
+                asyncio.create_task(self._review_lessons(ctx))
 
     async def _review_lessons(self, ctx: RunContext) -> None:
         """Turn a run's corrections into proposed source notes.
@@ -870,6 +883,95 @@ class AgentRunner:
         return out
 
     # --------------------------------------------------------------- main loop
+    async def _run_direct(self, ctx: RunContext, text: str, images: list[dict]) -> None:
+        """The model and the tools of the servers the reader chose — nothing on top.
+
+        No routing, plan, critic, reflection, held drafts or composed answer: what the model
+        writes is the answer, streamed as it comes, and it calls the chosen servers' tools
+        itself. What stays is what keeps this safe and accountable: approvals for writes,
+        the egress policy, untrusted content fenced, secrets redacted, every call audited
+        and the lineage kept with the answer.
+        """
+        settings = self.c.settings
+        ctx.question = text
+        ctx.emit({"type": "status", "phase": "starting"})
+        await self.c.mcp.wait_ready(timeout=min(8.0, settings.mcp_startup_timeout_s))
+        chosen = set(ctx.direct_servers)
+        mcp_tools = [t for t in self.c.mcp.tools() if t["server_id"] in chosen]
+        functions = self.c.mcp.ollama_tools(mcp_tools) if mcp_tools else []
+        names = sorted({t["server_name"] for t in mcp_tools})
+        missing = [self.c.store.mcp_servers()[sid]["name"] for sid in chosen
+                   if sid in self.c.store.mcp_servers() and self.c.store.mcp_servers()[sid]["name"] not in names]
+        if missing:
+            ctx.emit({"type": "notice", "message": f"Not connected, so not available: {', '.join(missing)}."})
+        system = prompts.direct_system(names) + trust.spotlight_notice(ctx.nonce)
+        messages = self._history(ctx.conversation_id, ctx.message_id)
+        messages.append({"role": "user", "content": text})
+        image_payload = [(i["data"], i.get("mime", "image/png")) for i in images if i.get("data")]
+        caps = await self.c.llm.capabilities() if hasattr(self.c.llm, "capabilities") else {}
+        if image_payload and not caps.get("vision"):
+            ctx.emit({"type": "notice", "message": "This model cannot read images; the attachment was not sent."})
+            image_payload = []
+        ctx.egress.trust_from_user(text)
+
+        for iteration in range(settings.max_iterations):
+            ctx.check_cancelled()
+            if ctx.guard.over_time_budget():
+                ctx.emit({"type": "notice", "message": f"Time budget reached ({settings.run_timeout_s}s)."})
+                break
+            ctx.emit({"type": "status", "phase": "thinking"})
+            text_block: dict | None = None
+            think_block: dict | None = None
+
+            def on_text(piece: str) -> None:
+                nonlocal text_block
+                if text_block is None:
+                    text_block = {"type": "text", "text": "", "index": len(ctx.blocks)}
+                    ctx.blocks.append(text_block)
+                    ctx.emit({"type": "block.open", "kind": "text", "index": text_block["index"]})
+                text_block["text"] += piece
+                ctx.emit({"type": "text.delta", "index": text_block["index"], "text": piece})
+
+            def on_thinking(piece: str) -> None:
+                nonlocal think_block
+                if think_block is None:
+                    think_block = {"type": "thinking", "text": "", "index": len(ctx.blocks)}
+                    ctx.blocks.append(think_block)
+                    ctx.emit({"type": "block.open", "kind": "thinking", "index": think_block["index"]})
+                think_block["text"] += piece
+                ctx.emit({"type": "thinking.delta", "index": think_block["index"], "text": piece})
+
+            result = await self.c.llm.chat(messages, system=system, tools=functions or None,
+                                           temperature=0.3, on_text=on_text, on_thinking=on_thinking,
+                                           images=image_payload or None, should_stop=lambda: ctx.cancelled)
+            ctx.check_cancelled()
+            image_payload = []
+            ctx.usage["llm_calls"] += 1
+            ctx.usage["tokens_in"] += result.tokens_in
+            ctx.usage["tokens_out"] += result.tokens_out
+            if iteration == 0:
+                ctx.usage["ttft_ms"] = result.latency_ms
+            ctx.emit({"type": "usage", **ctx.usage})
+            if not result.tool_calls:
+                break
+            entry: dict[str, Any] = {"role": "assistant", "content": result.content or ""}
+            if result.native_tools:
+                entry["tool_calls"] = [{"id": call.id, "function": {"name": call.name, "arguments": call.arguments}}
+                                       for call in result.tool_calls]
+            messages.append(entry)
+            outcomes = await self._execute_calls(ctx, result.tool_calls, {})
+            for call, outcome in outcomes:
+                messages.append({"role": "tool", "tool_name": call.name, "name": call.name,
+                                 "tool_call_id": call.id,
+                                 "content": builtin.truncate_for_model(outcome["model_text"])})
+        else:
+            ctx.emit({"type": "notice", "message": f"Ceiling of {settings.max_iterations} tool turns reached."})
+        if not ctx.has_answer() and not ctx.error:
+            ctx.error = "The model returned no answer."
+            ctx.emit({"type": "error", "message": ctx.error, "kind": "empty"})
+        ctx.emit({"type": "status", "phase": "done"})
+        asyncio.create_task(self._maybe_title(ctx.conversation_id))
+
     async def _run(self, ctx: RunContext, text: str, images: list[dict]) -> None:
         settings = self.c.settings
         ctx.question = text
@@ -1905,7 +2007,7 @@ class AgentRunner:
         ok = bool(result.get("ok"))
         if not ok and spec is None:
             result = self._enrich_error(call, result)
-        elif ok and spec is None:
+        elif ok and spec is None and not ctx.direct:
             result = self._note_ignored_arguments(call, result)
             result = self._note_whole_table_aggregate(call, result)
             result = self._note_several_matches(call, result)

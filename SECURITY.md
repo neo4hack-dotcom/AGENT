@@ -73,8 +73,10 @@ A third check catches the shape of a channel rather than a destination: a query 
 
 `app/network.py` closes each path out where it opens, and Diagnostics shows what holds:
 
-- **the model** — `-cloud` Ollama models and Ollama hosts outside the network are refused
-  (`AGENT_ALLOW_CLOUD_MODEL` lifts this one rule, for tests on non-sensitive data);
+- **the model** — model servers outside the network are refused, Ollama or
+  OpenAI-compatible alike, including by Admin's *List models* and *Test connection*; so are
+  `-cloud` Ollama models (`AGENT_ALLOW_CLOUD_MODEL` lifts that second rule only, for tests on
+  non-sensitive data — the server's host is still checked);
 - **MCP over HTTP** — the endpoint must be internal, and so must every redirect it issues;
 - **MCP over stdio** — package managers run offline (`UV_OFFLINE`, `npm_config_offline`…),
   packages whose purpose is the internet are refused by name, and on macOS the process

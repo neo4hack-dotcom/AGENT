@@ -27,7 +27,8 @@ from app.store import JsonStore
 # What the UI may override at runtime. Anything outside this set is environment-only:
 # paths, ports and the admin password are deployment facts, not preferences.
 OVERRIDABLE = {
-    "ollama_base_url", "model", "fast_model", "approval_mode", "max_iterations",
+    "ollama_base_url", "llm_provider", "openai_base_url", "openai_api_key",
+    "model", "fast_model", "approval_mode", "max_iterations",
     "run_timeout_s", "tool_timeout_s", "enable_python_tool",
     "python_timeout_s", "python_memory_mb", "num_ctx", "critic_min_tools",
     "history_turns", "parallel_max_fanout", "stagnation_limit", "max_retries",
@@ -115,6 +116,9 @@ class Container:
         password = (self.env.admin_password or "").strip()
         if len(password) >= 8:
             found.append(password)
+        api_key = str(self.get("openai_api_key") or "").strip()
+        if len(api_key) >= 8:
+            found.append(api_key)
         return found
 
     def workspace(self) -> Path:
@@ -124,11 +128,12 @@ class Container:
 
     # --- the model ------------------------------------------------------------
     def _refresh_llm(self) -> None:
-        key = (self.get("ollama_base_url"), self.get("model"), self.get("fast_model"),
-               self.get("num_ctx"))
+        kind = "openai" if self.get("llm_provider") == "openai" else "ollama"
+        key = (kind, self.get("openai_base_url") if kind == "openai" else self.get("ollama_base_url"),
+               self.get("model"), self.get("fast_model"), self.get("num_ctx"), self.get("openai_api_key"))
         if key == self._llm_key and self._llm is not None:
             return
-        base_url, model, fast_model, num_ctx = key
+        kind, base_url, model, fast_model, num_ctx, api_key = key
         timeout = int(self.env.llm_timeout_s)
         from app import network
         from app.llm.provider import UnconfiguredProvider
@@ -139,7 +144,7 @@ class Container:
             refused = network.check_model(name, base_url or "")
             if refused:
                 return UnconfiguredProvider(refused)
-            return make_provider(base_url, name, timeout, int(num_ctx or 0))
+            return make_provider(base_url, name, timeout, int(num_ctx or 0), kind, api_key or "")
 
         self._llm = build(model or "")
         self._fast_llm = build(fast_model or model or "")

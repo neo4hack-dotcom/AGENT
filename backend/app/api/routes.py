@@ -38,6 +38,11 @@ async def bootstrap(request: Request) -> dict:
         "app": c.env.app_name,
         "model": {**llm, "capabilities": caps, "fast_model": c.get("fast_model") or ""},
         "mcp": c.mcp.summary(),
+        # What direct mode can offer: every connected server, by name.
+        "servers": [{"id": s["id"], "name": s["name"], "slug": s.get("slug") or "",
+                     "connected": s.get("status") == "connected", "tool_count": s.get("tool_count", 0),
+                     "role": s.get("role") or "source"}
+                    for s in c.mcp.list_servers() if s.get("enabled", True)],
         "tools": tool_surface(),
         "admin": admin_state(c, request),
         "prefs": {"approval_mode": c.get("approval_mode")},
@@ -118,6 +123,10 @@ class ChatBody(BaseModel):
     conversation_id: str = ""
     text: str
     attachments: list[str] = Field(default_factory=list)
+    # "agent" (the full loop) or "direct": the model with the chosen MCP servers' tools and
+    # nothing on top — no routing, critic, reflection or composed answer.
+    mode: str = Field(default="agent", pattern="^(agent|direct)$")
+    servers: list[str] = Field(default_factory=list, max_length=50)
 
 
 @router.post("/chat")
@@ -142,7 +151,7 @@ async def chat(body: ChatBody) -> dict:
     if notes:
         text = (text + "\n\n" + "\n".join(notes)).strip()
 
-    return await c.runner.start(conv_id, text, images)
+    return await c.runner.start(conv_id, text, images, mode=body.mode, servers=body.servers)
 
 
 @router.get("/runs/{run_id}/stream")
@@ -441,11 +450,14 @@ async def retry(conv_id: str, body: RetryBody) -> dict:
     if index < 0 or messages[index]["role"] != "user":
         raise HTTPException(404, "That is not a question in this conversation.")
     question = (body.text or messages[index].get("content") or "").strip()
+    # Asked again the way it was asked: a direct question stays direct, on the same servers.
+    answer = messages[index + 1] if index + 1 < len(messages) else {}
+    mode = "direct" if answer.get("mode") == "direct" else "agent"
     conv["messages"] = messages[:index]
     conv["updated_at"] = now()
     c.store.touch()
     await c.store.save()
-    return await c.runner.start(conv_id, question, [])
+    return await c.runner.start(conv_id, question, [], mode=mode, servers=list(answer.get("server_ids") or []))
 
 
 # --------------------------------------------------------------------- memory

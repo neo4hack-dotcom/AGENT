@@ -395,3 +395,14 @@ def heal_hint(tool_name: str, error: str, advice: str) -> str:
         lines.append(f"Critic's advice: {advice}")
     lines.append("Correct the call or change approach. Do not repeat the identical call.")
     return note("\n".join(lines))
+
+
+def direct_system(servers: list[str]) -> str:
+    """The whole system prompt of direct mode: short, because nothing sits on top of it."""
+    today = datetime.now().strftime("%A %d %B %Y")
+    tools = (f"You can call the tools of these MCP servers: {', '.join(servers)}. Call them when the "
+             f"question needs their data; answer from their results, and say when they do not have "
+             f"what was asked." if servers else "No tool is connected: answer from what you know, and "
+             "say so when a question needs data you do not have.")
+    return (f"You are a helpful assistant. Today is {today}. {tools} Answer in the language of the "
+            f"question. Never invent a figure, a name or an identifier a tool did not return.")
