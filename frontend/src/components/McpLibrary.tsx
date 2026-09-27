@@ -134,6 +134,13 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
                         {server.status === 'connected' && (
                           <Badge tone="brand">{server.tool_count} tool{server.tool_count > 1 ? 's' : ''}</Badge>
                         )}
+                        {server.status === 'connected' && server.network && (
+                          <span title={`Network: ${server.network}`}>
+                            <Badge tone={server.network.startsWith('loopback') ? 'good' : 'neutral'}>
+                              {server.network.startsWith('loopback') ? 'offline' : server.network.startsWith('internal') ? 'internal network' : 'network open'}
+                            </Badge>
+                          </span>
+                        )}
                         <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-2xs dimmer dark:bg-white/[0.06]">
                           {server.slug}__
                         </code>
@@ -309,6 +316,7 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
   const [args, setArgs] = useState('');
   const [url, setUrl] = useState('');
   const [env, setEnv] = useState('');
+  const [reach, setReach] = useState<'' | 'local' | 'internal'>('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -327,7 +335,7 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
           ? (args.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((a) => a.replace(/^["']|["']$/g, ''))
           : [],
         url: transport === 'http' ? url : '',
-        env: parseEnv(env), connect: true,
+        env: parseEnv(env), network: transport === 'stdio' ? reach : '', connect: true,
       });
       if (server.status === 'connected') { toast(`${name} connected`); onDone(); }
       else setError(server.error ?? 'Could not connect.');
@@ -355,9 +363,20 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
             <Field label="Arguments" hint="Whitespace-separated; quote a path that contains spaces.">
               <Input value={args} onChange={(e) => setArgs(e.target.value)} placeholder="-y my-mcp-server --flag value" />
             </Field>
+            <Field label="Network" hint="Offline servers run in a sandbox that allows this machine only. Choose internal for a server that queries a database or service elsewhere in your network.">
+              <div className="flex gap-1.5">
+                {([['', 'Automatic'], ['local', 'Offline'], ['internal', 'Internal network']] as const).map(([value, label]) => (
+                  <button key={value} type="button" onClick={() => setReach(value)}
+                    className={cls('focus-ring flex-1 rounded-lg border px-2.5 py-1.5 text-2xs font-medium transition-colors',
+                      reach === value ? 'border-brand-500 bg-brand-100 text-brand-800 dark:bg-brand-500/12 dark:text-brand-300' : 'hairline dim')}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </Field>
           </>
         ) : (
-          <Field label="URL"><Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://exemple.com/mcp" /></Field>
+          <Field label="URL"><Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://mcp.corp.internal:8080/mcp" /></Field>
         )}
         <Field label="Environment variables" hint="One per line, as KEY=value.">
           <textarea value={env} onChange={(e) => setEnv(e.target.value)} rows={3}

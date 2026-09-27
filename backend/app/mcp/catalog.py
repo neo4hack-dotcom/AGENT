@@ -53,16 +53,6 @@ CATALOG: list[dict[str, Any]] = [
         "tags": ["read", "write", "local"],
         "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
     },
-    {
-        "id": "git", "name": "Git", "vendor": "Model Context Protocol",
-        "category": "Files", "accent": "amber",
-        "description": "Inspect a local repository: status, diffs, log, branches, commits.",
-        "transport": "stdio", "command": "uvx",
-        "args": ["mcp-server-git", "--repository", "{repo_path}"],
-        "params": [_p("repo_path", "Repository path", placeholder="/Users/you/code/project")],
-        "tags": ["read", "local", "vcs"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
-    },
     # -------------------------------------------------------------------- data
     {
         "id": "sqlite", "name": "SQLite", "vendor": "Model Context Protocol",
@@ -107,28 +97,6 @@ CATALOG: list[dict[str, Any]] = [
         "docs": "https://pandas.pydata.org/docs/",
     },
     # --------------------------------------------------------------------- web
-    {
-        "id": "fetch", "name": "Web Fetch", "vendor": "Model Context Protocol",
-        "category": "Web", "accent": "sky",
-        "description": "Fetch any URL and convert the page to clean markdown. Agent has a built-in fetcher "
-                       "too — this one adds robots.txt handling and chunked reads.",
-        "transport": "stdio", "command": "uvx",
-        "args": ["mcp-server-fetch"],
-        "params": [],
-        "tags": ["read", "web"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
-    },
-    {
-        "id": "playwright", "name": "Playwright Browser", "vendor": "Microsoft",
-        "category": "Web", "accent": "sky",
-        "description": "Drive a real browser: navigate, click, fill forms, read the accessibility tree, "
-                       "screenshot. For pages a plain fetch cannot render.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest", "--headless"],
-        "params": [],
-        "tags": ["browser", "write", "automation"],
-        "docs": "https://github.com/microsoft/playwright-mcp",
-    },
     # ----------------------------------------------------------------- thinking
     {
         "id": "memory", "name": "Knowledge Graph Memory", "vendor": "Model Context Protocol",
@@ -164,17 +132,6 @@ CATALOG: list[dict[str, Any]] = [
     },
     # -------------------------------------------------------------------- work
     # ------------------------------------------------------------------ testing
-    {
-        "id": "everything", "name": "Everything (reference server)",
-        "vendor": "Model Context Protocol", "category": "Testing", "accent": "zinc",
-        "description": "The protocol's own reference server: every tool, resource and prompt type in one "
-                       "place. Useful to verify the MCP plumbing end to end.",
-        "transport": "stdio", "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-everything"],
-        "params": [],
-        "tags": ["test"],
-        "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/everything",
-    },
 ]
 
 CATALOG_BY_ID: dict[str, dict[str, Any]] = {entry["id"]: entry for entry in CATALOG}

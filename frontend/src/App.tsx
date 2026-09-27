@@ -8,7 +8,8 @@ import {
   AlertTriangle, Cloud, Command, MonitorSmartphone, Moon, Plus, Sparkles, Sun,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, streamRun } from './api';
+import { ApiError, api, setAdminToken, streamRun } from './api';
+import { SignIn } from './components/SignIn';
 import { Admin, AdminDoor } from './components/Admin';
 import { Artifacts } from './components/Artifacts';
 import { Palette } from './components/Palette';
@@ -28,6 +29,8 @@ interface Live {
   plan: PlanStep[];
   usage: Usage;
   phase: string;
+  /** Prose not yet known to be the answer: shown as a one-line ticker, never as the answer. */
+  draft: string;
   notices: { text: string; quiet?: boolean }[];
   approval: ApprovalRequest | null;
   ask: AskRequest | null;
@@ -48,7 +51,7 @@ function rememberConversation(id: string | null): void {
 
 const emptyLive = (runId: string, conversationId: string, messageId: string): Live => ({
   runId, conversationId, messageId,
-  blocks: new Map(), plan: [], usage: {}, phase: 'starting', notices: [],
+  blocks: new Map(), plan: [], usage: {}, phase: 'starting', draft: '', notices: [],
   approval: null, ask: null, files: [], error: null,
   trust: { sources: [], injections: [], compactions: 0 },
 });
@@ -57,6 +60,9 @@ export default function App() {
   const toast = useToast();
   const [dark, toggleTheme] = useTheme();
   const [boot, setBoot] = useState<Bootstrap | null>(null);
+  // Someone on another machine, before sign-in: 'signin' (a password opens it) or
+  // 'closed' (this deployment answers its own machine only).
+  const [gate, setGate] = useState<{ kind: 'signin' | 'closed'; message: string } | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [live, setLive] = useState<Live | null>(null);
@@ -76,7 +82,16 @@ export default function App() {
 
   /* ------------------------------------------------------------ loading */
   const refreshBoot = useCallback(async () => {
-    try { setBoot(await api.bootstrap()); } catch (e) { toast(String((e as Error).message), 'error'); }
+    try {
+      setBoot(await api.bootstrap());
+      setGate(null);
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+        setGate({ kind: e.status === 401 ? 'signin' : 'closed', message: e.message });
+      } else {
+        toast(String((e as Error).message), 'error');
+      }
+    }
   }, [toast]);
 
   const refreshConversations = useCallback(async () => {
@@ -172,8 +187,15 @@ export default function App() {
     // updater runs twice, and reloading the conversation twice is a visible flicker.
     const running = liveRef.current;
     liveRef.current = null;   // released here, not one commit later
+    // The saved answer first, then the live view let go — in the same render. The other
+    // order shows the empty placeholder for the length of a round trip: the answer
+    // vanished and came back at the end of every run.
+    let saved: Conversation | null = null;
+    if (running) {
+      try { saved = await api.getConversation(running.conversationId); } catch { /* deleted mid-run */ }
+    }
+    if (saved) setConversation(saved);
     setLive(null);
-    if (running) await reloadConversation(running.conversationId);
     void refreshConversations();
   }, [reloadConversation, refreshConversations]);
 
@@ -345,6 +367,11 @@ export default function App() {
   const toolsCapable = boot?.model.capabilities.tools ?? false;
   const canSeeAdmin = boot?.admin.authenticated || boot?.admin.mode === 'password';
 
+  if (gate) {
+    return <SignIn closed={gate.kind === 'closed'} message={gate.message}
+      onToken={(token) => { setAdminToken(token); void refreshBoot(); void refreshConversations(); }} />;
+  }
+
   return (
     <div className="flex h-full flex-col">
       <Sidebar
@@ -431,6 +458,7 @@ export default function App() {
                       message={rendered}
                       live={isLive}
                       phase={live?.phase}
+                      draft={isLive ? live!.draft : ''}
                       approval={isLive ? live!.approval : null}
                       onApprove={(approved) => void resolveApproval(approved)}
                       ask={isLive ? live!.ask : null}
@@ -567,10 +595,6 @@ function buildSuggestions(boot: Bootstrap | null): { label: string; text: string
   if (!boot) return [];
   const names = new Set(boot.tools.map((t) => t.name));
   const out: { label: string; text: string }[] = [];
-  if (names.has('web_search')) {
-    out.push({ label: 'Research something',
-      text: 'Research what has shipped recently around the Model Context Protocol: search, open the pages that matter, and give me a sourced summary.' });
-  }
   if (names.has('run_python')) {
     out.push({ label: 'Compute something real',
       text: 'Actually run the code to work out how many working days are left this year, and what share of the year has already passed.' });
@@ -620,10 +644,17 @@ function applyEvent(live: Live, event: StreamEvent): void {
       if (block) live.blocks.set(event.index, { ...block, superseded: true });
       break;
     }
+    case 'draft.delta':
+      live.draft = (live.draft + event.text).slice(-600);
+      break;
+    case 'draft.clear':
+      live.draft = '';
+      break;
     case 'plan':
       live.plan = event.steps;
       break;
     case 'tool.start':
+      live.draft = '';
       live.blocks.set(event.index, {
         index: event.index, type: 'tool', id: event.id, name: event.name, args: event.args,
         server: event.server, kind: event.kind, by: event.by, ref: event.ref,

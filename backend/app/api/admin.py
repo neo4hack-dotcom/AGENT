@@ -10,14 +10,15 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from app import network
 from app.deps import OVERRIDABLE, container as c
 from app.errors import McpError
 from app.mcp import runtimes
 from app.mcp.catalog import CATALOG, CATEGORIES, instantiate
-from app.security import admin_state, check_admin, login, logout
+from app.security import COOKIE, admin_state, check_admin, login, logout, request_token
 from app.tools.code import available_modules
 
 
@@ -40,18 +41,22 @@ async def state(request: Request) -> dict:
 
 
 @router.post("/login")
-async def do_login(request: Request, body: LoginBody) -> dict:
+async def do_login(request: Request, body: LoginBody, response: Response) -> dict:
     result = login(c, request, body.password)
     await c.store.save()
+    # The cookie carries the session where a header cannot: the event stream, downloads.
+    response.set_cookie(COOKIE, result["token"], max_age=c.env.session_ttl_s, httponly=True,
+                        samesite="strict", secure=request.url.scheme == "https", path="/")
     return result
 
 
 @router.post("/logout")
-async def do_logout(request: Request) -> dict:
-    header = request.headers.get("authorization") or ""
-    if header.lower().startswith("bearer "):
-        logout(c, header[7:].strip())
+async def do_logout(request: Request, response: Response) -> dict:
+    token = request_token(request)
+    if token:
+        logout(c, token)
         await c.store.save()
+    response.delete_cookie(COOKIE, path="/")
     return {"ok": True}
 
 
@@ -83,7 +88,10 @@ async def models() -> dict:
             except Exception:
                 caps = {"tools": False, "thinking": False, "vision": False, "context_length": 0,
                         "source": "capabilities unavailable"}
-        return {**entry, "capabilities": caps}
+        # Listed, not hidden, when the air gap refuses it: a model that vanished from the
+        # picker is a mystery, one marked "leaves the network" is an answer.
+        return {**entry, "capabilities": caps,
+                "refused": network.check_model(entry["name"], c.get("ollama_base_url")) or ""}
 
     enriched = await asyncio.gather(*(enrich(e) for e in entries)) if entries else []
     return {"ok": listing.get("ok", False), "error": listing.get("error"),
@@ -137,6 +145,7 @@ class InstallBody(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     cwd: str = ""
     description: str = ""
+    network: str = ""
     connect: bool = True
 
 
@@ -157,7 +166,8 @@ async def add_server(body: InstallBody) -> dict:
             raise HTTPException(400, "A stdio server needs a command.")
         cfg = {"name": body.name, "transport": body.transport, "command": body.command,
                "args": body.args, "env": body.env, "url": body.url, "headers": body.headers,
-               "cwd": body.cwd, "description": body.description, "category": "Custom"}
+               "cwd": body.cwd, "description": body.description, "category": "Custom",
+               "network": body.network}
     server = await c.mcp.add_server(cfg)
     await c.store.save()
     snapshot = {}
@@ -177,6 +187,7 @@ class PatchBody(BaseModel):
     command: str | None = None
     cwd: str | None = None
     description: str | None = None
+    network: str | None = None
 
 
 @guarded.patch("/servers/{server_id}")
@@ -295,6 +306,8 @@ def _source_summary(server: dict) -> dict:
     model = knowledge["model"]
     conn = c.mcp.connections.get(server["id"])
     queryable = _queryable(server)
+    tools = [t for t in c.mcp.tools() if t["server_id"] == server["id"]]
+    observed = c.atlas.summary(server["id"], tools)
     return {
         "id": server["id"], "name": server["name"], "slug": server.get("slug") or "",
         "connected": bool(conn and conn.status == "connected"),
@@ -304,7 +317,8 @@ def _source_summary(server: dict) -> dict:
                    "caveats": len(model.get("caveats") or []),
                    "verified": len(model.get("verified_queries") or [])},
         "queryable": queryable,
-        "readiness": c.knowledge.readiness(server["id"], queryable),
+        "readiness": c.knowledge.readiness(server["id"], queryable, observed["coverage"]),
+        "observed": observed,
         "profiled_at": knowledge["profiled_at"], "updated_at": knowledge["updated_at"],
     }
 
@@ -369,8 +383,18 @@ async def draft_source(server_id: str) -> dict:
     reads a draft before the agent trusts it."""
     from app.data.drafting import draft
     from app.data.profiler import Profiler, ProfileError
+    from app.data.drafting import draft_tools
     server = _source_or_404(server_id)
     current = c.knowledge.get(server_id)
+    if not _queryable(server):
+        # A service of tools rather than tables: described from its schemas, from what
+        # the atlas saw, and from the few calls that cannot change anything.
+        try:
+            proposal = await draft_tools(c.llm, c.mcp, c.atlas, server)
+        except ProfileError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        await c.store.save()
+        return {**_source_summary(server), "model_yaml": current["model_yaml"], "errors": [], **proposal}
     try:
         if not current["model"].get("tables"):
             profile, model = await Profiler(c.mcp).profile(server)
@@ -380,6 +404,31 @@ async def draft_source(server_id: str) -> dict:
     except ProfileError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {**_source_summary(server), **proposal}
+
+
+class NoteBody(BaseModel):
+    status: str = Field(pattern="^(confirmed|proposed|discarded)$")
+
+
+@guarded.post("/sources/{server_id}/notes/{note_id}")
+async def set_note(server_id: str, note_id: str, body: NoteBody) -> dict:
+    """Confirm a note the agent proposed (it then reaches every prompt), or discard it."""
+    server = _source_or_404(server_id)
+    if not c.atlas.set_note(server_id, note_id, body.status):
+        raise HTTPException(404, "No such note.")
+    await c.store.save()
+    c.audit.record("source.note", server=server["name"], note=note_id, status=body.status)
+    return _source_summary(server)
+
+
+@guarded.delete("/sources/{server_id}/observations")
+async def forget_observations(server_id: str) -> dict:
+    """Clear what the agent has observed about this source's tools. It relearns from use."""
+    server = _source_or_404(server_id)
+    removed = c.atlas.forget(server_id)
+    await c.store.save()
+    c.audit.record("source.forget_observations", server=server["name"], tools=removed)
+    return {**_source_summary(server), "removed": removed}
 
 
 # --------------------------------------------------------------- diagnostics
@@ -450,6 +499,7 @@ async def diagnostics() -> dict:
                         f"Install it with: {runtime['install']}")
     return {
         "model": {**llm, "capabilities": caps},
+        "network": network.summary(),
         "runs": run_metrics(),
         "mcp": c.mcp.summary(),
         "runtimes": runtimes.probe(),

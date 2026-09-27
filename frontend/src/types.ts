@@ -86,6 +86,26 @@ export interface SourceSummary {
   readiness: { score: number; of: number; checks: { key: string; ok: boolean; hint: string }[] };
   profiled_at: number | null;
   updated_at: number | null;
+  /** What the agent has seen this source's tools return, across conversations. */
+  observed?: SourceObserved;
+}
+
+export interface SourceNote {
+  id: string;
+  text: string;
+  origin: string;
+  status: 'proposed' | 'confirmed';
+  seen: number;
+  created_at: number;
+  question?: string;
+}
+
+export interface SourceObserved {
+  coverage: { seen: string[]; stale: string[]; unexplored: string[]; total: number };
+  notes?: SourceNote[];
+  calls: number;
+  last_seen: number | null;
+  tools: { name: string; calls: number; ok: number; failed: number; fields: string[]; last_seen: number | null }[];
 }
 
 export interface SourceDetail extends SourceSummary {
@@ -95,6 +115,8 @@ export interface SourceDetail extends SourceSummary {
   errors: string[];
   checked?: number;
   rejected?: { question: string; sql: string; error: string }[];
+  /** Tools called unprompted to draft a tool source's description (read-only, no arguments). */
+  probed?: string[];
 }
 
 export interface PlanStep {
@@ -234,6 +256,8 @@ export interface AdminState {
   mode: 'local-only' | 'password';
   authenticated: boolean;
   local: boolean;
+  signed_in?: boolean;
+  remote?: 'password' | 'closed';
 }
 
 export interface Bootstrap {
@@ -267,6 +291,8 @@ export interface McpServer {
   created_at: number;
   status: 'disconnected' | 'connecting' | 'connected' | 'error';
   error: string | null;
+  /** How this server's process is fenced from the network, once connected. */
+  network?: string;
   tool_count: number;
   resource_count: number;
   prompt_count: number;
@@ -319,6 +345,8 @@ export interface ModelOption {
   parameters: string;
   local: boolean;
   capabilities: ModelCapabilities;
+  /** Why the air gap refuses this model; empty when it may be used. */
+  refused?: string;
 }
 
 export interface MemoryEntry {
@@ -391,6 +419,8 @@ export interface Diagnostics {
   workspace: string;
   store: string;
   warnings: string[];
+  network?: { airgapped: boolean; internal_domains: string[]; kernel_sandbox: boolean;
+              cloud_model_allowed: boolean };
 }
 
 export interface UploadResult {
@@ -407,6 +437,8 @@ export type StreamEvent =
   | { type: 'status'; phase: string }
   | { type: 'block.open'; kind: 'text' | 'thinking'; index: number }
   | { type: 'block.supersede'; index: number }
+  | { type: 'draft.delta'; text: string }
+  | { type: 'draft.clear' }
   | { type: 'text.delta'; index: number; text: string }
   | { type: 'thinking.delta'; index: number; text: string }
   | { type: 'plan'; steps: PlanStep[] }

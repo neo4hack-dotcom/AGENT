@@ -70,8 +70,10 @@ export const api = {
   answer: (runId: string, callId: string, answer: string) =>
     request<{ ok: boolean }>(`/runs/${runId}/answer`,
       { method: 'POST', body: body({ call_id: callId, answer }) }),
-  chartTheme: () => request<{ light: Record<string, unknown>; dark: Record<string, unknown> }>(
-    '/charts/theme'),
+  chartTheme: () => request<{
+    light: Record<string, unknown>; dark: Record<string, unknown>;
+    locale?: { name: string; format: Record<string, unknown>; time: Record<string, unknown> };
+  }>('/charts/theme'),
   approve: (runId: string, callId: string, approved: boolean) =>
     request<{ ok: boolean }>(`/runs/${runId}/approve`,
       { method: 'POST', body: body({ call_id: callId, approved }) }),
@@ -111,7 +113,7 @@ export const api = {
   // --- admin -------------------------------------------------------------
   adminState: () => request<AdminState>('/admin/state'),
   login: (password: string) =>
-    request<{ token: string; expires_at: number }>('/admin/login',
+    request<{ token: string; role: 'admin' | 'user'; expires_at: number }>('/admin/login',
       { method: 'POST', body: body({ password }) }),
   logout: () => request<{ ok: boolean }>('/admin/logout', { method: 'POST' }),
 
@@ -160,6 +162,10 @@ export const api = {
     request<SourceDetail>(`/admin/sources/${id}/profile`, { method: 'POST' }),
   draftSource: (id: string) =>
     request<SourceDetail>(`/admin/sources/${id}/draft`, { method: 'POST' }),
+  setSourceNote: (id: string, noteId: string, status: 'confirmed' | 'discarded') =>
+    request<SourceSummary>(`/admin/sources/${id}/notes/${noteId}`, { method: 'POST', body: body({ status }) }),
+  forgetObservations: (id: string) =>
+    request<SourceDetail>(`/admin/sources/${id}/observations`, { method: 'DELETE' }),
 
   diagnostics: () => request<Diagnostics>('/admin/diagnostics'),
   audit: (limit = 200) => request<AuditReport>(`/admin/audit?limit=${limit}`),

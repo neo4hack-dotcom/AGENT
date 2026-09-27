@@ -21,7 +21,6 @@ from typing import Any, Callable
 from app.agent import trust
 from app.tools import code as code_tool
 from app.tools import files as file_tool
-from app.tools import web as web_tool
 
 
 class ToolSpec:
@@ -107,27 +106,6 @@ def build_registry(settings, memory, workspace: Path, on_plan,
     that, and reports the failure as if the world were broken.
     """
 
-    async def h_web_search(query: str = "", max_results: int = 6, **_: Any) -> dict:
-        result = await web_tool.web_search(query, max_results=min(int(max_results or 6), 10),
-                                           timeout_s=settings.web_timeout_s)
-        if not result.get("ok"):
-            return result
-        lines = [f"{i + 1}. {r['title']}\n   {r['url']}\n   {r['snippet'][:240]}"
-                 for i, r in enumerate(result["results"])]
-        return {"ok": True, "summary": f"{len(result['results'])} result(s) for “{query}”",
-                "text": "\n".join(lines), "data": result["results"]}
-
-    async def h_web_fetch(url: str = "", **_: Any) -> dict:
-        result = await web_tool.fetch_url(url, max_bytes=settings.web_fetch_max_bytes,
-                                          timeout_s=settings.web_timeout_s)
-        if not result.get("ok"):
-            return result
-        text = result["text"]
-        return {"ok": True,
-                "summary": f"{result['title'] or result['url']} — {len(text)} characters",
-                "text": text[:24000] + ("\n\n[truncated at 24k characters]" if len(text) > 24000 else ""),
-                "data": {"url": result["url"], "title": result["title"]}}
-
     async def h_run_python(code: str = "", _setup: str = "", **_: Any) -> dict:
         callable_tools = bridge_tools() if bridge_tools else []
         result = await code_tool.run_python(code, workspace=workspace,
@@ -144,8 +122,10 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                 "summary": (f"ran in {result['elapsed_ms']} ms — "
                             + (f"{len(out.splitlines())} line(s) of output" if out else "no output")
                             + (f", {len(used)} tool call(s)" if used else "")),
-                "text": out or "(the code ran and printed nothing — print() what you need to see)",
-                "data": {"elapsed_ms": result["elapsed_ms"]}}
+                # No structured `data`: what the code printed is the result. A metadata
+                # object here was read as a one-row table, and every chart or export that
+                # named this call got a table of `elapsed_ms` instead of the printed rows.
+                "text": out or "(the code ran and printed nothing — print() what you need to see)"}
 
     def elsewhere(result: dict) -> dict:
         """Turn "not here" into "here is where it is".
@@ -260,32 +240,15 @@ def build_registry(settings, memory, workspace: Path, on_plan,
         ToolSpec("current_time", "The current date and time on this machine.",
                  _obj({}), h_now),
         ToolSpec("find_tools",
-                 "Search every connected server for a tool you need but were not offered. "
-                 "Only the tools relevant to the question are listed each turn; this is how "
-                 "you reach the rest. Describe the capability in your own words — "
-                 "\"read a spreadsheet\", \"list git branches\" — and the matches become "
-                 "callable for the remainder of this task.",
+                 "Make tools callable that were not offered this turn. Give a source's slug "
+                 "from the source map — \"market_risk\" — to get all of its tools, or describe "
+                 "the capability in your own words — \"FX history\", \"read a spreadsheet\". "
+                 "The matches stay callable for the rest of this task.",
                  _obj({"need": {"type": "string",
-                                "description": "What you need to do, in a few words."}},
+                                "description": "A source slug, or what you need to do in a few words."}},
                       ["need"]),
                  h_find_tools, group="Planning"),
     ]
-    if settings.enable_web_tools:
-        specs += [
-            ToolSpec("web_search",
-                     "Search the web and get back titles, URLs and snippets. Use it whenever the "
-                     "answer depends on anything current, specific or outside your training data. "
-                     "Follow up with web_fetch on the URLs worth actually reading.",
-                     _obj({"query": {"type": "string", "description": "What to search for."},
-                           "max_results": {"type": "integer",
-                                           "description": "1-10, default 6."}}, ["query"]),
-                     h_web_search, capabilities=(trust.NET,)),
-            ToolSpec("web_fetch",
-                     "Fetch one URL and read it as text. Works on HTML pages, JSON, CSV and plain "
-                     "text. Use it on search results, documentation, APIs and raw files.",
-                     _obj({"url": {"type": "string", "description": "Full http(s) URL."}}, ["url"]),
-                     h_web_fetch, capabilities=(trust.NET,)),
-        ]
     if settings.enable_python_tool:
         modules = ", ".join(code_tool.available_modules()) or "the standard library only"
         specs.append(ToolSpec(
@@ -298,7 +261,7 @@ def build_registry(settings, memory, workspace: Path, on_plan,
             f"The working directory is the workspace, so relative paths are shared with the "
             f"file tools. Killed after {settings.python_timeout_s}s.\n\n"
             f"**The other tools are callable from inside your code** as ordinary functions — "
-            f"`web_fetch(url=...)`, `sqlite__read_query(query=...)` — each returning the "
+            f"`sqlite__read_query(query=...)`, `workspace_read(path=...)` — each returning the "
             f"result as text and raising `ToolError` on failure. Prefer this whenever a task "
             f"is several steps over the same data: one program that fetches, filters and "
             f"writes is one turn, where the same work as separate tool calls is five. Loops "
@@ -358,9 +321,21 @@ _PLAN_DESC = (
 )
 
 
+def _tool_label(tool: dict, width: int) -> str:
+    if not width:
+        return tool["name"]
+    gist = " ".join((tool.get("description") or "").split())
+    gist = re.split(r"(?<=[.;:])\s", gist, maxsplit=1)[0].rstrip(".;:")
+    if len(gist) > width:
+        gist = gist[:width].rsplit(" ", 1)[0] + "…"
+    return f"{tool['name']} ({gist})" if gist else tool["name"]
+
+
 def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
                  scopes: list[dict] | None = None, workspace: str = "",
-                 notes: dict[str, list[str]] | None = None) -> str:
+                 notes: dict[str, list[str]] | None = None,
+                 observed: dict[str, str] | None = None,
+                 unexplored: dict[str, list[str]] | None = None) -> str:
     """A compact index of the live tool surface for the system prompt.
 
     Names only, grouped. The full descriptions and JSON schemas already travel in the
@@ -386,14 +361,24 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
     # what distinguishes them here.
     scope_by_slug = {s["slug"]: s for s in (scopes or []) if s.get("slug")}
     if mcp_tools:
-        by_server: dict[str, tuple[str, list[str]]] = {}
+        by_server: dict[str, tuple[str, list[dict]]] = {}
         for tool in mcp_tools:
             slug = tool.get("server_slug") or tool["server_name"]
-            by_server.setdefault(slug, (tool["server_name"], []))[1].append(tool["qualified_name"])
-        for slug, (name, names) in by_server.items():
+            by_server.setdefault(slug, (tool["server_name"], []))[1].append(tool)
+        # The source map. With twenty servers the list of tool *names* stops being enough:
+        # "positions" is a job vacancy in HR and a holding in the trade store, "desk" is a
+        # trading desk and a piece of furniture. Each tool keeps the first words of its own
+        # description, which is what tells them apart — trimmed harder as the map grows.
+        crowded = len(mcp_tools) > 60
+        lines.append(f"Sources — {len(by_server)} connected. Choose by what a source holds, "
+                     f"not by a word it shares with the question. Tools not offered this turn "
+                     f"are one `find_tools('<source>')` away.")
+        for slug, (name, tools_of) in by_server.items():
             server = f"{name} ({slug})" if slug and slug != name else name
-            shown = ", ".join(names[:40])
-            more = f" (+{len(names) - 40} more)" if len(names) > 40 else ""
+            described = bool((notes or {}).get(slug))
+            width = 0 if (crowded and described) else (42 if crowded else 70)
+            shown = ", ".join(_tool_label(t, width) for t in tools_of[:30])
+            more = f" (+{len(tools_of) - 30} more)" if len(tools_of) > 30 else ""
             scope = scope_by_slug.get(slug)
             where = ""
             if scope:
@@ -411,11 +396,16 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
                 if workspace and workspace in scope["paths"]:
                     where += (" — the same directory workspace_write writes to, so anything "
                               "you save there is immediately loadable here")
-            # What someone wrote about this source in Admin: what it holds, its tables and
-            # their values, the metrics as they are meant to be computed, what is tricky.
-            # This is the part that replaces five describe calls per question.
+            # What someone wrote about this source in Admin, then what past calls showed —
+            # declared first, observed second, each labelled as what it is.
             known = "".join(f"\n    ↳ {line}" for line in (notes or {}).get(slug, []))
-            lines.append(f"{server}: {shown}{more}{where}{known}")
+            seen = (observed or {}).get(slug)
+            if seen:
+                known += f"\n    ↳ Observed returning: {seen}"
+            blank = (unexplored or {}).get(slug)
+            if blank and len(blank) < len(tools_of):
+                known += f"\n    ↳ Not yet explored: {', '.join(blank[:12])}"
+            lines.append(f"- {server}: {shown}{more}{where}{known}")
     return "\n".join(lines)
 
 

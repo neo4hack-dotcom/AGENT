@@ -6,8 +6,7 @@
 // feel like watching a build run instead of reading an answer.
 
 import {
-  AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileText, FolderOpen, Globe,
-  Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
+  AlertTriangle, Ban, Brain, Check, ChevronRight, Clock, FileText, FolderOpen, Layers, ListChecks, Pencil, Plug, RotateCcw, Save, Search, ShieldAlert, ShieldQuestion,
   Sparkles, Terminal, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -18,7 +17,7 @@ import { AskCard, FileCard } from './Outputs';
 import { Badge, Button, Spinner, cls } from './ui';
 
 const TOOL_ICONS: Record<string, LucideIcon> = {
-  web_search: Search, web_fetch: Globe, run_python: Terminal, workspace_read: FileText,
+  run_python: Terminal, workspace_read: FileText,
   workspace_write: Save, workspace_import: Save, workspace_list: FolderOpen,
   remember: Brain, recall: Brain, plan: ListChecks, current_time: Clock,
   find_tools: Search,
@@ -316,7 +315,7 @@ export function ApprovalCard({
         <ShieldQuestion size={15} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0 flex-1">
           {/* Name the thing being decided. For a fetch that is the host, not the tool —
-              nobody weighs "allow web_fetch", they weigh "allow this site". */}
+              nobody weighs "allow a fetch tool", they weigh "allow this host". */}
           <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">
             {request.host ? <>Fetch <span className="font-mono">{request.host}</span>?</> : <>
               Allow <span className="font-mono">{request.name}</span>
@@ -355,7 +354,7 @@ function Blocks({ blocks, live, cite }: { blocks: Block[]; live: boolean; cite?:
         }
         if (!(block.text || '').trim()) return null;
         return (
-          <div key={`b${block.index}`} className={cls(block.superseded && 'hidden')}>
+          <div key={`b${block.index}`} className={cls(block.superseded ? 'hidden' : live && 'animate-fade-in')}>
             <Markdown text={block.text ?? ''} cite={cite} />
           </div>
         );
@@ -367,7 +366,9 @@ function Blocks({ blocks, live, cite }: { blocks: Block[]; live: boolean; cite?:
 const PHASES: Record<string, string> = {
   starting: 'Starting',
   thinking: 'Thinking',
-  checking: 'Checking',
+  checking: 'Checking the answer',
+  labelling: 'Labelling the chart',
+  routing: 'Choosing sources',
   compacting: 'Compressing context',
   writing: 'Writing',
   cancelled: 'Stopped',
@@ -377,7 +378,7 @@ const PHASES: Record<string, string> = {
 /**
  * One line, only when there is something to say: this answer read things from outside.
  *
- * Not a warning — reading the web is the job. It is provenance, in the place where a
+ * Not a warning — reading sources is the job. It is provenance, in the place where a
  * reader decides how much weight to give an answer, and it expands into exactly which
  * sources and whether any of them tried to give the agent orders.
  */
@@ -393,13 +394,13 @@ function TrustLine({ trust }: { trust: NonNullable<Message['trust']> }) {
         {flagged ? <ShieldAlert size={11} /> : <ShieldQuestion size={11} />}
         {flagged
           ? `${trust.injections.length} source tried to instruct the agent`
-          : `read ${trust.sources.length} outside source${trust.sources.length > 1 ? 's' : ''}`}
+          : `from ${trust.sources.length} source${trust.sources.length > 1 ? 's' : ''}`}
         <ChevronRight size={10} className={cls('transition-transform', open && 'rotate-90')} />
       </button>
       {open && (
         <div className="mt-1.5 space-y-1 border-l-2 border-zinc-200 pl-3 text-2xs leading-relaxed dim dark:border-white/10 animate-fade-in">
           {trust.sources.length > 0 && (
-            <p>Content entered this answer from: <b>{trust.sources.join(', ')}</b>. It was
+            <p>Data in this answer came from: <b>{trust.sources.join(', ')}</b>. It was
               fenced as data — the agent could read it, not take orders from it.</p>
           )}
           {trust.injections.map((hit, i) => (
@@ -429,8 +430,16 @@ function TrustLine({ trust }: { trust: NonNullable<Message['trust']> }) {
  * A <details> rather than React state on purpose: a citation in the answer can open its
  * own evidence with node.closest('details'), which needs no wiring between the two.
  */
-function Work({ message, live, phase, cite, log }: {
+/** The tail of the prose being written, on one line: enough to see it move, not to read it. */
+function ticker(draft: string): string {
+  const flat = draft.replace(/[#*_`|>]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return flat.length > 90 ? `…${flat.slice(-90)}` : flat;
+}
+
+function Work({ message, live, phase, cite, log, draft }: {
   message: Message; live: boolean; phase?: string; cite: string;
+  /** Prose the agent is writing that is not yet known to be the answer. */
+  draft?: string;
   /** Bookkeeping the run emitted: kept in full, shown only to whoever opens this. */
   log?: string[];
 }) {
@@ -452,10 +461,13 @@ function Work({ message, live, phase, cite, log }: {
         {live ? (
           <>
             <Spinner size={11} className="text-brand-500" />
-            <span className="text-zinc-600 dark:text-zinc-300">
-              {running?.name ?? PHASES[phase ?? 'starting'] ?? 'Working'}
+            <span className="shrink-0 text-zinc-600 dark:text-zinc-300">
+              {running?.name ?? (draft && phase !== 'checking' ? PHASES.writing : PHASES[phase ?? 'starting'] ?? 'Working')}
             </span>
-            {steps.length > 0 && <span>· step {steps.length}</span>}
+            {steps.length > 0 && <span className="shrink-0">· step {steps.length}</span>}
+            {!running && draft && (
+              <span className="min-w-0 truncate italic opacity-80">{ticker(draft)}</span>
+            )}
           </>
         ) : (
           <>
@@ -492,11 +504,12 @@ function outputsOf(blocks: Block[]): Block[] {
 }
 
 export function AssistantTurn({
-  message, live, phase, approval, onApprove, approving, ask, onAnswer, answering, notices, error,
+  message, live, phase, draft, approval, onApprove, approving, ask, onAnswer, answering, notices, error,
 }: {
   message: Message;
   live?: boolean;
   phase?: string;
+  draft?: string;
   approval?: ApprovalRequest | null;
   onApprove?: (approved: boolean) => void;
   approving?: boolean;
@@ -512,7 +525,7 @@ export function AssistantTurn({
   const cite = `ev-${message.id}-`;
   return (
     <div className="animate-fade-up">
-      <Work message={message} live={!!live} phase={phase} cite={cite}
+      <Work message={message} live={!!live} phase={phase} cite={cite} draft={draft}
         log={(notices ?? []).filter((n) => n.quiet).map((n) => n.text)} />
       <Blocks blocks={answer} live={!!live} cite={cite} />
 

@@ -286,7 +286,12 @@ def table_flowables(rows: list[dict], styles: dict, *, title: str = "", source: 
 
 def chart_flowables(chart: dict, styles: dict, width: float = 174 * mm) -> list:
     from app.data.charts import render_png
-    png = render_png(chart["spec"], width=900, scale=2)
+    try:
+        from app.deps import container
+        locale = str(container.get("chart_locale") or "fr-FR")
+    except Exception:  # noqa: BLE001 - outside the app (tests, scripts)
+        locale = "fr-FR"
+    png = render_png(chart["spec"], width=900, scale=2, locale=locale)
     image = Image(io.BytesIO(png))
     ratio = image.imageHeight / float(image.imageWidth)
     image.drawWidth, image.drawHeight = width, width * ratio

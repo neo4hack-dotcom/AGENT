@@ -2,15 +2,21 @@
 //
 // Two things per source, both optional. A description in plain words — what is in it, what
 // it is good for, what it cannot answer — which is how the agent picks the right source.
-// And a model: tables, the values columns take, joins, metrics defined once, caveats, and
-// questions whose SQL has been checked. "Profile" measures the structural half from the data
-// itself; "Draft" proposes the rest and runs every query it proposes. Nothing drafted is
-// saved until someone reads it and presses Save.
+// And, for a SQL source, a model: tables, the values columns take, joins, metrics defined
+// once, caveats, and questions whose SQL has been checked. "Profile" measures the structural
+// half from the data itself; "Draft" proposes the rest and runs every query it proposes. For
+// a service of tools, "Draft" describes it from its schemas, from what the agent has seen it
+// return, and from the calls that are safe to make. Nothing drafted is saved until someone
+// reads it and presses Save.
+//
+// Below, what the agent has observed: every tool, how often it worked, the fields it
+// returns, and the ones never explored. That is a cache the agent keeps, shown so it can be
+// checked — and forgotten, if the source changed in a way its schemas do not show.
 
-import { ArrowLeft, Check, Circle, Database, FlaskConical, Ruler, Save, Sparkles } from 'lucide-react';
+import { ArrowLeft, Check, Circle, Database, Eraser, Eye, FlaskConical, Lightbulb, Ruler, Save, Sparkles, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
-import type { SourceDetail, SourceSummary } from '../types';
+import type { SourceDetail, SourceObserved, SourceSummary } from '../types';
 import { Badge, Button, Dot, Empty, cls, useToast } from './ui';
 
 function ago(ts: number | null): string {
@@ -71,7 +77,7 @@ export function SourcesPanel() {
                 <span className="text-2xs dimmer">
                   {source.queryable
                     ? `${source.counts.tables} tables · ${source.counts.metrics} metrics · ${source.counts.verified} checked`
-                    : 'description only'}
+                    : `${(source.observed?.coverage.seen.length ?? 0) + (source.observed?.coverage.stale.length ?? 0)} of ${source.observed?.coverage.total ?? 0} tools explored`}
                 </span>
               </div>
             </button>
@@ -87,7 +93,7 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
   const [source, setSource] = useState<SourceDetail | null>(null);
   const [description, setDescription] = useState('');
   const [yaml, setYaml] = useState('');
-  const [busy, setBusy] = useState<'save' | 'profile' | 'draft' | null>(null);
+  const [busy, setBusy] = useState<'save' | 'profile' | 'draft' | 'forget' | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [draftNote, setDraftNote] = useState<SourceDetail | null>(null);
 
@@ -99,7 +105,7 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
   };
   useEffect(() => { void api.source(id).then(take); }, [id]);
 
-  const run = async (kind: 'save' | 'profile' | 'draft') => {
+  const run = async (kind: 'save' | 'profile' | 'draft' | 'forget') => {
     setBusy(kind);
     try {
       if (kind === 'save') {
@@ -113,12 +119,24 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
         setYaml(profiled.model_yaml);
         const p = profiled.profile as { queries?: number; elapsed_ms?: number };
         toast(`Measured in ${((p.elapsed_ms ?? 0) / 1000).toFixed(1)}s (${p.queries ?? 0} queries)`);
+      } else if (kind === 'forget') {
+        const fresh = await api.forgetObservations(id);
+        setSource((current) => (current ? { ...current, ...fresh } : current));
+        toast('Observations cleared — the agent relearns this source from use');
       } else {
         // A draft fills the editor and waits: it is a proposal until someone saves it.
         const draft = await api.draftSource(id);
-        if (!description.trim()) setDescription(draft.description);
-        setYaml(draft.model_yaml);
-        setDraftNote(draft);
+        if (!source?.queryable) {
+          // A tool source's draft is its description: offered in place of an empty one,
+          // and beside a written one rather than over it.
+          setDescription((current) => (current.trim() ? `${current.trim()}\n\n${draft.description}` : draft.description));
+          setSource((current) => (current ? { ...current, observed: draft.observed } : current));
+          toast(draft.probed?.length ? `Drafted — probed ${draft.probed.join(', ')}` : 'Drafted from the schemas and observations');
+        } else {
+          if (!description.trim()) setDescription(draft.description);
+          setYaml(draft.model_yaml);
+          setDraftNote(draft);
+        }
       }
     } catch (e) {
       toast(String((e as Error).message), 'error');
@@ -135,7 +153,9 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
         </button>
         <h3 className="text-sm font-semibold">{source.name}</h3>
         <span className="font-mono text-2xs dimmer">{source.slug}</span>
-        <span className="ml-auto text-2xs dimmer">profiled {ago(source.profiled_at)}</span>
+        <span className="ml-auto text-2xs dimmer">
+          {source.queryable ? `profiled ${ago(source.profiled_at)}` : `last used ${ago(source.observed?.last_seen ?? null)}`}
+        </span>
       </div>
 
       <ul className={cls('grid grid-cols-1 gap-1.5', source.readiness.of > 1 && 'sm:grid-cols-5')}>
@@ -155,8 +175,10 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
           In plain words: what is in it, what questions it answers, its time coverage, what it
           cannot answer, and how it relates to your other sources.
         </p>
-        <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} maxLength={4000}
-          placeholder="Sales DB holds every order and refund since January 2026, in EUR with VAT. Use it for revenue by region, channel and segment. Campaigns are in the CRM source, joined on customer id."
+        <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={source.queryable ? 4 : 7} maxLength={4000}
+          placeholder={source.queryable
+            ? 'Sales DB holds every order and refund since January 2026, in EUR with VAT. Use it for revenue by region, channel and segment. Campaigns are in the CRM source, joined on customer id.'
+            : 'Market data: daily closes for bonds (clean, % of par) and equities (per share, trading currency), ECB-style FX fixings quoted EURxxx, government curves at month ends. No fixing on TARGET holidays. Identifiers: ISIN or ticker, as in the trade store.'}
           className="focus-ring w-full resize-y rounded-xl border bg-white px-3 py-2.5 text-[13px] leading-relaxed hairline outline-none dark:bg-black/20" />
       </section>
 
@@ -195,20 +217,105 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
 
       <div className="flex flex-wrap items-center gap-2">
         <Button icon={Save} busy={busy === 'save'} disabled={!!busy || !dirty} onClick={() => void run('save')}>Save</Button>
-        {source.queryable && <>
-        <Button variant="outline" icon={Ruler} busy={busy === 'profile'} disabled={!!busy} onClick={() => void run('profile')}
-          title="Measure tables, values, ranges, joins and data-quality issues from the data itself.">
-          Profile
-        </Button>
+        {source.queryable && (
+          <Button variant="outline" icon={Ruler} busy={busy === 'profile'} disabled={!!busy} onClick={() => void run('profile')}
+            title="Measure tables, values, ranges, joins and data-quality issues from the data itself.">
+            Profile
+          </Button>
+        )}
         <Button variant="outline" icon={Sparkles} busy={busy === 'draft'} disabled={!!busy} onClick={() => void run('draft')}
-          title="Propose a description, metrics, caveats and checked questions. Every proposed query is run first.">
+          title={source.queryable
+            ? 'Propose a description, metrics, caveats and checked questions. Every proposed query is run first.'
+            : 'Describe this service from its tool schemas, what the agent has seen it return, and the read-only calls that need no arguments.'}>
           Draft with AI
         </Button>
-        </>}
-        <span className="ml-auto flex items-center gap-1 text-2xs dimmer">
-          <FlaskConical size={11} /> Read-only queries only
-        </span>
+        {source.queryable && (
+          <span className="ml-auto flex items-center gap-1 text-2xs dimmer">
+            <FlaskConical size={11} /> Read-only queries only
+          </span>
+        )}
       </div>
+
+      {source.observed && source.observed.coverage.total > 0 && (
+        <Observed observed={source.observed} busy={busy === 'forget'} onForget={() => void run('forget')}
+          onNote={async (noteId, status) => {
+            try {
+              const fresh = await api.setSourceNote(id, noteId, status);
+              setSource((current) => (current ? { ...current, observed: fresh.observed } : current));
+            } catch (e) { toast(String((e as Error).message), 'error'); }
+          }} />
+      )}
     </div>
+  );
+}
+
+function Observed({ observed, busy, onForget, onNote }: {
+  observed: SourceObserved; busy: boolean; onForget: () => void;
+  onNote: (noteId: string, status: 'confirmed' | 'discarded') => void;
+}) {
+  const { coverage } = observed;
+  const notes = observed.notes ?? [];
+  return (
+    <section className="rounded-xl border p-3.5 hairline">
+      <div className="mb-1 flex items-center gap-2">
+        <Eye size={13} className="dimmer" />
+        <h4 className="text-xs font-semibold">Observed by the agent</h4>
+        <span className="text-2xs dimmer">
+          {coverage.seen.length + coverage.stale.length} of {coverage.total} tools seen working · {observed.calls} calls
+        </span>
+        <button onClick={onForget} disabled={busy || !observed.calls}
+          className="focus-ring ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-2xs dim hover:text-zinc-800 disabled:opacity-40 dark:hover:text-zinc-100">
+          <Eraser size={11} /> Forget
+        </button>
+      </div>
+      <p className="mb-2.5 text-2xs leading-relaxed dimmer">
+        Learned from real calls, kept across conversations, and shown to the agent as
+        observation — never as a complete list of what the source holds. Tools not yet
+        explored stay on its map.
+      </p>
+      {notes.length > 0 && (
+        <div className="mb-3 space-y-1.5">
+          <p className="flex items-center gap-1.5 text-2xs font-semibold">
+            <Lightbulb size={11} className="text-amber-500" /> What the agent learned
+            <span className="font-normal dimmer">— confirm what is true: confirmed notes reach every question</span>
+          </p>
+          {notes.map((note) => (
+            <div key={note.id} className="flex items-start gap-2 rounded-lg border px-2.5 py-1.5 text-2xs hairline">
+              <span className={cls('min-w-0 flex-1 leading-relaxed', note.status === 'confirmed' ? 'text-zinc-800 dark:text-zinc-100' : 'dim')}
+                title={note.question ? `While answering: ${note.question}` : undefined}>
+                {note.text}
+                <span className="ml-1 dimmer">· {note.origin}{note.seen > 1 ? ` · seen ${note.seen}×` : ''}</span>
+              </span>
+              {note.status === 'confirmed' ? (
+                <Badge tone="good">confirmed</Badge>
+              ) : (
+                <button onClick={() => onNote(note.id, 'confirmed')} title="Confirm: the agent will rely on it"
+                  className="focus-ring grid h-5 w-5 place-items-center rounded text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-500/10">
+                  <Check size={11} strokeWidth={3} />
+                </button>
+              )}
+              <button onClick={() => onNote(note.id, 'discarded')} title="Discard"
+                className="focus-ring grid h-5 w-5 place-items-center rounded dimmer hover:bg-zinc-100 dark:hover:bg-white/[0.07]">
+                <X size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <ul className="space-y-1">
+        {observed.tools.map((tool) => (
+          <li key={tool.name} className="flex items-baseline gap-2 text-2xs">
+            <span className={cls('font-mono', tool.ok ? 'text-zinc-700 dark:text-zinc-200' : 'dimmer')}>{tool.name}</span>
+            {coverage.stale.includes(tool.name) && <Badge tone="warn">re-check</Badge>}
+            <span className="dimmer">
+              {tool.calls ? `${tool.ok} ok${tool.failed ? ` · ${tool.failed} failed` : ''} · ${ago(tool.last_seen)}` : 'not yet explored'}
+            </span>
+            {tool.fields.length > 0 && (
+              <span className="min-w-0 truncate font-mono dimmer" title={tool.fields.join(', ')}>→ {tool.fields.join(', ')}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

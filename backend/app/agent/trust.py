@@ -215,6 +215,23 @@ def resolves_private(host: str) -> bool:
     return False
 
 
+_METADATA = re.compile(r"^(169\.254\.\d+\.\d+|metadata(\.google\.internal)?|fd00:ec2::254)$", re.I)
+
+
+def _resolves_link_local(host: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return False
+    for info in infos:
+        try:
+            if ipaddress.ip_address(info[4][0].split("%")[0]).is_link_local:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 @dataclass
 class Egress:
     """Which hosts this conversation may reach, and on whose authority.
@@ -250,12 +267,25 @@ class Egress:
             self.approved.add(host)
             self.seen_in_content.discard(host)
 
-    def verdict(self, url: str, tainted: bool) -> tuple[str, str]:
-        """`("allow"|"deny"|"ask", reason)` for one outbound request."""
+    def verdict(self, url: str, tainted: bool, airgapped: bool = False) -> tuple[str, str]:
+        """`("allow"|"deny"|"ask", reason)` for one outbound request.
+
+        Air-gapped, the map turns over: the private network is where the data lives and the
+        internet is what may not be reached. Only the cloud metadata addresses stay refused
+        inside — they hand out credentials to whoever asks, which is never a data source.
+        """
         host = host_of(url)
         if not host:
             return "deny", f"'{url}' has no host."
-        if resolves_private(host):
+        if airgapped:
+            from app.network import is_internal_host
+            if _METADATA.match(host) or _resolves_link_local(host):
+                return "deny", (f"{host} is a cloud metadata address; it hands out credentials, "
+                                f"not data.")
+            if not is_internal_host(host):
+                return "deny", (f"{host} is outside the private network, and this deployment "
+                                f"is air-gapped. Only internal hosts can be reached.")
+        elif resolves_private(host):
             return "deny", (f"{host} resolves inside this machine or its private network. "
                             f"Fetching it would turn the agent into a proxy for things the "
                             f"network trusts and you did not ask for.")

@@ -177,8 +177,11 @@ async def approve_call(run_id: str, body: ApprovalBody) -> dict:
 async def chart_theme() -> dict:
     """The house chart style, from the one place it is defined — so the chart on screen and
     the chart in the PDF can never drift apart."""
-    from app.data.charts import theme
-    return {"light": theme(False), "dark": theme(True)}
+    from app.data.charts import locale_of, theme
+    name = str(c.get("chart_locale") or "fr-FR")
+    defined = locale_of(name)
+    return {"light": theme(False), "dark": theme(True),
+            "locale": {"name": name, "format": defined["format"], "time": defined["time"]}}
 
 
 class AnswerBody(BaseModel):
@@ -215,10 +218,12 @@ def _upload_record(upload_id: str) -> dict | None:
 
 @router.post("/uploads")
 async def upload(file: UploadFile = File(...)) -> dict:
-    raw = await file.read()
+    # Read one byte past the ceiling, never the whole body: a 5 GB upload must not be held
+    # in memory just to be refused.
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"That file is {len(raw) // 1024 // 1024} MB; the ceiling is "
-                                 f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
+        raise HTTPException(413, f"That file is larger than the "
+                                 f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB ceiling.")
     safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", Path(file.filename or "file").name)[:80] or "file"
     upload_id = new_id("u")
     target = _upload_dir() / f"{upload_id}__{safe}"

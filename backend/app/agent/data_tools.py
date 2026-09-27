@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agent import builtin, trust
-from app.data import charts as chart_lib
+from app.data import chart_sense as sense, charts as chart_lib
 from app.data import exports as export_lib
 from app.data import report as report_lib
 from app.data import rows as rows_lib
@@ -100,6 +100,66 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         except ValueError:
             return path
 
+    def question() -> str:
+        conv = c.store.conversation(ctx.conversation_id) or {}
+        return next((m.get("content", "") for m in reversed(conv.get("messages") or [])
+                     if m.get("role") == "user"), "")
+
+    async def meaning(spec: dict, rows: list[dict], title: str,
+                      previous: dict | None) -> tuple[dict[str, dict], dict]:
+        """What each charted column means — from the data, then from the local model.
+
+        A revision keeps the reading it already had for the columns it still uses; the
+        model is asked only about columns it has not seen, so "make it stacked" costs no
+        second opinion.
+        """
+        inferred = sense.infer(rows)
+        known = ((previous or {}).get("spec", {}).get("usermeta") or {}).get("fields") or {}
+        used = chart_lib.fields_used(spec)
+        fresh = [f for f in used if f in inferred and f not in known]
+        reviewed: dict = {}
+        if fresh:
+            ctx.emit({"type": "status", "phase": "labelling"})
+            reviewed = await sense.review(c.fast_llm, question(), spec, rows, inferred,
+                                          used, title)
+        fields = sense.merge(inferred, {**{k: v for k, v in known.items() if k in inferred},
+                                        **(reviewed.get("fields") or {})})
+        return fields, reviewed
+
+    def _block_of(ref: str) -> dict | None:
+        label = ref.strip()
+        for scope in [ctx.blocks, *history()]:
+            for block in scope:
+                if block.get("type") == "tool" and block.get("ref") == label:
+                    return block
+        return None
+
+    def _json_of(ref: str) -> Any:
+        block = _block_of(ref)
+        if not block or not block.get("ok"):
+            return None
+        text = (block.get("text") or "").strip()
+        if text[:1] not in "[{":
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            return None
+
+    def _tabular_refs() -> str:
+        """The calls of this run that do hold rows — what a wrong #ref should have been."""
+        found = []
+        for block in ctx.blocks:
+            if block.get("type") != "tool" or not block.get("ok") or block.get("name") in ("plan", "run_python"):
+                continue
+            try:
+                rows, _ = resolve(block.get("ref", ""))
+            except rows_lib.SourceError:
+                continue
+            if rows:
+                found.append(f"{block['ref']} {block['name']} ({len(rows)} rows)")
+        return ("Calls in this run that hold rows: " + "; ".join(found[-12:]) + ".") if found else ""
+
     def revision_target() -> dict | None:
         """The chart the reader is pointing at, when they plainly point at one.
 
@@ -153,9 +213,10 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
             else:
                 return {"ok": False, "error": "Say where the rows come from: data='#4' for the "
                                               "result of call #4, 'chart:c1', or a workspace "
-                                              "file. Do not paste the rows."}
+                                              "file. Only values the reader typed may be passed "
+                                              "as a JSON array of objects."}
         except rows_lib.SourceError as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
         if typed and len(rows) > 60:
             return {"ok": False, "error": f"{len(rows)} rows were typed into the call. Name them "
                                           f"instead — data='#N' for the call that returned "
@@ -165,11 +226,22 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                                           f"Aggregate first (GROUP BY in the query, or an "
                                           f"'aggregate' transform) and chart the result."}
         columns = rows_lib.columns_of(rows)
+        locale = str(c.get("chart_locale") or "fr-FR")
         try:
-            full = chart_lib.assemble(spec, rows, title or (previous or {}).get("title", ""),
-                                      subtitle)
+            # Fields first, on the model's own spec: a column that does not exist is
+            # refused before anyone is asked what it means.
+            chart_lib.validate_fields(chart_lib.sanitize(spec), columns)
+            fields, reviewed = await meaning(spec, rows, title, previous)
+            # The editor's title for a new chart; a revision keeps the one it has unless
+            # the analyst gives another.
+            if previous:
+                final_title, final_subtitle = title or previous.get("title", ""), subtitle
+            else:
+                final_title = (reviewed.get("title") or "").strip()[:140] or title
+                final_subtitle = subtitle or (reviewed.get("subtitle") or "").strip()[:160]
+            full = chart_lib.assemble(spec, rows, final_title, final_subtitle, fields, locale)
             chart_lib.validate_fields(full, columns)
-            await chart_lib.check_renders(full)
+            await chart_lib.check_renders(full, locale)
         except chart_lib.ChartError as exc:
             return {"ok": False, "error": str(exc)}
         chart_id = chart_id or store.next_id(ctx.conversation_id)
@@ -234,7 +306,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 rows, _label = resolve(ref)
                 resolved.append((name, rows))
         except rows_lib.SourceError as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
         try:
             info = await asyncio.to_thread(export_lib.export, resolved, format,
                                            workspace / "exports", filename, title)
@@ -301,7 +373,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                     used.update(int(n) for n in _REF_NUMBER.findall(label))
                 clean.append(entry)
         except rows_lib.SourceError as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
         notes = source_notes()
         path = export_lib.unique_path(workspace / "reports",
                                       export_lib.safe_name(filename or title, "pdf"))
@@ -350,7 +422,11 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                     try:
                         data, _label = resolve(ref)
                     except rows_lib.SourceError as exc:
-                        return {"ok": False, "error": f"rows({ref!r}): {exc}"}
+                        # Not a table, but perhaps an object — a rating scale, a curve's header:
+                        # the program gets the parsed JSON rather than an error to argue with.
+                        data = _json_of(ref)
+                        if data is None:
+                            return {"ok": False, "error": f"rows({ref!r}): {exc} {_tabular_refs()}"}
                     path = folder / f"{ctx.run_id}-{re.sub(r'[^A-Za-z0-9]+', '_', ref)}.json"
                     path.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
                     files[ref] = str(path)
@@ -371,7 +447,8 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         head, _, rest = python.description.partition(". ")
         python.description = (
             f"{head}. rows('#4') inside the code returns the full rows of call #4 as a list of "
-            "dicts (also rows('chart:c1'), rows('file.csv')) — combine results from different "
+            "dicts — or, for a result that is not a table, its parsed JSON object (also "
+            "rows('chart:c1'), rows('file.csv')) — combine results from different "
             "servers with it; never paste data into the code. To chart or export what you "
             "computed, print JSON rows (print(df.to_json(orient='records'))) and use this "
             f"call's #ref. {rest}")
@@ -382,13 +459,14 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         "Draw a chart for the reader from rows that already exist. `data` names the rows — "
         "'#4' for the result of call #4 (any call in this conversation), 'chart:c1' for another "
         "chart's rows, or a workspace file — never paste rows you could name. If you computed the "
-        "rows yourself (run_python, pandas), have that call output them as JSON or CSV, then chart "
-        "its #ref. `spec` is a Vega-Lite spec without data. To change a chart the reader asked "
+        "rows yourself (run_python, pandas), have that call print them as JSON or CSV, then chart "
+        "its #ref. Values the reader typed in the question have no call to name: pass them "
+        "directly as a JSON array of objects in `data`. `spec` is a Vega-Lite spec without data. To change a chart the reader asked "
         "about, pass its chart_id with the complete revised spec (omit data to keep its rows); "
         "every version is kept. The chart appears under your answer.\n" + chart_lib.COOKBOOK,
         {"type": "object",
          "properties": {
-             "data": {"type": "string", "description": "Where the rows come from: '#4', 'chart:c1', or a workspace file path."},
+             "data": {"description": "Where the rows come from: '#4', 'chart:c1', a workspace file path — or, only for values the reader typed, the rows as a JSON array of objects."},
              "spec": {"type": "object", "description": "Vega-Lite spec without data: mark, encoding, and optionally transform, layer, facet, resolve."},
              "title": {"type": "string", "description": "What the chart shows, as a reader would say it."},
              "subtitle": {"type": "string", "description": "Scope and units, e.g. 'H1 2026, EUR, VAT included'."},

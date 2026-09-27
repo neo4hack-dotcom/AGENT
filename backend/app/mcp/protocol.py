@@ -190,7 +190,19 @@ class HttpTransport(Transport):
         self._log: deque[str] = deque(maxlen=100)
 
     async def start(self) -> None:
-        self._client = httpx.AsyncClient(timeout=None, follow_redirects=True)
+        # Redirects are followed, but each hop is checked like the first: an internal
+        # endpoint that answers "302 → somewhere on the internet" must not take the
+        # conversation with it.
+        self._client = httpx.AsyncClient(timeout=None, follow_redirects=True,
+                                         event_hooks={"request": [self._inside]})
+
+    @staticmethod
+    async def _inside(request: httpx.Request) -> None:
+        from app import network
+        if network.airgapped() and not await asyncio.to_thread(network.is_internal_host, request.url.host):
+            raise httpx.ConnectError(
+                f"{request.url.host} is outside the private network; this deployment is air-gapped.",
+                request=request)
 
     def _headers(self) -> dict[str, str]:
         headers = {

@@ -1,7 +1,7 @@
 # The trust model
 
 An agent with tools has one structural problem, and everything here is a response to it:
-**content it reads arrives in the same channel as its instructions.** A web page, a file, a
+**content it reads arrives in the same channel as its instructions.** A database row, a file, a
 server's reply — they land in the context next to the system prompt, and a language model
 has no reliable way to tell "data I was asked to summarise" from "an instruction addressed
 to me". Published analyses of agent frameworks keep finding the same shape under different
@@ -46,40 +46,87 @@ prompt the user learns to click through:
 
 | Capability | How it is held |
 |---|---|
-| `net` | the egress policy, which knows whose idea each host was |
+| `net` | the egress policy: internal hosts only, and whose idea each one was |
 | `exec` | a kernel sandbox with the network denied outright |
 | `memory_write` | quarantined rather than blocked |
-| `fs_write` | not gated — writing inside this app's own workspace after a web search is the ordinary shape of research |
+| `fs_write` | not gated — writing an extract into this app's own workspace after reading a source is the ordinary shape of analysis |
 
 ## The egress policy
 
-Two questions per outbound URL, and the second is the one that matters.
+Air-gapped — the default — the policy is a map of the network, not of the web: the private
+network is where the data lives, and the internet is what may not be reached.
 
-**Does this host point back inside?** Resolved, not spelled: `169.254.169.254` is obvious,
-a domain whose A record points at it is not, and that indirection is the whole of
-server-side request forgery. Private, loopback, link-local and reserved addresses are
-refused — even when the user named them.
+**Is this host inside?** Resolved, not spelled: a name is internal when it is loopback, a
+private address, or a suffix the deployment declared (`AGENT_INTERNAL_DOMAINS`), and a
+name that resolves to a public address is not internal because it is spelled like it is.
+Anything outside is refused, whoever named it. Cloud metadata addresses are refused even
+though they are "inside": they hand out credentials, never data.
 
-**Whose idea was this host?** One the user typed is theirs, and stays allowed however
-tainted the run becomes. One that first appeared *inside a fetched page* belongs to whoever
-wrote that page, and following it needs a decision. Same tool, same code path, different
-provenance — that distinction is the policy.
+**Whose idea was this host?** Inside the network, provenance still matters. One the user
+typed is theirs; one that first appeared *inside a tool result* belongs to whoever wrote
+that result, and following it after untrusted content has been read needs a decision.
 
 A third check catches the shape of a channel rather than a destination: a query string past
 600 characters, or carrying a long opaque blob, is how data leaves when it leaves at all.
+
+## The air gap
+
+`app/network.py` closes each path out where it opens, and Diagnostics shows what holds:
+
+- **the model** — `-cloud` Ollama models and Ollama hosts outside the network are refused
+  (`AGENT_ALLOW_CLOUD_MODEL` lifts this one rule, for tests on non-sensitive data);
+- **MCP over HTTP** — the endpoint must be internal, and so must every redirect it issues;
+- **MCP over stdio** — package managers run offline (`UV_OFFLINE`, `npm_config_offline`…),
+  packages whose purpose is the internet are refused by name, and on macOS the process
+  starts under `sandbox-exec` with a profile that allows loopback and nothing else. A server
+  that needs an internal host — a database client — is detected from its configuration or
+  marked *Internal network*, and then only the enterprise firewall holds it inside. This
+  module says so rather than implying otherwise;
+- **the chart renderer** — its URL allowlist is empty, so a `data.url` that slipped past
+  the sanitizer is still not fetched.
+
+## Who can reach the app
+
+An agent that can run code and query the bank's databases is worth attacking from a
+browser tab, so "this machine" is decided with care:
+
+- **Origin.** A page on any site can make the browser send requests to `localhost`. Those
+  carry `Sec-Fetch-Site: cross-site` or a foreign `Origin`, and are refused before any
+  route runs. There is no CORS policy: one could only widen who may read the API.
+- **Host.** DNS rebinding makes a hostile domain resolve to 127.0.0.1 so the browser treats
+  it as same-origin. The Host header still names the hostile domain, and only localhost and
+  `AGENT_ALLOWED_HOSTS` are answered.
+- **Proxies.** The Vite dev proxy makes every client look like 127.0.0.1, so it forwards
+  the real address and the API requires the whole forwarded chain to be loopback: a proxy
+  can make a request less local, never more. The dev server listens on localhost unless
+  `AGENT_FRONT_HOST` says otherwise.
+- **Other machines.** Nothing is served to them unless a password is set:
+  `AGENT_ACCESS_PASSWORD` for the agent, `AGENT_ADMIN_PASSWORD` for the agent and admin.
+  Sessions are stored as hashes of their tokens; the cookie that carries them for the event
+  stream and downloads is HttpOnly and SameSite=Strict.
+- **The page itself.** Its content security policy allows loading and connecting to its
+  own origin only, so an answer that renders a link or an image cannot make the browser
+  send data elsewhere — the first thing an injected instruction would try.
 
 ## Code execution
 
 `run_python` runs in a separate process with a CPU ceiling, a memory ceiling and a
 wall-clock watchdog that kills the process group. On macOS a fourth thing holds, and it is
-the one that matters once the agent reads the web: the child runs under `sandbox-exec` with
+the one that matters once the agent reads untrusted data: the child runs under `sandbox-exec` with
 **network denied by the kernel** and writes confined to the workspace.
 
-Without it, "summarise this page" and "run this code" compose into an exfiltration
-primitive — a hostile page suggests a script, the script opens a socket, and nothing in
+Without it, "summarise this document" and "run this code" compose into an exfiltration
+primitive — a hostile document suggests a script, the script opens a socket, and nothing in
 between looks wrong. A monkeypatched `socket` module would not do; `ctypes` walks straight
 past it. Verified by trying: sockets, `subprocess curl` and writes outside the workspace all
 fail; pandas, numpy and workspace writes all work.
+
+Reads are fenced as well. Code reads the workspace and the Python installation, and nothing
+under `/Users`, `/tmp`, `/Volumes`, `/opt`, `/srv` or `/data` besides. That closes the way
+around the sources: an agent that knows where a server's SQLite file lives could otherwise
+open it directly — unaudited, ungoverned — and the app's own `.env` and store sit in the
+same home directory. Verified by trying: the trade store's database, `backend/.env` and
+`data/agent.json` all refuse; pandas still imports and workspace files still read.
 
 Where that boundary is unavailable the tool says so rather than implying it is there.
 
@@ -92,8 +139,22 @@ trusted, unfenced — in every later run.
 So a fact learned while untrusted content was in context is stored **quarantined**. It is
 not recalled, never reaches a prompt, and waits in Admin → Memory for the user to say it is
 true. Recalled memories are themselves fenced when injected: by the time a memory is read
-back, nothing distinguishes a fact the user stated from one a page talked the agent into
+back, nothing distinguishes a fact the user stated from one a document talked the agent into
 storing.
+
+## The atlas, and notes about sources
+
+The atlas remembers what tools returned, across conversations, and part of it is written
+into every system prompt — which makes it the same kind of target as memory. So it keeps
+structure only: field names that look like identifiers, kinds, a few short example values
+that match a plain-value pattern, argument shapes, the gist of errors. No sentence from a
+reply is ever stored, so no reply can plant an instruction there.
+
+Interpretation — "this parameter takes book ids, not desk names" — does come from the
+model, from a note it writes or from a review of a run that had to correct itself. Those
+notes are stored as *proposed*, offered only inside `source_info` results (fenced like any
+tool output, labelled unconfirmed), and reach the system prompt only once a person has
+confirmed them in Admin.
 
 ## The audit log
 
@@ -108,7 +169,7 @@ broke.
 ## What this does not claim
 
 It does not stop a determined attacker. It raises the cost of the realistic attacks — a
-poisoned page telling the agent to POST the conversation somewhere — and it makes every
+poisoned document telling the agent to send the conversation somewhere — and it makes every
 attempt visible in the transcript and the log. That is worth having, and it is not the same
 as safety.
 

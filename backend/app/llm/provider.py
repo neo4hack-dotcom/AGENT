@@ -311,25 +311,32 @@ class OllamaProvider(LLMProvider):
         # deltas are already on the user's screen, so a second attempt would duplicate
         # them. That condition is the whole safety of this loop.
         stream_errors: list[str] = []
-        for attempt in range(2):
+        # Three attempts, backing off: a hosted endpoint's 500s come in short bursts, and
+        # one retry a second later often lands in the same burst. Thinking already streamed
+        # does not block a retry — it is shown folded, and a repeated paragraph there costs
+        # less than a lost run. Answer text or a tool call does.
+        delays = (2.0, 5.0, 12.0)
+        for attempt in range(len(delays) + 1):
+            last = attempt == len(delays)
             try:
                 await self._stream_once(payload, text_parts, think_parts, raw_calls,
                                         on_text, on_thinking, should_stop, stream_errors)
                 # An error line with nothing shown to the reader yet is as retryable as a
                 # 500: nothing would be duplicated by asking again.
-                if stream_errors and attempt == 0 and not (text_parts or raw_calls):
+                if stream_errors and not last and not (text_parts or raw_calls):
                     think_parts.clear()
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(delays[attempt])
                     continue
             except _Retryable as exc:
-                streamed = bool(text_parts or think_parts or raw_calls)
-                if attempt == 0 and not streamed:
-                    await asyncio.sleep(1.5)
+                if not last and not (text_parts or raw_calls):
+                    think_parts.clear()
+                    await asyncio.sleep(delays[attempt])
                     continue
                 raise NotConfigured(str(exc)) from exc
             except httpx.HTTPError as exc:
-                if attempt == 0 and not (text_parts or think_parts or raw_calls):
-                    await asyncio.sleep(1.5)
+                if not last and not (text_parts or raw_calls):
+                    think_parts.clear()
+                    await asyncio.sleep(delays[attempt])
                     continue
                 raise NotConfigured(_explain(exc, self.base_url)) from exc
             break

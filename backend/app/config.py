@@ -13,6 +13,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AGENT_", env_file=".env", extra="ignore")
 
+    # The air gap. A property of the deployment, set in the environment (AGENT_AIRGAPPED),
+    # never a preference the UI can flip: whoever can reach Admin should not be able to
+    # open a path out of the network. See app/network.py.
+    airgapped: bool = True
+    # Domain suffixes that count as internal even before resolution, e.g. ".corp.example".
+    internal_domains: str = ""
+    # Testing escape hatch for the model only (AGENT_ALLOW_CLOUD_MODEL): every other part of
+    # the air gap stays enforced. Never set it where the data is real.
+    allow_cloud_model: bool = False
+
     app_name: str = "AGENT"
     port: int = 3041
     db_path: str = "data/agent.json"
@@ -25,10 +35,9 @@ class Settings(BaseSettings):
 
     # --- The model. Local only, by design: Ollama on this machine. ---
     ollama_base_url: str = "http://localhost:11434"
-    # gpt-oss is the default because it is the strongest model this Ollama offers. Note
-    # the `-cloud` tag: it is hosted by Ollama, not by this machine, and the interface
-    # says so on every screen rather than letting the "local" claim quietly go stale.
-    model: str = "gpt-oss:120b-cloud"
+    # A model that runs on this Ollama. Cloud tags (`-cloud`) send prompts and data to
+    # ollama.com and are refused while the deployment is air-gapped.
+    model: str = "gpt-oss:20b"
     # The critic, the gap check, compaction and titles — never the answer. This one runs
     # several times per question, so on a machine that cannot hold two models at once it is
     # what makes the whole app feel slow. Point it at a local model to keep that work on
@@ -37,10 +46,17 @@ class Settings(BaseSettings):
     llm_timeout_s: int = 900
     num_ctx: int = 0      # 0 => let Ollama use the model's own default
 
-    # --- Admin ---
+    # --- Access ---
     # Empty password keeps the admin area reachable from this machine only. Set one and
     # it is required from everywhere, loopback included.
     admin_password: str = ""
+    # Lets people on other machines use the agent (chat, not admin) after signing in. With
+    # neither password set, the app answers this machine only. See app/security.py.
+    access_password: str = ""
+    # Host names this app may be reached under besides localhost, comma-separated — e.g.
+    # "agent.corp.example" or ".corp.example". Anything else is refused: that is what stops
+    # DNS rebinding, where a hostile domain re-resolves to this machine.
+    allowed_hosts: str = ""
     session_ttl_s: int = 604800
 
     # --- Agent guardrails: sane defaults, all overridable per deployment ---
@@ -63,18 +79,17 @@ class Settings(BaseSettings):
     # reachable through find_tools; see agent/context.py.
     tool_budget: int = 28
     # The quarantined reader's own ceilings, separate from the parent run's.
-    subagent_iterations: int = 6
-    subagent_timeout_s: int = 240
     critic_min_tools: int = 1     # tool calls before the pre-answer reflection runs
+
+    # Numbers and dates in charts and reports: "fr-FR" (1 234,56 · janv. 2026), "en-US",
+    # "en-GB". Labels themselves follow the language of the question.
+    chart_locale: str = "fr-FR"
 
     # --- Built-in tools ---
     workspace_dir: str = "data/workspace"   # the only directory file tools may touch
     enable_python_tool: bool = True
     python_timeout_s: int = 45
     python_memory_mb: int = 2048
-    enable_web_tools: bool = True
-    web_fetch_max_bytes: int = 3_000_000
-    web_timeout_s: int = 30
 
     # --- MCP ---
     mcp_autoconnect: bool = True

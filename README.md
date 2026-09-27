@@ -1,13 +1,18 @@
 # AGENT
 
-An autonomous agent with a single input on an empty screen. Behind it: a bounded agentic
-loop, a set of tools that work with nothing configured, and a library of MCP servers you
-connect in two clicks from a discreet admin page.
+An autonomous data analyst with a single input on an empty screen, built to run inside a
+private network with no path to the internet. Behind it: a bounded agentic loop, tools that
+work with nothing configured, and the MCP servers that hold your data — databases, market
+data services, reference data — connected from a discreet admin page and described once so
+the agent knows what each one is for.
 
-Models run through **Ollama**. A model tagged `-cloud` is hosted by Ollama rather than by
-your machine, and the interface says which on every screen — the status badge in the header
-carries a monitor icon for a local model and a cloud icon for a hosted one. Nothing else
-about a conversation leaves the machine.
+Models run through **Ollama**, on this machine or on a server inside your network.
+
+**Air-gapped by default.** No tool reaches the internet, and the paths out that
+configuration could open are closed where they open: cloud models and external Ollama hosts
+are refused, MCP endpoints must be internal, package managers run offline, and on macOS
+every local MCP server runs inside a kernel sandbox that allows the loopback interface and
+nothing else. See [Air-gapped deployment](#air-gapped-deployment).
 
 ---
 
@@ -22,12 +27,13 @@ make api    # http://localhost:3041
 make web    # http://localhost:3040
 ```
 
-Defaults to `gpt-oss:120b-cloud` for reasoning and `qwen3.5:4b` for the fast lane. Change
-both in **⌘,** → *Model*. To run entirely on your own hardware, pick a local model there —
-anything reporting `tools` works.
+Defaults to `gpt-oss:20b`. Change it in **⌘,** → *Model* — anything reporting `tools`
+works. Models tagged `-cloud` run at ollama.com and are listed as *leaves the network*: they
+cannot be selected while the deployment is air-gapped. (`AGENT_ALLOW_CLOUD_MODEL=true`
+lifts that one rule for testing on non-sensitive data; everything else stays enforced.)
 
 Production is one process; the backend serves the built SPA from the same origin, so there
-is no CORS to configure:
+is no CORS at all:
 
 ```bash
 make serve
@@ -44,8 +50,8 @@ never guessed from the name:
 | `thinking` | no reasoning trace is shown |
 | `vision` | attached images are not sent — and the app tells you so |
 
-`gpt-oss:120b-cloud` reports tools and thinking but **not vision**, so image attachments
-need a different model (`qwen3.5:4b` and `gemma4:e4b` both see).
+`gpt-oss` reports tools and thinking but **not vision**, so image attachments need a
+different model (`qwen3.5:4b` and `gemma4:e4b` both see).
 
 ---
 
@@ -53,9 +59,11 @@ need a different model (`qwen3.5:4b` and `gemma4:e4b` both see).
 
 | Tool | What it actually does |
 |---|---|
-| `web_search` | DuckDuckGo search, no API key |
-| `web_fetch` | fetches a URL and reads it (HTML → text, JSON, CSV) |
-| `run_python` | runs Python in a separate process, killed past its timeout |
+| `run_python` | pandas/numpy in a separate process with the network denied; `rows('#4')` loads any earlier result |
+| `chart` | a professional Vega-Lite chart, validated against the data, revisable in place |
+| `export_data` / `create_report` | an Excel/CSV/JSON extract, or a PDF report with charts and numbered sources |
+| `ask_user` | a question with options, when the request is ambiguous (which "Kerner"?) |
+| `source_info` | what a connected source holds: its description, model, metrics and caveats |
 | `read_file` / `write_file` / `list_files` | the workspace, and nothing else |
 | `remember` / `recall` | durable memory across conversations |
 | `plan` | the checklist you watch tick over |
@@ -65,12 +73,11 @@ Every connected **MCP** server adds its tools to the same index, namespaced by s
 (`filesystem__read_file`), and the built-in file tools are named `workspace_*` so it is
 never ambiguous which directory a call is about.
 
-**The library is local-only by selection.** Every one of its eleven recipes runs as a
-process on your machine and needs no third-party account: **Pandas Frames** (bundled with
-this repository), filesystem, Git, SQLite, Postgres, Web Fetch, Playwright, knowledge-graph
-memory, sequential thinking, time, and the protocol's own reference server. Two of them
-reach the network *at your instruction* — Web Fetch opens the URL you name, Playwright
-drives a browser to the page you name — and neither holds a credential.
+**The library is offline by selection.** Every recipe runs as a process on your machine,
+needs no account and reaches nothing outside it: **Pandas Frames** (bundled with this
+repository), filesystem, SQLite, Postgres (to an internal database), knowledge-graph
+memory, sequential thinking and time. Packages whose job is the internet — fetch, browsers,
+git hosting, search — are refused by name when the deployment is air-gapped.
 
 **Pandas Frames** is the one server that ships here rather than being fetched: it runs on
 the interpreter already serving the API, so there is no launcher to install. It loads CSV,
@@ -81,9 +88,19 @@ honest about what that sandbox is: real defence against mistakes and runaway wor
 security boundary against a determined attacker. Point it at data you are willing to have
 read.
 
-A server that talks to a hosted API is still one "custom server" form away, over stdio or
-HTTP. It is simply a decision you make deliberately rather than one the shelf makes look
-routine.
+Your own servers — a risk engine, a market data service, a positions database — are one
+"custom server" form away, over stdio or HTTP, as long as they live inside the network.
+
+**Twenty servers, one question.** The prompt carries a source map — every source, what
+its tools do, what they were seen returning, what is still unexplored — and past the tool
+budget the fast model routes each question to the sources it needs, by meaning rather than
+shared words. What calls return is remembered across conversations (the atlas), so the
+next question starts where the last one finished; see [`DATA.md`](DATA.md).
+
+**Describe each source once** (*Admin → Data sources*): what it holds and what it cannot
+answer, in plain words, plus for a SQL source a model the app measures from the data itself —
+tables, values, ranges, joins — and the metrics you define once and want computed the same
+way in every answer. [`DATA.md`](DATA.md) explains the method.
 
 ---
 
@@ -125,8 +142,8 @@ known secrets, scanned for manipulation, marked as having come from outside, and
 with a per-run nonce the system prompt declares — so a page can be summarised without being
 obeyed. Once a run has read something foreign, the one capability with irreversible reach
 outside this machine stops being automatic; the rest are held precisely, by an egress policy
-that knows whose idea each host was and by a kernel sandbox that denies `run_python` the
-network outright. Facts the agent learns while reading are quarantined until you confirm
+that refuses anything outside the private network and by a kernel sandbox that denies
+`run_python` the network outright. Facts the agent learns while reading are quarantined until you confirm
 them, and every action lands in a hash-chained log that cannot hide being edited.
 
 [`SECURITY.md`](SECURITY.md) is the whole model, including what it does not claim.
@@ -154,28 +171,68 @@ Built-in tools only ever write inside the workspace, so they are gated in "alway
 alone: asking to approve every `run_python` would make the agent useless exactly when it is
 most useful. A trusted MCP server can be auto-approved, server by server.
 
-`run_python` deserves to be named for what it is: a guard against runaway and accident —
-separate process, bounded working directory, a watchdog that kills it past the timeout —
-**not a security sandbox**. Code runs with this app's own rights. The switch is in
-*Guardrails*.
+`run_python` runs in a separate process with CPU, memory and wall-clock limits. On macOS
+it also runs in a kernel sandbox: no network, writes only in the workspace, and no reads of
+home directories or data folders beyond the workspace — data arrives through the sources,
+never straight off the disk. Elsewhere there is no kernel sandbox, and the code runs with
+this app's own rights: treat it as a guard against runaway and accident there. The switch
+is in *Guardrails*.
 
 ---
+
+## Who can reach it
+
+- **This machine** uses the app freely. With no `AGENT_ADMIN_PASSWORD`, admin is open here
+  and nowhere else.
+- **Other machines** see a sign-in screen: `AGENT_ACCESS_PASSWORD` opens the agent,
+  `AGENT_ADMIN_PASSWORD` opens the agent and admin. With neither set, nothing is served
+  beyond this machine. Failed attempts back off.
+- **Other web pages** open in the same browser cannot use it: requests from another site
+  are refused (`Sec-Fetch-Site`, `Origin`), the Host header must name this app (which stops
+  DNS rebinding — add your own host names to `AGENT_ALLOWED_HOSTS`), and the page's content
+  security policy lets it load and connect to its own origin only.
 
 ## Admin
 
 Discreet: **⌘,** or the small icon top right.
 
-- **No password** (default) — reachable only from the machine running the app. The right
-  setting for a personal agent: nothing to invent before configuring anything, and nothing
-  exposed if the port is ever forwarded.
-- **With `AGENT_ADMIN_PASSWORD`** — required everywhere, loopback included, in exchange for
-  a token. Failed attempts back off.
-
 Secrets you enter (tokens, connection strings) never come back to the browser in the clear:
 they are masked, and sending a masked value back does not overwrite it.
 
 Tabs: **Model** · **MCP servers** (library, connected servers, a bench to call one tool by
-hand) · **Tools** · **Guardrails** · **Memory** · **Diagnostics**.
+hand) · **Data sources** · **Tools** · **Guardrails** · **Memory** · **Diagnostics** (which
+shows the air gap as it is enforced).
+
+---
+
+## Air-gapped deployment
+
+`AGENT_AIRGAPPED=true` is the default and a property of the deployment, not a switch in the
+UI: whoever reaches Admin cannot open a path out.
+
+| Path out | How it is closed |
+|---|---|
+| The model | `-cloud` models and Ollama hosts outside the private network are refused |
+| MCP over HTTP | the endpoint must be internal — loopback, a private address, or a suffix in `AGENT_INTERNAL_DOMAINS` — and so must every redirect |
+| MCP over stdio | `npx`/`uvx`/`pip` run offline; internet packages are refused by name; on macOS the process runs in a kernel sandbox allowing loopback only |
+| MCP needing an internal host | a database client (detected from its configuration, or set to *Internal network* in the server form) keeps the network; the enterprise firewall is what holds it inside |
+| `run_python` | kernel sandbox, network denied |
+| Tool arguments carrying a URL | refused unless the host is internal; cloud metadata addresses always refused |
+| The browser | CSP `connect-src 'self'`, self-hosted fonts, no external asset of any kind |
+| Charts rendered server-side | the renderer's URL allowlist is empty |
+
+**Provisioning offline.** Nothing is downloaded at run time, so everything is installed
+beforehand, from your internal mirrors:
+
+```bash
+pip install -r backend/requirements.txt       # via your PyPI mirror
+cd frontend && npm ci && npm run build        # via your npm mirror, or ship frontend/dist
+npm install -g @modelcontextprotocol/server-filesystem ...   # each stdio server you use
+ollama pull gpt-oss:20b                       # on the Ollama host, or import the weights
+```
+
+`npx -y package` works offline only once the package is in the npm cache or installed
+globally; a server that fails to start says so on its card, with its own stderr.
 
 ---
 
@@ -187,7 +244,8 @@ backend/app/
 ├── config.py            one env prefix, everything defaulting empty/off
 ├── deps.py              dependency container; `settings` is a *live* view
 ├── store.py             flat JSON, serialised and debounced writes
-├── security.py          local-only, or password → token
+├── security.py          who may reach the app: local, sign-in, origin and host checks
+├── network.py           the air gap: model, MCP endpoints, offline launch, kernel sandbox
 ├── llm/provider.py      Ollama: streaming, reasoning split out, native tools
 ├── mcp/                 hand-written JSON-RPC client (stdio + HTTP), registry, catalog
 ├── agent/
@@ -195,8 +253,10 @@ backend/app/
 │   ├── guard.py         the loop guard
 │   ├── prompts.py       everything the model knows about itself
 │   ├── builtin.py       the built-in tools
+│   ├── data_tools.py    chart, ask_user, export_data, create_report
 │   └── memory.py        long-term memory, weighted-overlap recall
-└── tools/               web, code execution, files
+├── data/                source knowledge, profiler, drafting, charts, exports, PDF
+└── tools/               code execution, files
 frontend/src/
 ├── App.tsx              the two states: empty canvas, then conversation
 ├── api.ts               the one typed client (+ a reconnecting SSE stream)
@@ -237,13 +297,9 @@ than an opaque import error.
   puts the label after the value it produced, and clicking it scrolls to the call that
   established it. An uncited sentence is the agent's own claim, which is a useful thing to
   be able to see.
-- **A reader with no hands.** `research` delegates a question to a sub-agent with its own
-  context and only read-only tools. It keeps six pages of sources out of the conversation,
-  and anything hostile in them is talking to something that cannot write, run, send or
-  remember.
 - **Fonts are self-hosted** (Space Grotesk for the wordmark, Inter for everything read —
-  72 KB together). A page that phones a font CDN on every load to draw its own name is not a
-  local-first app.
+  72 KB together). A page that phones a font CDN on every load to draw its own name has no
+  place in an air-gapped network.
 
 ---
 
@@ -262,9 +318,8 @@ to have written now exists with the right content.
 - `run_python` is not a security sandbox (see above).
 - The JSON store assumes **a single process**. It holds up well for a personal agent; a real
   database is needed the day several instances write at once.
-- Web search goes through DuckDuckGo's HTML endpoint, keyless. If it changes shape or rate
-  limits, the tool **says so** instead of returning an empty list the model would read as
-  "nothing exists about this".
+- Outside macOS there is no kernel sandbox for MCP processes: the air gap there rests on
+  offline package managers, the checks above and your firewall — and Diagnostics says so.
 - Memory recall uses weighted term overlap, not embeddings: inspectable, no second model to
   load, and enough for the handful of durable facts a personal agent accumulates.
 
@@ -272,4 +327,5 @@ to have written now exists with the right content.
 
 ## Ports
 
-`3040` web · `3041` API. Fallback pair: `3050` / `3051` (`npm run dev:alt`).
+`3040` web · `3041` API. Fallback pair: `3042` / `3043` (`npm run dev:alt`). The dev server
+listens on localhost only; `AGENT_FRONT_HOST=0.0.0.0` exposes it deliberately.

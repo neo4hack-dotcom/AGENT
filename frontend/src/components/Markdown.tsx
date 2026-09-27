@@ -17,7 +17,7 @@ import { CopyButton, cls } from './ui';
 // The 【…】 alternative is not decoration: some models (gpt-oss among them) cite sources
 // with CJK lenticular brackets around a bare URL. Left alone they render as literal
 // punctuation wrapped around a link, which looks like a rendering bug in every answer.
-const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|\[[^\]]*\]\([^)\s]+\)|[[【]#\d{1,3}[\]】]|【[^】]+】|https?:\/\/[^\s<>()]+)/g;
+const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|!\[[^\]]*\]\([^)\s]+\)|\[[^\]]*\]\([^)\s]+\)|[[【]#\d{1,3}[\]】]|【[^】]+】|https?:\/\/[^\s<>()]+)/g;
 
 /** Plain text, with soft line breaks turned into real ones. */
 function withBreaks(text: string, key: string): ReactNode[] {
@@ -92,6 +92,15 @@ function renderInline(text: string, key: string): ReactNode[] {
     }
     if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
       return <em key={k}>{part.slice(1, -1)}</em>;
+    }
+    // An image is never fetched: the page may load nothing from elsewhere, and an image
+    // URL is exactly how an injected instruction would carry data out. Models write one to
+    // point at a chart that is already on screen below the text, so it simply goes.
+    const image = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(part);
+    if (image) {
+      return /^(chart:|#|c\d|[\w./-]+\.(png|svg|jpe?g)$)/i.test(image[2]) || !image[1]
+        ? null
+        : <span key={k} className="dim italic">{image[1]}</span>;
     }
     const link = /^\[([^\]]*)\]\(([^)\s]+)\)$/.exec(part);
     if (link) return <Link key={k} href={link[2]}>{link[1] || link[2]}</Link>;
@@ -249,19 +258,29 @@ export function Markdown({ text, className, cite }: {
   const flushTable = () => {
     if (!table || table.length === 0) return;
     const [head, ...rows] = table;
+    // Figures line up on their units, the way a spreadsheet shows them: a column that is
+    // mostly numbers — amounts, shares, counts, with or without €, %, citations — is set
+    // right-aligned in tabular figures, so 1 234,56 sits over 98,70.
+    const numeric = head.map((_, i) => {
+      const cells = rows.map((row) => (row[i] ?? '').replace(/\*\*|[`[\]【】]|#\d+/g, '').trim()).filter(Boolean);
+      const figures = cells.filter((c) => /^[-+−]?[\s\u00a0\u202f]*[€$£¥]?[\s\u00a0\u202f]*[\d][\d\s\u00a0\u202f.,']*(\s?(%|€|\$|£|k|M|Md|bn|EUR|USD|GBP|bp|pb|x))?$/.test(c));
+      return cells.length > 0 && figures.length / cells.length >= 0.7;
+    });
     blocks.push(
       <div key={`t${blocks.length}`} className="my-3.5 overflow-x-auto rounded-xl border hairline">
         <table className="w-full border-collapse text-left text-[13px]">
           <thead className="bg-zinc-50 dark:bg-white/[0.04]">
             <tr>{head.map((cell, i) => (
-              <th key={i} className="whitespace-nowrap px-3 py-2 font-semibold">{renderInline(cell, `th${i}`)}</th>
+              <th key={i} className={`whitespace-nowrap px-3 py-2 font-semibold${numeric[i] ? ' text-right' : ''}`}>{renderInline(cell, `th${i}`)}</th>
             ))}</tr>
           </thead>
           <tbody>
             {rows.map((row, r) => (
               <tr key={r} className="border-t hairline">
                 {row.map((cell, i) => (
-                  <td key={i} className="px-3 py-2 align-top">{renderInline(cell, `td${r}-${i}`)}</td>
+                  <td key={i} className={numeric[i] ? 'whitespace-nowrap px-3 py-2 text-right align-top tabular-nums' : 'px-3 py-2 align-top'}>
+                    {renderInline(cell, `td${r}-${i}`)}
+                  </td>
                 ))}
               </tr>
             ))}

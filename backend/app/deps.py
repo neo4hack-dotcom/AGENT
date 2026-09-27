@@ -28,12 +28,11 @@ from app.store import JsonStore
 # paths, ports and the admin password are deployment facts, not preferences.
 OVERRIDABLE = {
     "ollama_base_url", "model", "fast_model", "approval_mode", "max_iterations",
-    "run_timeout_s", "tool_timeout_s", "enable_python_tool", "enable_web_tools",
+    "run_timeout_s", "tool_timeout_s", "enable_python_tool",
     "python_timeout_s", "python_memory_mb", "num_ctx", "critic_min_tools",
     "history_turns", "parallel_max_fanout", "stagnation_limit", "max_retries",
-    "tool_budget", "subagent_iterations", "subagent_timeout_s",
-    "web_timeout_s", "mcp_call_timeout_s", "mcp_startup_timeout_s",
-    "approval_timeout_s",
+    "tool_budget", "mcp_call_timeout_s", "mcp_startup_timeout_s",
+    "approval_timeout_s", "chart_locale",
 }
 
 # Values Admin may set that have no environment counterpart.
@@ -64,8 +63,11 @@ class Container:
         self.mcp = McpRegistry(self.store, self.bus, self.settings)
         # What each source holds and how to read it — written once in Admin, read by
         # every run. See app/data/knowledge.py.
+        from app.data.atlas import Atlas
         from app.data.knowledge import Knowledge
         self.knowledge = Knowledge(self.store)
+        # What each tool has been seen to return, across conversations. See app/data/atlas.py.
+        self.atlas = Atlas(self.store)
         self._llm: LLMProvider | None = None
         self._fast_llm: LLMProvider | None = None
         self._llm_key: tuple = ()
@@ -123,9 +125,19 @@ class Container:
             return
         base_url, model, fast_model, num_ctx = key
         timeout = int(self.env.llm_timeout_s)
-        self._llm = make_provider(base_url, model or "", timeout, int(num_ctx or 0))
-        self._fast_llm = make_provider(base_url, fast_model or model or "", timeout,
-                                       int(num_ctx or 0))
+        from app import network
+        from app.llm.provider import UnconfiguredProvider
+
+        def build(name: str) -> LLMProvider:
+            # A model the air gap forbids is not built at all: every run then fails with
+            # the reason, instead of quietly sending the conversation out.
+            refused = network.check_model(name, base_url or "")
+            if refused:
+                return UnconfiguredProvider(refused)
+            return make_provider(base_url, name, timeout, int(num_ctx or 0))
+
+        self._llm = build(model or "")
+        self._fast_llm = build(fast_model or model or "")
         self._llm_key = key
 
     @property

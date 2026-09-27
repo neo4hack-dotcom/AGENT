@@ -75,6 +75,9 @@ class Connection:
         self.prompts: list[dict] = []
         self.connected_at: float = 0.0
         self.call_count = 0
+        # What network this server's process can reach, in words — shown in Admin, so the
+        # air gap is something an administrator can read, not something they must trust.
+        self.fence = ""
 
     def snapshot(self) -> dict:
         client = self.client
@@ -86,6 +89,7 @@ class Connection:
             "prompt_count": len(self.prompts),
             "connected_at": self.connected_at or None,
             "call_count": self.call_count,
+            "network": self.fence,
             "server_info": client.server_info if client else {},
             "protocol_version": client.negotiated_version if client else "",
             "diagnostics": (client.transport.diagnostics[-12:] if client else []),
@@ -136,6 +140,9 @@ class McpRegistry:
             "docs": cfg.get("docs") or "",
             "enabled": bool(cfg.get("enabled", True)),
             "auto_approve": bool(cfg.get("auto_approve", False)),
+            # "" = decided from the configuration, "local" = loopback only, "internal" = may
+            # reach hosts inside the private network. See app/network.py.
+            "network": cfg.get("network") if cfg.get("network") in ("local", "internal") else "",
             "created_at": now(),
         }
         self.store.mcp_servers()[server_id] = server
@@ -149,7 +156,9 @@ class McpRegistry:
         if server is None:
             return None
         editable = {"name", "args", "env", "headers", "url", "command", "cwd", "enabled",
-                    "description", "auto_approve"}
+                    "description", "auto_approve", "network"}
+        if "network" in patch and patch["network"] not in ("", "local", "internal"):
+            patch.pop("network")
         # A masked value coming back from the browser means "unchanged", never "set it to
         # bullets" — without this, opening the edit form and saving would destroy a token.
         for field in ("env", "headers"):
@@ -191,15 +200,21 @@ class McpRegistry:
             conn.status, conn.error = "connecting", None
             self._emit()
             try:
+                from app import network
+                refused = network.check_mcp(server)
+                if refused:
+                    raise McpError(refused)
                 if server["transport"] == "http":
                     if not server.get("url"):
                         raise McpError("This server has no URL configured.")
                     transport: Any = HttpTransport(server["url"], server.get("headers") or {})
+                    conn.fence = "internal network (enforced by the enterprise firewall)"
                 else:
                     if not server.get("command"):
                         raise McpError("This server has no command configured.")
-                    transport = StdioTransport(server["command"], server.get("args") or [],
-                                               server.get("env") or {}, server.get("cwd") or None)
+                    command, args, env, conn.fence = network.stdio_launch(
+                        server["command"], server.get("args") or [], server.get("env") or {}, server)
+                    transport = StdioTransport(command, args, env, server.get("cwd") or None)
                 client = McpClient(transport, self.settings.mcp_protocol_version,
                                    self.settings.mcp_startup_timeout_s,
                                    self.settings.mcp_call_timeout_s)
