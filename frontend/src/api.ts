@@ -5,7 +5,7 @@
 import type {
   AdminState, AuditReport, Bootstrap, CatalogEntry, Conversation, ConversationSummary,
   Artifact, Diagnostics, MemoryEntry, McpServer, ModelOption, RuntimeInfo, SearchHit, Skill,
-  SkillStats, SourceDetail, SourceSummary, StreamEvent, UploadResult,
+  SkillStats, SourceDetail, SourceSummary, StreamEvent, UploadResult, CatalogState,
 } from './types';
 
 const TOKEN_KEY = 'agent.admin.token';
@@ -169,6 +169,9 @@ export const api = {
       `/conversations/${conversationId}/messages/${messageId}/explain`, { method: 'POST' }),
   trailUrl: (conversationId: string, messageId: string, format: 'md' | 'json' = 'md') =>
     `/api/conversations/${conversationId}/messages/${messageId}/trail?format=${format}`,
+  dataCatalog: () => request<CatalogState>('/admin/data-catalog'),
+  importFromCatalog: (id: string) =>
+    request<SourceDetail>(`/admin/sources/${id}/from-catalog`, { method: 'POST' }),
   forgetObservations: (id: string) =>
     request<SourceDetail>(`/admin/sources/${id}/observations`, { method: 'DELETE' }),
 

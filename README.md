@@ -102,6 +102,22 @@ budget the fast model routes each question to the sources it needs, by meaning r
 shared words. What calls return is remembered across conversations (the atlas), so the
 next question starts where the last one finished; see [`DATA.md`](DATA.md).
 
+**A data catalog, if you have one.** Connect the enterprise catalog — DataLoom or any MCP
+server that lists datasets, column definitions, a glossary and lineage — from *Library →
+Data catalog* (an internal HTTP endpoint and its token), or tick *data catalog* on any
+connected server; a server whose tools are plainly a catalog's is recognised on its own. A
+catalog is kept apart from the data sources, and used **if and only if one is connected**:
+
+- it is never routed to, queried for figures or listed among the sources; its tools are
+  always offered, with a short paragraph telling the agent what the catalog is for —
+  understanding a table, a column, a business term, a calculation, where data comes from;
+- `source_info` adds what the catalog says about a source's tables;
+- *Admin → Data sources* shows it, and each SQL source gets *Import from catalog*: its
+  table and column definitions folded into the source's model under what is already
+  written, as a proposal you read before saving. *Draft with AI* uses them too.
+
+With no catalog connected, none of this appears anywhere — not a tool, not a line of prompt.
+
 **Describe each source once** (*Admin → Data sources*): what it holds and what it cannot
 answer, in plain words, plus for a SQL source a model the app measures from the data itself —
 tables, values, ranges, joins — and the metrics you define once and want computed the same
@@ -272,7 +288,8 @@ backend/app/
 │   ├── builtin.py       the built-in tools
 │   ├── data_tools.py    chart, ask_user, export_data, create_report
 │   └── memory.py        long-term memory, weighted-overlap recall
-├── data/                source knowledge, profiler, drafting, charts, exports, PDF
+├── data/                source knowledge, catalog bridge, atlas, profiler, drafting,
+│                        charts, exports, PDF
 └── tools/               code execution, files
 frontend/src/
 ├── App.tsx              the two states: empty canvas, then conversation

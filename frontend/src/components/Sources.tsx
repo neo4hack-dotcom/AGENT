@@ -13,10 +13,10 @@
 // returns, and the ones never explored. That is a cache the agent keeps, shown so it can be
 // checked — and forgotten, if the source changed in a way its schemas do not show.
 
-import { ArrowLeft, Check, Circle, Database, Eraser, Eye, FlaskConical, Lightbulb, Ruler, Save, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Check, Circle, Database, Eraser, Eye, FlaskConical, Import, Lightbulb, Ruler, Save, Sparkles, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
-import type { SourceDetail, SourceObserved, SourceSummary } from '../types';
+import type { CatalogState, SourceDetail, SourceObserved, SourceSummary } from '../types';
 import { Badge, Button, Dot, Empty, cls, useToast } from './ui';
 
 function ago(ts: number | null): string {
@@ -39,13 +39,51 @@ function Readiness({ score, of }: { score: number; of: number }) {
   );
 }
 
+function CatalogCard({ state }: { state: CatalogState | null }) {
+  if (!state) return null;
+  const live = state.catalogs.filter((c) => c.connected);
+  return (
+    <div className={cls('flex items-start gap-3 rounded-xl border px-3.5 py-3',
+      live.length ? 'border-brand-300/60 bg-brand-50/40 dark:border-brand-500/25 dark:bg-brand-500/[0.05]' : 'hairline')}>
+      <BookOpen size={15} className={cls('mt-0.5 shrink-0', live.length ? 'text-brand-700 dark:text-brand-300' : 'dimmer')} />
+      <div className="min-w-0 text-2xs leading-relaxed">
+        {live.length ? (
+          <>
+            <p className="text-[13px] font-medium text-zinc-800 dark:text-zinc-100">
+              Data catalog: {live.map((c) => c.name).join(', ')}
+            </p>
+            <p className="dim">
+              The agent reads it to understand the sources — {Array.from(new Set(live.flatMap((c) => c.families))).join(', ')} —
+              and never queries it for figures. Open a source to import its table and column definitions.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="text-[13px] font-medium dim">No data catalog connected</p>
+            <p className="dimmer">
+              Connect one in MCP servers (Library → Data catalog, or mark a server as “data catalog”). Until then the agent
+              relies on these notes and on what it observes.
+              {state.catalogs.length > 0 && ` ${state.catalogs.map((c) => c.name).join(', ')} is set as catalog but not connected.`}
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function SourcesPanel() {
   const [list, setList] = useState<SourceSummary[] | null>(null);
+  const [catalog, setCatalog] = useState<CatalogState | null>(null);
   const [open, setOpen] = useState<string | null>(null);
-  const load = useCallback(async () => setList(await api.sources()), []);
+  const load = useCallback(async () => {
+    const [sources, state] = await Promise.all([api.sources(), api.dataCatalog().catch(() => null)]);
+    setList(sources);
+    setCatalog(state);
+  }, []);
   useEffect(() => { void load(); }, [load]);
 
-  if (open) return <SourceEditor id={open} onBack={() => { setOpen(null); void load(); }} />;
+  if (open) return <SourceEditor id={open} catalogConnected={!!catalog?.connected} onBack={() => { setOpen(null); void load(); }} />;
   if (!list) return <p className="text-xs dimmer">Loading…</p>;
   const data = list.filter((s) => s.connected);
   return (
@@ -55,6 +93,7 @@ export function SourcesPanel() {
         its notes — the right table, the right filter, the metric computed the way you define
         it — instead of five exploratory calls and a guess.
       </p>
+      <CatalogCard state={catalog} />
       {data.length === 0 ? (
         <Empty icon={Database} title="No connected server" hint="Connect an MCP server first, in MCP servers." />
       ) : (
@@ -88,12 +127,12 @@ export function SourcesPanel() {
   );
 }
 
-function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
+function SourceEditor({ id, onBack, catalogConnected }: { id: string; onBack: () => void; catalogConnected?: boolean }) {
   const toast = useToast();
   const [source, setSource] = useState<SourceDetail | null>(null);
   const [description, setDescription] = useState('');
   const [yaml, setYaml] = useState('');
-  const [busy, setBusy] = useState<'save' | 'profile' | 'draft' | 'forget' | null>(null);
+  const [busy, setBusy] = useState<'save' | 'profile' | 'draft' | 'forget' | 'catalog' | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [draftNote, setDraftNote] = useState<SourceDetail | null>(null);
 
@@ -105,7 +144,7 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
   };
   useEffect(() => { void api.source(id).then(take); }, [id]);
 
-  const run = async (kind: 'save' | 'profile' | 'draft' | 'forget') => {
+  const run = async (kind: 'save' | 'profile' | 'draft' | 'forget' | 'catalog') => {
     setBusy(kind);
     try {
       if (kind === 'save') {
@@ -119,6 +158,13 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
         setYaml(profiled.model_yaml);
         const p = profiled.profile as { queries?: number; elapsed_ms?: number };
         toast(`Measured in ${((p.elapsed_ms ?? 0) / 1000).toFixed(1)}s (${p.queries ?? 0} queries)`);
+      } else if (kind === 'catalog') {
+        // Definitions from the catalog, under what is already written: a proposal to read.
+        const imported = await api.importFromCatalog(id);
+        setYaml(imported.model_yaml);
+        toast(imported.catalog_added
+          ? `${imported.catalog_added} definitions imported from ${imported.catalog_tables} catalogued tables — review, then Save`
+          : 'The catalog has nothing to add to what is already written');
       } else if (kind === 'forget') {
         const fresh = await api.forgetObservations(id);
         setSource((current) => (current ? { ...current, ...fresh } : current));
@@ -221,6 +267,12 @@ function SourceEditor({ id, onBack }: { id: string; onBack: () => void }) {
           <Button variant="outline" icon={Ruler} busy={busy === 'profile'} disabled={!!busy} onClick={() => void run('profile')}
             title="Measure tables, values, ranges, joins and data-quality issues from the data itself.">
             Profile
+          </Button>
+        )}
+        {source.queryable && catalogConnected && (
+          <Button variant="outline" icon={Import} busy={busy === 'catalog'} disabled={!!busy} onClick={() => void run('catalog')}
+            title="Bring this source's table and column definitions from the data catalog into the model, without overwriting what is written.">
+            Import from catalog
           </Button>
         )}
         <Button variant="outline" icon={Sparkles} busy={busy === 'draft'} disabled={!!busy} onClick={() => void run('draft')}

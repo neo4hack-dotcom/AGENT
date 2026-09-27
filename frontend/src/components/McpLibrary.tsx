@@ -6,7 +6,7 @@
 // yourself and look at what comes back.
 
 import {
-  AlertTriangle, Check, Plug, PlugZap, Play, Plus, RefreshCw, Search, Terminal, Trash2,
+  BookOpen, AlertTriangle, Check, Plug, PlugZap, Play, Plus, RefreshCw, Search, Terminal, Trash2,
   X, Zap,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -134,6 +134,11 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
                         {server.status === 'connected' && (
                           <Badge tone="brand">{server.tool_count} tool{server.tool_count > 1 ? 's' : ''}</Badge>
                         )}
+                        {server.role === 'catalog' && (
+                          <span title={server.role_detected ? 'Recognised from its tools as a data catalog' : 'Set as the data catalog'}>
+                            <Badge tone="brand"><BookOpen size={9} /> data catalog{server.role_detected ? ' · detected' : ''}</Badge>
+                          </span>
+                        )}
                         {server.status === 'connected' && server.network && (
                           <span title={`Network: ${server.network}`}>
                             <Badge tone={server.network.startsWith('loopback') ? 'good' : 'neutral'}>
@@ -179,6 +184,16 @@ export function McpLibrary({ onChanged }: { onChanged: () => void }) {
                             }}
                             className="h-3 w-3 accent-brand-600" />
                           auto-approve its writes
+                        </label>
+                        <label className="ml-1 flex cursor-pointer items-center gap-1.5 text-2xs dim"
+                          title="A data catalog documents the data (definitions, glossary, lineage). The agent reads it to understand the sources, and never queries it for figures.">
+                          <input type="checkbox" checked={server.role === 'catalog'}
+                            onChange={async (e) => {
+                              await api.patchServer(server.id, { role: e.target.checked ? 'catalog' : 'source' });
+                              await load();
+                            }}
+                            className="h-3 w-3 accent-brand-600" />
+                          data catalog
                         </label>
                         <IconButton icon={Trash2} label="Remove" className="ml-auto"
                           onClick={() => void remove(server)} />
@@ -319,6 +334,7 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
   const [url, setUrl] = useState('');
   const [env, setEnv] = useState('');
   const [reach, setReach] = useState<'' | 'local' | 'internal'>('');
+  const [isCatalog, setIsCatalog] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -338,6 +354,7 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
           : [],
         url: transport === 'http' ? url : '',
         env: parseEnv(env), network: transport === 'stdio' ? reach : '', connect: true,
+        role: isCatalog ? 'catalog' : '',
       });
       if (server.status === 'connected') { toast(`${name} connected`); onDone(); }
       else setError(server.error ?? 'Could not connect.');
@@ -385,6 +402,14 @@ function CustomDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
             placeholder="API_KEY=…"
             className="focus-ring w-full rounded-xl border bg-white px-3 py-2 font-mono text-xs hairline dark:bg-white/[0.04]" />
         </Field>
+        <label className="flex cursor-pointer items-start gap-2 text-xs">
+          <input type="checkbox" checked={isCatalog} onChange={(e) => setIsCatalog(e.target.checked)}
+            className="mt-0.5 h-3.5 w-3.5 accent-brand-600" />
+          <span>
+            <b className="font-medium">This is a data catalog</b>
+            <span className="block text-2xs dimmer">Documentation about the data — definitions, glossary, lineage. The agent reads it to understand the sources instead of querying it for figures.</span>
+          </span>
+        </label>
         {error && (
           <p className="rounded-lg bg-red-50 px-3 py-2 font-mono text-[11px] leading-relaxed text-red-700 dark:bg-red-500/10 dark:text-red-300">{error}</p>
         )}

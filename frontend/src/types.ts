@@ -117,6 +117,9 @@ export interface SourceDetail extends SourceSummary {
   rejected?: { question: string; sql: string; error: string }[];
   /** Tools called unprompted to draft a tool source's description (read-only, no arguments). */
   probed?: string[];
+  /** From an import: tables the catalog documented, and descriptions added. */
+  catalog_tables?: number;
+  catalog_added?: number;
 }
 
 export interface PlanStep {
@@ -332,6 +335,10 @@ export interface McpServer {
   error: string | null;
   /** How this server's process is fenced from the network, once connected. */
   network?: string;
+  /** 'catalog' for a data catalog (documentation about the data), else a data source. */
+  role?: '' | 'source' | 'catalog';
+  /** The role was recognised from the server's tools rather than set by a person. */
+  role_detected?: boolean;
   tool_count: number;
   resource_count: number;
   prompt_count: number;
@@ -502,3 +509,9 @@ export type StreamEvent =
   | { type: 'notice'; message: string; quiet?: boolean }
   | { type: 'error'; message: string; kind: string }
   | { type: 'done'; status: string; usage: Usage; message_id: string };
+
+export interface CatalogState {
+  connected: boolean;
+  catalogs: { id: string; name: string; slug: string; connected: boolean; detected: boolean;
+              families: string[]; tools: string[] }[];
+}
