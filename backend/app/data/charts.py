@@ -604,6 +604,69 @@ def render_png(spec: dict, width: int = 900, scale: float = 2.0, locale: str = "
                                **_locale_args(locale))
 
 
+# Names that say "a rate" — used when the column's meaning did not already say percent.
+# Not "shares" (a quantity, summed legitimately) nor "rated".
+_RATE_NAME = re.compile(r"(percent|pct|ratio|(?:^|_)rate(?:$|_)|market_share|share_(?:pct|of)|"
+                        r"utili[sz]ation|usage_(?:pct|percent|rate)|taux|yield)", re.I)
+_DISCRETE = {"nominal", "ordinal", "temporal"}
+
+
+def _encodings(node: Any) -> list[dict]:
+    """Every encoding block of a spec: the top level and each layer."""
+    out = []
+    if isinstance(node, dict):
+        if isinstance(node.get("encoding"), dict):
+            out.append(node["encoding"])
+        for key in ("layer", "hconcat", "vconcat", "concat"):
+            for child in node.get(key) or []:
+                out += _encodings(child)
+        if isinstance(node.get("spec"), dict):
+            out += _encodings(node["spec"])
+    return out
+
+
+def degenerate(spec: dict, rows: list[dict], fields: dict[str, dict] | None = None) -> str:
+    """Why a chart that renders would still mislead, or "".
+
+    Two shapes seen from a small model, both drawn without error: the usage rates of four
+    desks *summed* into one 251 % bar, and four rows collapsed into a single mark because
+    the colour channel named no field. A chart the reader cannot tell is wrong is the worst
+    kind.
+    """
+    fields = fields or {}
+    blocks = _encodings(spec)
+    if not blocks:
+        return ""
+    for encoding in blocks:
+        for channel, definition in encoding.items():
+            if not isinstance(definition, dict) or definition.get("aggregate") != "sum":
+                continue
+            field = str(definition.get("field") or "")
+            kind = str((fields.get(field) or {}).get("kind") or "")
+            if field and (kind == "percent" or _RATE_NAME.search(field)):
+                return (f"'{field}' is a rate or a percentage: summing it across rows adds rates "
+                        f"together (four desks at 72 %, 65 %, 66 % and 49 % make one 251 % bar). "
+                        f"Chart each row as it is — no aggregate — with the category on the other axis.")
+    if len(rows) > 1 and "facet" not in spec and "repeat" not in spec:
+        split = False
+        for encoding in blocks:
+            for channel, definition in encoding.items():
+                if channel in ("tooltip", "text", "detail") or not isinstance(definition, dict):
+                    continue
+                if definition.get("field") and (definition.get("type") in _DISCRETE
+                                                or definition.get("timeUnit") or definition.get("bin")):
+                    split = True
+            if isinstance(encoding.get("detail"), dict) and encoding["detail"].get("field"):
+                split = True
+        aggregated = any(isinstance(d, dict) and d.get("aggregate")
+                         for encoding in blocks for d in encoding.values())
+        if not split and aggregated:
+            return (f"All {len(rows)} rows collapse into a single mark: no channel splits them. Put "
+                    f"the category (or the date) on the other axis — e.g. x = the name column, "
+                    f"type nominal — and give colour a 'field' if it is meant to vary.")
+    return ""
+
+
 async def check_renders(spec: dict, locale: str = "fr-FR") -> None:
     """Compile and draw it once, off-screen, so a broken spec fails here, with its message,
     instead of as an empty box in front of the reader."""

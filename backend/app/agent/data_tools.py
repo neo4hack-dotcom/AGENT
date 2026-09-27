@@ -81,6 +81,35 @@ def _as_obj(value: Any) -> Any:
     return value
 
 
+_CHART_KEYS = ("chart", "chart_id", "chart_ref", "figure", "graph", "graphique", "image")
+_TABLE_KEYS = ("table", "table_ref", "table_id", "rows", "data", "source", "tableau")
+
+
+def _section_aliases(section: dict) -> dict:
+    """A report section in the words models actually use: `chart_id`, `figure`, `table_ref`,
+    `rows` … — dropped silently, they left a report announcing "the chart below" over an
+    empty page."""
+    out = dict(section)
+    if not out.get("chart"):
+        for key in _CHART_KEYS[1:]:
+            value = out.get(key)
+            if isinstance(value, dict):
+                value = value.get("id") or value.get("chart_id")
+            if isinstance(value, str) and value.strip():
+                out["chart"] = value.strip().removeprefix("chart:").strip()
+                break
+    if not out.get("table"):
+        for key in _TABLE_KEYS[1:]:
+            value = out.get(key)
+            if isinstance(value, str) and re.fullmatch(r"\s*\[?(#\d+|chart:\S+)\]?\s*", value):
+                out["table"] = value.strip().strip("[]")
+                break
+            if isinstance(value, list) and value and all(isinstance(v, dict) for v in value):
+                out["table"] = value
+                break
+    return out
+
+
 def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
     c = runner.c
     workspace = c.workspace()
@@ -166,6 +195,147 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 found.append(f"{block['ref']} {block['name']} ({len(rows)} rows)")
         return ("Calls in this run that hold rows: " + "; ".join(found[-12:]) + ".") if found else ""
 
+    def _row_refs_everywhere() -> list[str]:
+        """Results with rows, this run and earlier answers — what a table can be made of."""
+        found: list[str] = []
+        for scope in [ctx.blocks, *history()]:
+            for block in scope:
+                if block.get("type") != "tool" or not block.get("ok") or block.get("name") == "plan":
+                    continue
+                ref = block.get("ref", "")
+                if not ref or any(f.startswith(ref + " ") for f in found):
+                    continue
+                try:
+                    rows, _ = resolve(ref)
+                except rows_lib.SourceError:
+                    continue
+                if rows:
+                    found.append(f"{ref} {block.get('name', '')} ({len(rows)} rows: {', '.join(list(rows[0])[:5])})")
+        return found[-10:]
+
+    # What asks for a table ("un rapport détaillé" does not), and what names the section a
+    # table belongs under.
+    _TABLE_WORDS = "tableau|table|chiffres|figures"
+    _TABLE_HEADING = "tableau|table|chiffres|détail|detail|figures"
+
+    _CHART_WORDS = "graph|chart|courbe|diagramme|histogramme|barres|camembert|visuali"
+
+    def _attach_run_chart(asked: str, sections: list[dict], charts: dict[str, dict],
+                          used: set[int]) -> str:
+        """The chart the reader asked for, when this very run drew it: a report asked for
+        "with the chart", written right after drawing one, means that one."""
+        lowered = (asked or "").lower()
+        if any(sec.get("chart") for sec in sections) or not re.search(rf"\b(?:{_CHART_WORDS})", lowered) \
+                or re.search(rf"\b(?:sans|without|no)\s+(?:le |la |les |de |d'|any |a )?(?:{_CHART_WORDS})", lowered):
+            return ""
+        drawn = [b["chart"] for b in ctx.blocks if b.get("type") == "tool" and b.get("ok")
+                 and isinstance(b.get("chart"), dict) and b["chart"].get("id")]
+        if not drawn:
+            return ""
+        key = str(drawn[-1]["id"])
+        chart = store.latest(ctx.conversation_id, key)
+        if chart is None:
+            return ""
+        target = next((sec for sec in sections if not sec.get("table") and re.search(
+            rf"\b(?:{_CHART_WORDS})", f"{sec.get('heading', '')} {sec.get('text', '')}".lower())), None)
+        if target is None:
+            target = {}
+            sections.insert(1 if sections else 0, target)
+        target["chart"] = key
+        charts[key] = chart
+        used.update(int(n) for n in _REF_NUMBER.findall(chart.get("source", "")))
+        return (f" The chart drawn for this request ({key}) was placed under "
+                f"'{target.get('heading') or 'its own section'}'.")
+
+    def _attach_chart_table(asked: str, sections: list[dict], charts: dict[str, dict],
+                            tables: dict[str, tuple[list[dict], str]], used: set[int]) -> str:
+        """The table the reader asked for, when there is exactly one it can be: the rows
+        behind the report's chart. A 4B model told twice to add {"table": "#1"} sent the
+        same sections a third time; the chart's own data is not a guess."""
+        lowered = (asked or "").lower()
+        if not re.search(rf"\b(?:{_TABLE_WORDS})", lowered) or re.search(
+                rf"\b(?:sans|without|no)\s+(?:le |la |les |de |d'|any |a )?(?:{_TABLE_WORDS})", lowered):
+            return ""
+        if any(sec.get("table") for sec in sections) or any(
+                re.search(r"^\s*\|.+\|\s*$", str(sec.get("text") or ""), re.M) for sec in sections):
+            return ""
+        sources = {m for chart in charts.values() for m in _REF_NUMBER.findall(chart.get("source", ""))}
+        if len(sources) != 1:
+            return ""
+        ref = f"#{next(iter(sources))}"
+        try:
+            rows, label = resolve(ref)
+        except rows_lib.SourceError:
+            return ""
+        if not rows or len(rows) > 200:
+            return ""
+        target = next((sec for sec in sections if not sec.get("chart") and re.search(
+            rf"\b(?:{_TABLE_HEADING})", f"{sec.get('heading', '')} {sec.get('text', '')}".lower())), None)
+        if target is None:
+            target = {"heading": "Détail" if re.search(r"[éèàùç]|\b(le|la|les|des)\b", lowered) else "Detail"}
+            sections.append(target)
+        target["table"] = ref
+        tables[ref] = (rows, label)
+        used.update(int(n) for n in _REF_NUMBER.findall(label))
+        return (f" The table of figures the reader asked for was added under "
+                f"'{target.get('heading') or 'the last section'}': {ref}, the data of the chart.")
+
+    def _evidence_for_figures(charts: dict[str, dict], tables: dict[str, tuple[list[dict], str]]) -> list[float]:
+        """Every number the conversation's results hold — and the reader's own questions."""
+        from app.data import figures as figures_lib
+        texts: list[str] = []
+        for scope in [ctx.blocks, *history()]:
+            for block in scope:
+                if block.get("type") != "tool" or not block.get("ok"):
+                    continue
+                text = str(block.get("text") or "")
+                texts.append(text)
+                # A large result is parked in the workspace with a handle left in its place;
+                # its numbers are evidence too.
+                for parked in list(dict.fromkeys(re.findall(r"\.results/[\w.\-]+", text)))[:6]:
+                    target = workspace / parked
+                    if target.is_file() and target.stat().st_size <= 2_000_000:
+                        texts.append(target.read_text(errors="ignore"))
+        texts += [json.dumps(chart.get("data") or [], default=str) for chart in charts.values()]
+        texts += [json.dumps(rows, default=str) for rows, _ in tables.values()]
+        conv = c.store.conversation(ctx.conversation_id) or {}
+        texts += [str(m.get("content") or "") for m in conv.get("messages") or [] if m.get("role") == "user"]
+        return figures_lib.evidence_numbers(texts)
+
+    def _ungrounded_in_report(title: str, subtitle: str, sections: list[dict],
+                              charts: dict[str, dict], tables: dict[str, tuple[list[dict], str]]) -> dict[str, list[str]]:
+        from app.data import figures as figures_lib
+        evidence = _evidence_for_figures(charts, tables)
+        found: dict[str, list[str]] = {}
+        for index, sec in enumerate([{"heading": "title", "text": f"{title}\n{subtitle}"}, *sections]):
+            missing = figures_lib.ungrounded(f"{sec.get('heading') or ''}\n{sec.get('text') or ''}", evidence)
+            if missing:
+                found[str(index - 1)] = missing
+        return found
+
+    def _missing_in_report(asked: str, sections: list[dict]) -> str:
+        lowered = (asked or "").lower()
+        def wanted(words: str) -> bool:
+            return bool(re.search(rf"\b(?:{words})", lowered)) and not re.search(
+                rf"\b(?:sans|without|no)\s+(?:le |la |les |de |d'|any |a )?(?:{words})", lowered)
+        has_chart = any(sec.get("chart") for sec in sections)
+        has_table = any(sec.get("table") for sec in sections) or any(
+            re.search(r"^\s*\|.+\|\s*$", str(sec.get("text") or ""), re.M) for sec in sections)
+        problems = []
+        if wanted(_CHART_WORDS) and not has_chart:
+            existing = [ch["id"] for ch in store.all_latest(ctx.conversation_id)]
+            problems.append("The reader asked for a chart and no section has one: add "
+                            "{\"chart\": \"<id>\"} to a section — "
+                            + (f"charts in this conversation: {', '.join(existing)}."
+                               if existing else "none is drawn yet: draw it with `chart` first."))
+        if wanted(_TABLE_WORDS) and not has_table:
+            refs = _row_refs_everywhere()
+            problems.append("The reader asked for the table of figures and no section has one: add "
+                            "{\"table\": \"#N\", \"table_title\": \"…\"} naming the result that "
+                            "holds the rows" + (f" — results with rows: {'; '.join(refs)}." if refs
+                                                 else " (compute it first, e.g. with run_python)."))
+        return " ".join(problems)
+
     def revision_target() -> dict | None:
         """The chart the reader is pointing at, when they plainly point at one.
 
@@ -191,7 +361,25 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
     # ------------------------------------------------------------------ chart
     async def h_chart(spec: Any = None, data: Any = None, title: str = "", subtitle: str = "",
                       chart_id: str = "", **_: Any) -> dict:
+        raw_spec = spec
         spec = _as_obj(spec)
+        if isinstance(raw_spec, str) and raw_spec.strip()[:1] == "{" and not isinstance(spec, dict):
+            # Say what is actually wrong: "must be a Vega-Lite object" sent a model that had
+            # written one — with a stray brace — back to write the same object again.
+            try:
+                json.loads(raw_spec)
+            except ValueError as exc:
+                return {"ok": False, "error": f"spec is not valid JSON ({exc}). Send a short spec — "
+                                              f"'mark' and 'encoding' are enough; the app adds "
+                                              f"the theme, sizes, axes and title."}
+        _COMPOSED = ("mark", "layer", "facet", "repeat", "concat", "hconcat", "vconcat")
+        if isinstance(spec, dict) and isinstance(spec.get("spec"), dict) \
+                and not any(k in spec for k in _COMPOSED):
+            # {"title": …, "spec": {mark, encoding}}: a wrapper, not a facet — unwrap it and
+            # keep its title.
+            title = title or (spec.get("title") if isinstance(spec.get("title"), str) else "")
+            subtitle = subtitle or (spec.get("subtitle") if isinstance(spec.get("subtitle"), str) else "")
+            spec = spec["spec"]
         data = _as_obj(data)
         chart_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(chart_id or "").strip())[:40]
         # A name the model picked for a new chart is simply its name. Only an existing id
@@ -248,6 +436,9 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
             full = chart_lib.assemble(spec, rows, final_title, final_subtitle, fields, locale)
             chart_lib.label_codes(full, rows, getattr(ctx, "code_names", {}) or {})
             chart_lib.validate_fields(full, columns)
+            problem = chart_lib.degenerate(full, rows, fields)
+            if problem:
+                raise chart_lib.ChartError(problem)
             await chart_lib.check_renders(full, locale)
         except chart_lib.ChartError as exc:
             return {"ok": False, "error": str(exc)}
@@ -411,7 +602,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
         return notes
 
     async def h_report(title: str = "", sections: Any = None, subtitle: str = "",
-                       filename: str = "", **_: Any) -> dict:
+                       filename: str = "", language: str = "", **_: Any) -> dict:
         sections = _as_obj(sections)
         if not title.strip() or not isinstance(sections, list) or not sections:
             return {"ok": False, "error": "A report needs a title and a list of sections: "
@@ -424,6 +615,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
             for section in sections:
                 if not isinstance(section, dict):
                     continue
+                section = _section_aliases(section)
                 entry = {k: section.get(k) for k in ("heading", "text", "chart", "table",
                                                      "table_title", "columns") if section.get(k)}
                 if entry.get("chart"):
@@ -447,6 +639,43 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 clean.append(entry)
         except rows_lib.SourceError as exc:
             return {"ok": False, "error": f"{exc} {_tabular_refs()}".strip()}
+        # A report that promises "the chart below" and has none is worse than no report: the
+        # reader was asked for a chart and a table, and gets headings. Checked against the
+        # question, and refused with the exact fix — the ids and refs that exist.
+        attached = _attach_run_chart(question(), clean, charts_needed, used)
+        attached += _attach_chart_table(question(), clean, charts_needed, tables, used)
+        missing = _missing_in_report(question(), clean)
+        # Figures in the prose that no result contains: the one defect a reader cannot see
+        # from the report itself, since the table next to them looks like their source.
+        invented = _ungrounded_in_report(title, subtitle, clean, charts_needed, tables)
+        if invented:
+            where = "; ".join(f"{', '.join(v)} (in {'the title' if k == '-1' else repr(clean[int(k)].get('heading') or f'section {int(k) + 1}')})"
+                              for k, v in invented.items())
+            missing = (missing + " " if missing else "") + (
+                f"These figures in the report's text are in no result of this conversation: {where}. "
+                f"Take each figure from the rows (compute it with run_python if it is derived) "
+                f"or remove it.")
+        # Twice at most: a model that cannot produce the chart (no rows to draw) must still be
+        # able to hand over the report, with the gap said rather than hidden.
+        refusals = ctx.report_refusals
+        if missing and refusals < 2:
+            ctx.report_refusals = refusals + 1
+            return {"ok": False, "error": missing}
+        if missing:
+            attached += f" Still missing, say so in the answer: {missing}"
+            # Built anyway, as the reader asked — but an unverified figure is marked where it
+            # stands, in the report's own language.
+            from app.data import report as report_mod
+            lang = str(language or "").lower()[:2] or report_mod.detect_language(
+                title, subtitle, *[str(sec.get("text") or "") for sec in clean])
+            for key, values in invented.items():
+                if key == "-1":
+                    continue
+                sec = clean[int(key)]
+                flag = (f"**À vérifier :** *chiffre(s) introuvable(s) dans les données — {', '.join(values)}.*"
+                        if lang == "fr" else
+                        f"**Check before use:** *figure(s) not found in the data — {', '.join(values)}.*")
+                sec["text"] = f"{sec.get('text') or ''}\n\n{flag}".strip()
         notes = source_notes()
         path = export_lib.unique_path(workspace / "reports",
                                       export_lib.safe_name(filename or title, "pdf"))
@@ -461,14 +690,15 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
             info = await asyncio.to_thread(
                 report_lib.build, path, title=title.strip(), subtitle=subtitle.strip(),
                 sections=clean, sources=notes, used=used, charts=charts_needed, tables=tables,
-                generated=dt.datetime.now(), provenance=provenance)
+                generated=dt.datetime.now(), provenance=provenance,
+                language=str(language or "").lower()[:2])
         except Exception as exc:  # noqa: BLE001 - a layout failure must reach the model, not kill the run
             return {"ok": False, "error": f"The PDF could not be built: {type(exc).__name__}: {exc}"}
         info["path"] = relative(info["path"])
         return {"ok": True, "summary": f"{info['name']} — {info['pages']} page(s)",
                 "text": (f"Saved {info['name']}: {info['pages']} page(s), {len(charts_needed)} "
-                         f"chart(s), {len(tables)} table(s). A download card is shown under your "
-                         f"answer. In the answer itself, give the key finding in one or two "
+                         f"chart(s), {len(tables)} table(s).{attached} A download card is shown under your "
+                         f"answer — it is the link: write no path or URL to the file. In the answer itself, give the key finding in one or two "
                          f"sentences with its figures, then point to the report — the reader "
                          f"should not have to open the PDF to learn the headline."),
                 "file": info}
@@ -600,6 +830,8 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
              "subtitle": {"type": "string", "description": "Scope: sources, period, units."},
              "sections": {"type": "array", "items": {"type": "object"},
                           "description": "[{\"heading\": \"Key findings\", \"text\": \"markdown\"}, {\"heading\": \"Trend\", \"chart\": \"c1\"}, {\"heading\": \"Detail\", \"table\": \"#4\", \"table_title\": \"...\"}]"},
-             "filename": {"type": "string"}},
+             "filename": {"type": "string"},
+             "language": {"type": "string", "enum": ["fr", "en"],
+                          "description": "The report's own words (page numbers, appendix, dates). Omit: read from its text."}},
          "required": ["title", "sections"]},
         h_report, group="Data", capabilities=(trust.FS_READ,))

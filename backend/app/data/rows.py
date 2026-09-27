@@ -54,6 +54,14 @@ def rows_from_text(text: str) -> list[dict] | None:
             value = json.loads(body)
         except ValueError:
             value = None
+        if value is None and len(body) <= 2_000_000:
+            # `print(rows)` in run_python: a Python literal — single quotes, True, None.
+            # literal_eval builds data and nothing else; no name is looked up, no code runs.
+            import ast
+            try:
+                value = ast.literal_eval(body)
+            except (ValueError, SyntaxError, MemoryError, RecursionError):
+                value = None
         if value is not None:
             return _rows_from_value(value)
     first = body.splitlines()[0] if body else ""
@@ -216,6 +224,15 @@ def resolve(source: Any, *, blocks: list[dict], history: list[list[dict]] | None
     `#4` is looked up in this run first and then in earlier answers of the conversation,
     newest first — "export that table" in a follow-up means the table the reader saw.
     """
+    if isinstance(source, dict):
+        # Vega-Lite's own shape, {"name": "#7", "format": …}, or {"ref": "#7"}: the reference
+        # is inside; the rest describes a fetch this app does not make.
+        inner = next((source[k] for k in ("name", "ref", "source", "data", "url")
+                      if isinstance(source.get(k), str) and source[k].strip()), None)
+        if isinstance(source.get("values"), list):
+            source = source["values"]
+        elif inner is not None:
+            source = inner
     if isinstance(source, list):
         rows = _rows_from_value(source)
         if rows is None:
@@ -230,7 +247,8 @@ def resolve(source: Any, *, blocks: list[dict], history: list[list[dict]] | None
         ref = f"#{match.group(1)}"
         for scope in [blocks, *(history or [])]:
             for block in reversed(scope):
-                if block.get("type") == "tool" and block.get("ref") == ref:
+                # Never the call still running — that is the one asking for the rows.
+                if block.get("type") == "tool" and block.get("ref") == ref and block.get("status") != "running":
                     return _rows_of_block(block, ref)
         known = [b["ref"] for b in blocks if b.get("type") == "tool" and b.get("ref")]
         raise SourceError(f"There is no call {ref} in this conversation. Calls with results "

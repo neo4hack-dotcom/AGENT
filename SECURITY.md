@@ -69,6 +69,16 @@ that result, and following it after untrusted content has been read needs a deci
 A third check catches the shape of a channel rather than a destination: a query string past
 600 characters, or carrying a long opaque blob, is how data leaves when it leaves at all.
 
+**Which calls it applies to.** Every MCP call and every built-in tool that can make a
+request. The built-in tools that only draw, write or store what they are given — `chart`,
+`create_report`, `export_data`, `profile_data`, `ask_user`, `plan`, `workspace_write`,
+`remember`, `note_source` — are outside it: a URL in their arguments is data, not a
+destination. The case that forced the distinction was the `$schema` line models put at the
+top of every Vega-Lite spec, which had the policy refuse a bar chart for naming
+vega.github.io. Chart specs are still stripped of everything that loads (`data.url`, image
+marks, `href` channels) before they are drawn, the renderer below fetches nothing, and the
+page's CSP allows no outside connection.
+
 ## The air gap
 
 `app/network.py` closes each path out where it opens, and Diagnostics shows what holds:

@@ -15,6 +15,9 @@ the network are refused, MCP endpoints must be internal, package managers run of
 every local MCP server runs inside a kernel sandbox that allows the loopback interface and
 nothing else. See [Air-gapped deployment](#air-gapped-deployment).
 
+**Using it rather than running it?** The [user guide](docs/GUIDE-UTILISATEUR.md) (in French)
+covers asking questions, reading the evidence, charts, Excel extracts and PDF reports.
+
 ---
 
 ## Getting started
@@ -94,6 +97,9 @@ What does not switch off: approvals, the air gap, the fencing of tool output as 
 secret redaction, the audit trail (with the mode and servers of each run) and the lineage of
 every tool call.
 
+Direct mode has no built-in tools, so charts, extracts and PDF reports are Agent mode only
+— the **PDF** button under an answer works in both.
+
 ---
 
 ## What it can do with nothing configured
@@ -112,6 +118,46 @@ every tool call.
 | `remember` / `recall` | durable memory across conversations |
 | `plan` | the checklist you watch tick over |
 | `current_time` | the machine's date and time |
+
+### Reports, extracts and charts to take away
+
+Ask in plain words — *« fais-moi un rapport PDF sur … avec un graphique et le tableau »*,
+*"export this to Excel"* — and the file arrives under the answer as a card with
+**Download** (and **Open**, for a PDF); every file stays reachable in **⌘K** → *Workspace
+files*.
+
+| Asked for | Produced by | What is in it |
+|---|---|---|
+| a PDF, a report | `create_report` | title and scope, sections in order (markdown, charts, tables of up to 40 rows), `[#N]` citations turned into numbered **Sources**, a **Method and provenance** appendix with each query, its row count and SHA-256 |
+| Excel, CSV, JSON | `export_data` | formatted, filterable workbook (several sheets on request), with a *Provenance* sheet — or a `.provenance.json` beside a CSV/JSON |
+| a chart as an image | the chart's own buttons | PNG or SVG, drawn by the same engine as on screen |
+| this answer, as it stands | **PDF** under the answer | the question, the answer, every chart it drew, its sources and the provenance appendix — assembled from the stored run, no model call, so it works whatever the model |
+
+A report is assembled from what the conversation actually produced — charts drawn with
+`chart`, rows returned by calls — never from figures retyped into it, and it is rendered on
+the server (ReportLab, charts through `vl-convert`): nothing leaves the machine. Its own words
+follow its language: a report written in French says *Page 2 sur 3*, *Méthode et
+provenance*, *27 septembre 2026* and *1 234 567,89*; one written in English says it in
+English (`language` forces either). Headings keep with what follows them, and column names
+read as a reader would say them (`pnl_eur` → *P&L EUR*). Asking for a file and ending the run
+without one is caught at runtime: the agent is sent back to produce it. A report that leaves
+out what was asked for is refused the same way: asked for *a chart and the table*, a report
+with neither is sent back with the chart ids and the results holding rows that exist (twice
+at most; a third attempt goes through, with the gap stated). What is unambiguous is attached
+rather than asked for again: the chart this very run drew for the request, under the
+section that announces it, and — when the only table it can be is that chart's data — the
+table. A local model
+once wrote "the chart below" over an empty page, having named the chart `chart_id` — now
+understood, along with `figure`, `table_ref` and the like.
+
+**Figures in a report's prose are checked against the data** (`app/data/figures.py`). The
+same model wrote *"Credit has the highest usage at 89.3 %"* above a table saying 65.03 — a
+number that existed nowhere, in a document made to be forwarded. Every figure the text
+states — decimals, or four digits and more that are not a year — must be found among the
+numbers the conversation's results hold (rounding, a ratio written as a percentage, and
+thousands or millions written short all count). One that is not sends the report back,
+naming it and its section; a third attempt is built, with the figure marked *Check before
+use* where it stands. Counts, days and confidence levels are left alone.
 
 Every connected **MCP** server adds its tools to the same index, namespaced by server
 (`filesystem__read_file`), and the built-in file tools are named `workspace_*` so it is
@@ -291,7 +337,7 @@ UI: whoever reaches Admin cannot open a path out.
 | MCP over stdio | `npx`/`uvx`/`pip` run offline; internet packages are refused by name; on macOS the process runs in a kernel sandbox allowing loopback only |
 | MCP needing an internal host | a database client (detected from its configuration, or set to *Internal network* in the server form) keeps the network; the enterprise firewall is what holds it inside |
 | `run_python` | kernel sandbox, network denied |
-| Tool arguments carrying a URL | refused unless the host is internal; cloud metadata addresses always refused |
+| Tool arguments carrying a URL | refused unless the host is internal; cloud metadata addresses always refused (tools that only draw or write — charts, reports, exports — take URLs as data: nothing they are given is fetched) |
 | The browser | CSP `connect-src 'self'`, self-hosted fonts, no external asset of any kind |
 | Charts rendered server-side | the renderer's URL allowlist is empty |
 
@@ -331,13 +377,14 @@ backend/app/
 │   ├── data_tools.py    chart, ask_user, export_data, create_report
 │   └── memory.py        long-term memory, weighted-overlap recall
 ├── data/                source knowledge, catalog bridge, atlas, profiler, drafting,
-│                        charts, exports, PDF
+│                        charts, exports, PDF, figure checks
 └── tools/               code execution, files
 frontend/src/
 ├── App.tsx              the two states: empty canvas, then conversation
 ├── api.ts               the one typed client (+ a reconnecting SSE stream)
 └── components/          ui, Markdown, Composer, ModeSwitch, Thread, Sidebar, Admin,
                          McpLibrary
+docs/GUIDE-UTILISATEUR.md  the user guide (French)
 ```
 
 The MCP client is written **directly against the protocol** (JSON-RPC 2.0, `2025-06-18`)
@@ -370,7 +417,37 @@ than an opaque import error.
   rules copied through **verbatim**: measurements of long-horizon agents show safety
   constraints do not survive summarisation, because a compressor optimising for continuity
   has no reason to keep a rule competing for a shrinking budget.
-- **Answers cite their evidence.** Every tool result is labelled `#1`, `#2`…; the answer
+- **The budget counts what every request pays up front.** With eighteen sources connected,
+  instructions and source notes plus tool schemas took 10.8k of a 16k local window before
+  the conversation began; a compaction trigger that looked at the conversation alone never
+  fired, and the model was cut off three tokens into its turn. The window is now split three
+  ways — that fixed overhead, the conversation, and a reserve for the model's own turn (a
+  sixth of the window, 1.5k–8k) — and when they do not fit, schemas turn compact, fewer
+  tools are offered in full (`find_tools` still reaches every one), older results are
+  masked, and the middle is compacted. A turn cut off anyway is retried once in the smaller
+  prompt before the run gives up and composes from what it has. Each turn's usage records
+  the split (`context_parts`).
+- **A small model's formatting slips are repaired, not punished.** Each of these cost a
+  local 4B model its chart or its report during the PDF tests, on a call that was right in
+  substance:
+  - the arguments written inside the tool's *name* — `get_var({"date": "2026-04-30"})</parameter`,
+    a chat template speaking XML — are split back into tool and arguments, in both providers;
+  - `print(rows)` in `run_python` prints a Python literal, not JSON; it is read as rows
+    (`ast.literal_eval`: data only, nothing looked up, nothing run);
+  - a chart spec wrapped as `{"title": …, "spec": {mark, encoding}}` is unwrapped, and a
+    spec that is not valid JSON is reported as such, with the position — "must be a
+    Vega-Lite object" sent the model back to write the same broken object;
+  - the `$schema` URL at the top of a Vega-Lite spec no longer trips the egress policy (see
+    *Air-gapped deployment*).
+
+  And one mistake that is not a slip is refused: a chart that renders but misleads — rates
+  *summed* across rows (four desks' usage drawn as one 251 % bar), or several rows collapsed
+  into a single mark because no channel splits them. Run over every chart the evaluation
+  campaigns had drawn, the check flagged that one and none of the other twelve.
+- **Answers cite their evidence.** Every tool result is labelled `#1`, `#2`… — numbered
+  across the whole conversation, so a follow-up's "#7" is the last answer's #7 and nothing
+  else (numbering restarted at #1 per question once made "the table, #1" resolve to the very
+  call asking for it); the answer
   puts the label after the value it produced, and clicking it scrolls to the call that
   established it. An uncited sentence is the agent's own claim, which is a useful thing to
   be able to see.

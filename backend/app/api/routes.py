@@ -395,6 +395,98 @@ async def audit_trail(conv_id: str, message_id: str, format: str = "md"):
                              headers={"Content-Disposition": f'attachment; filename="{name}.md"'})
 
 
+@router.get("/conversations/{conv_id}/messages/{message_id}/pdf")
+async def answer_pdf(conv_id: str, message_id: str):
+    """One answer as a PDF, without asking the model for anything.
+
+    The question, the answer as written, every chart it drew, its numbered sources and the
+    method-and-provenance appendix — assembled from what the run stored. `create_report` is
+    the agent's way to a report; this is the reader's, and it works whatever the model.
+    """
+    import asyncio
+    import datetime as dt
+    from fastapi.responses import FileResponse
+    from app.data import charts as chart_lib
+    from app.data import exports as export_lib
+    from app.data import report as report_lib
+    conv, message, question = _message_pair(conv_id, message_id)
+    answer = _answer_text(message).strip()
+    if not answer:
+        raise HTTPException(409, "This answer has no text to export yet.")
+    blocks = message.get("blocks") or []
+    tools = [b for b in blocks if b.get("type") == "tool" and b.get("ref")]
+    charts: dict[str, dict] = {}
+    store = chart_lib.ChartStore(c.workspace())
+    for block in tools:
+        drawn = block.get("chart")
+        if not drawn or not block.get("ok"):
+            continue
+        key = str(drawn.get("id") or block["ref"])
+        spec = drawn.get("spec") or (store.latest(conv_id, key) or {}).get("spec")
+        if spec:
+            charts[key] = {"id": key, "spec": spec, "source": drawn.get("source") or block["ref"]}
+    sources: dict[int, str] = {}
+    for block in tools:
+        if not block.get("ok"):
+            continue
+        args = block.get("args") or {}
+        query = next((str(v) for k, v in args.items() if k in ("query", "sql", "expression") and v), "")
+        detail = f": {' '.join(query.split())[:220]}" if query else ""
+        sources[int(block["ref"].lstrip("#"))] = f"{block.get('name', '')}{detail} — {str(block.get('summary') or '')[:120]}"
+    chain = _lineage_of(message)
+    lang = report_lib.detect_language(question, answer)
+    # A chart the answer placed — `![c1]`, the way models write it — goes where it was
+    # placed; the others follow the text.
+    sections: list[dict] = []
+    placed: set[str] = set()
+    cursor = 0
+    for match in re.finditer(r"!\[([^\]]*)\](?:\([^)]*\))?", answer):
+        key = next((k for k in charts if k in {match.group(1).strip(), match.group(1).strip().removeprefix("chart:")}), None)
+        if key is None or key in placed:
+            continue
+        if answer[cursor:match.start()].strip():
+            sections.append({"text": answer[cursor:match.start()]})
+        sections.append({"chart": key})
+        placed.add(key)
+        cursor = match.end()
+    if answer[cursor:].strip():
+        sections.append({"text": answer[cursor:]})
+    sections += [{"chart": key} for key in charts if key not in placed]
+    method = str((message.get("method") or {}).get("text") or "").strip()
+    if method:
+        # Written on request from the lineage (Explain the method): the plain-words account
+        # a reader forwards the PDF for.
+        sections.append({"heading": "Méthode" if lang == "fr" else "Method", "text": method})
+    # The conversation's title when it says something the question does not; the question
+    # itself otherwise, once.
+    asked = " ".join(question.split())
+    named = " ".join(str(conv.get("title") or "").split())
+    if named and not asked.lower().startswith(named.lower().rstrip("…. ")):
+        title, subtitle = named, asked
+    else:
+        title, subtitle = (asked or named or "Answer"), ""
+    if len(title) > 120:
+        title, subtitle = title[:119] + "…", asked
+    subtitle = subtitle if len(subtitle) <= 300 else subtitle[:299] + "…"
+    # One file per answer, rewritten on each export: the button is pressed again after a
+    # retry or a new chart, and a workspace of -2, -3, -4 copies helps nobody.
+    folder = c.workspace() / "reports"
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = export_lib.safe_name(title, "pdf")[:-4][:60].rstrip("-.")
+    path = folder / f"{stem}-{message_id[-6:]}.pdf"
+    try:
+        info = await asyncio.to_thread(
+            report_lib.build, path, title=title, subtitle=subtitle, sections=sections,
+            sources=sources, used=set(), charts=charts, tables={},
+            generated=dt.datetime.fromtimestamp(message.get("created_at") or 0) if message.get("created_at") else None,
+            provenance=[n for n in chain.get("nodes") or [] if n.get("ok", True)], language=lang)
+    except Exception as exc:  # noqa: BLE001 - a layout failure is reported, not a 500 with a trace
+        raise HTTPException(500, f"The PDF could not be built: {type(exc).__name__}: {exc}") from exc
+    c.audit.record("answer.pdf", conversation=conv_id, message=message_id, file=info["name"],
+                   pages=info["pages"])
+    return FileResponse(path, filename=info["name"], media_type="application/pdf")
+
+
 @router.post("/conversations/{conv_id}/messages/{message_id}/explain")
 async def explain_answer(conv_id: str, message_id: str) -> dict:
     """How this answer was produced, in plain words — written once, then kept with it.

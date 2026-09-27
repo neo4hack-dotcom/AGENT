@@ -168,6 +168,8 @@ export const api = {
   explainAnswer: (conversationId: string, messageId: string) =>
     request<{ text: string; model?: string; at?: number }>(
       `/conversations/${conversationId}/messages/${messageId}/explain`, { method: 'POST' }),
+  pdfUrl: (conversationId: string, messageId: string) =>
+    `/api/conversations/${conversationId}/messages/${messageId}/pdf`,
   trailUrl: (conversationId: string, messageId: string, format: 'md' | 'json' = 'md') =>
     `/api/conversations/${conversationId}/messages/${messageId}/trail?format=${format}`,
   dataCatalog: () => request<CatalogState>('/admin/data-catalog'),

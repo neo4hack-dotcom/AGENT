@@ -137,6 +137,36 @@ _TOOL_KEYS = ({"name", "arguments"}, {"name", "parameters"}, {"tool", "arguments
               {"function", "arguments"}, {"name"}, {"tool_name", "arguments"})
 
 
+_TAG_DEBRIS = re.compile(r"^\s*(?:<\s*/?\s*(?:function|tool_call|parameter)\s*=?\s*)+|(?:\s*<\s*/?\s*(?:function|tool_call|parameter)\w*\s*>?)+\s*$", re.I)
+_NAME_WITH_ARGS = re.compile(r"^([A-Za-z_][\w.\-]*)\s*(?:\((.*)\)|(\{.*\}))\s*$", re.S)
+
+
+def repair_call(name: str, arguments: dict) -> tuple[str, dict]:
+    """A call whose arguments ended up inside its name, put back together.
+
+    Small models, and chat templates that speak XML, sometimes emit
+    `get_var({"date": "2026-04-30"})</parameter` as the *name* of the tool, with no
+    arguments: refused as an unknown tool, the right call is lost to a formatting slip.
+    """
+    cleaned = _TAG_DEBRIS.sub("", name or "").strip()
+    match = _NAME_WITH_ARGS.match(cleaned)
+    if not match:
+        return cleaned or name, arguments
+    tool, inner = match.group(1), (match.group(2) or match.group(3) or "").strip()
+    if not inner:
+        return tool, arguments
+    try:
+        parsed = json.loads(inner)
+    except ValueError:
+        return tool, arguments
+    if not isinstance(parsed, dict):
+        return tool, arguments
+    # Arguments that are only another call's debris — keyed by a tool name — lose to the
+    # ones the name carried; real arguments win.
+    debris = all(key == tool or "__" in key for key in arguments)
+    return tool, parsed if (not arguments or debris) else arguments
+
+
 def recover_tool_calls(text: str, known: set[str]) -> tuple[list[ToolCall], str]:
     """Pull tool calls out of a plain-text reply, conservatively.
 
@@ -359,9 +389,8 @@ class OllamaProvider(LLMProvider):
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {}
-            calls.append(ToolCall(id=call.get("id") or f"call_{index}",
-                                  name=fn.get("name") or "",
-                                  arguments=args if isinstance(args, dict) else {}))
+            name, args = repair_call(fn.get("name") or "", args if isinstance(args, dict) else {})
+            calls.append(ToolCall(id=call.get("id") or f"call_{index}", name=name, arguments=args))
         native = True
         if not calls and tools:
             known = {(t.get("function") or {}).get("name") for t in tools}
@@ -719,8 +748,8 @@ class OpenAIProvider(LLMProvider):
             except json.JSONDecodeError:
                 args = {}
             if raw["name"]:
-                tool_calls.append(ToolCall(id=raw["id"] or f"call_{index}", name=raw["name"],
-                                           arguments=args if isinstance(args, dict) else {}))
+                name, args = repair_call(raw["name"], args if isinstance(args, dict) else {})
+                tool_calls.append(ToolCall(id=raw["id"] or f"call_{index}", name=name, arguments=args))
         native = True
         if not tool_calls and tools:
             known = {(t.get("function") or {}).get("name") for t in tools}

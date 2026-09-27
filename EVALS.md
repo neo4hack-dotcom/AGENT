@@ -243,3 +243,30 @@ also an issuer and a share, answered in one role, once with an absurd magnitude)
 ```bash
 python evals/finance/run.py --suite mining --label mining   # or --suite all
 ```
+
+# PDF reports with a local 4B model
+
+Can a reader simply *ask* for a PDF — findings, a chart, the table — and get one, with the
+model running on the laptop? Tested on the CIB world (eighteen servers) with `qwen3.5:4b`
+through Ollama, a 16k window, the model partly on CPU: every call one to two minutes, so
+each failure below cost real time before it was found.
+
+| Step | What happened | What changed |
+|---|---|---|
+| 1 | cut off three tokens into its fourth turn; answered from a digest that showed a truncated schema ("`versio` is cut off") | the window budget counts instructions, source notes and schemas (10.8k of 16k here), keeps a reserve for the model's turn, squeezes the prompt when it does not fit, and retries a cut-off turn once in the smaller prompt |
+| 2 | the chart refused by the air gap for `"$schema": "https://vega.github.io/…"` | render-only tools (`chart`, `create_report`, exports…) take URLs as data |
+| 3 | arguments written inside the tool's name, `get_var({…})</parameter` → unknown tool ×3 | calls repaired in both providers |
+| 4 | a spec wrapped in `{"title", "spec": {…}}`, then invalid JSON reported as "must be a Vega-Lite object" | wrapper unwrapped; invalid JSON reported as such, with the position |
+| 5 | `print(rows)` in `run_python` — a Python literal — "did not return a table" | read with `ast.literal_eval` |
+| 6 | `data={"name": "#7", "format": …}`, Vega-Lite's own shape | the reference inside is used |
+| 7 | a report saying "the chart below" over an empty page: the chart named `chart_id`, no table | section aliases; a report missing the chart or table the reader asked for is refused with the ids and refs that exist; when the only possible table is the chart's own data, it is attached |
+| 8 | **a two-page French PDF**: bar chart, the four desks' VaR, limit and usage, sources, and the Python that computed them | — |
+| 9 | asked again in English, the model named the table `#1` — last answer's computation — and got "call #1 failed": `#1` of *this* question was the report call itself | evidence labels are numbered across the conversation; a running call is never a data source |
+| 10 | **an English PDF on the first attempt** — whose summary said "Credit … 89.3 %", a figure found nowhere | figures in a report's prose are checked against every number the results hold; an unfound one sends the report back, and is marked *Check before use* if it survives two refusals |
+| 11 | asked again in French: a report with neither chart nor table (refused once, then right), but its chart summed the four usage rates into one 251 % bar | the chart this run drew is placed when a report omits it; summed rates and rows collapsed into one mark are refused (1 of 13 stored charts flagged — that one) |
+
+The tables and charts were right every time; the prose was not always — once "Equity
+Derivatives above 70 %" at 66 % (a wrong comparison, which no figure check can see), once
+an invented 89.3 % (which step 10 now catches). The **PDF** button under an answer builds the same kind of
+document from the stored run without asking the model anything, which is the dependable
+path on hardware like this.
