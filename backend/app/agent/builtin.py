@@ -14,6 +14,7 @@ from __future__ import annotations
 import platform
 import re
 import time
+import datetime as dt
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -226,6 +227,53 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                 f"Host: {platform.system()} {platform.release()}")
         return {"ok": True, "summary": local.strftime("%Y-%m-%d %H:%M %Z"), "text": text}
 
+    async def h_business_days(operation: str = "check", date: str = "", dates: Any = None,
+                              n: int = 0, end: str = "", year: int = 0, calendar: str = "TARGET2",
+                              holidays: Any = None, **_: Any) -> dict:
+        from app.data import calendars as cal_lib
+        try:
+            extra = holidays if isinstance(holidays, list) else (
+                [h for h in str(holidays or "").replace(";", ",").split(",") if h.strip()])
+            cal = cal_lib.Calendar(calendar, extra)
+            op = (operation or "check").strip().lower()
+            if op in ("check", "is_business_day"):
+                days = dates if isinstance(dates, list) and dates else [date]
+                lines = [cal_lib.describe(cal, cal_lib.parse(d)) for d in days[:60]]
+            elif op in ("add", "offset", "settlement"):
+                start = cal_lib.parse(date)
+                result = cal.add(start, int(n))
+                lines = [f"{start.isoformat()} {'+' if int(n) >= 0 else '-'} {abs(int(n))} business day(s) "
+                         f"({cal.name}) = {result.isoformat()} ({result.strftime('%A')})"]
+            elif op in ("previous", "prev", "roll_back"):
+                day = cal.roll(cal_lib.parse(date) - dt.timedelta(days=0 if op == "roll_back" else 1), -1)
+                lines = [f"{'Last business day on or before' if op == 'roll_back' else 'Previous business day before'} "
+                         f"{date} ({cal.name}): {day.isoformat()} ({day.strftime('%A')})"]
+            elif op in ("next", "roll_forward"):
+                day = cal.roll(cal_lib.parse(date) + dt.timedelta(days=0 if op == "roll_forward" else 1), 1)
+                lines = [f"{'First business day on or after' if op == 'roll_forward' else 'Next business day after'} "
+                         f"{date} ({cal.name}): {day.isoformat()} ({day.strftime('%A')})"]
+            elif op in ("between", "count"):
+                start, stop = cal_lib.parse(date), cal_lib.parse(end)
+                lines = [f"{cal.between(start, stop)} business day(s) ({cal.name}) after {start.isoformat()} "
+                         f"up to and including {stop.isoformat()}"]
+            elif op in ("month_ends", "month_end"):
+                y = int(year or (cal_lib.parse(date).year if date else datetime.now().year))
+                lines = [f"{cal.month_end(y, m).isoformat()}" for m in range(1, 13)]
+                lines.insert(0, f"Last business day of each month of {y} ({cal.name}):")
+            elif op in ("holidays", "list"):
+                y = int(year or (cal_lib.parse(date).year if date else datetime.now().year))
+                named = cal_lib.holidays(cal.name, y)
+                lines = [f"{d.isoformat()} ({d.strftime('%A')}): {name}" for d, name in sorted(named.items())]
+                lines.insert(0, f"{cal.name} holidays in {y}" + ("" if lines else ": none (weekends only)"))
+            else:
+                return {"ok": False, "error": "operation is one of check, add, previous, next, between, "
+                                              "month_ends, holidays."}
+        except (ValueError, TypeError) as exc:
+            return {"ok": False, "error": str(exc)}
+        text = "\n".join(lines)
+        return {"ok": True, "summary": lines[0][:160] if len(lines) == 1 else f"{len(lines)} line(s) — {cal.name}",
+                "text": text}
+
     specs: list[ToolSpec] = [
         ToolSpec("plan", _PLAN_DESC,
                  _obj({"steps": {"type": "array", "description":
@@ -239,6 +287,25 @@ def build_registry(settings, memory, workspace: Path, on_plan,
                  h_plan, group="Planning"),
         ToolSpec("current_time", "The current date and time on this machine.",
                  _obj({}), h_now),
+        ToolSpec("business_days",
+                 "Business-day arithmetic, computed from the calendar's rules — never from memory. "
+                 "Use it for: was a date a trading/settlement day (check), T+n settlement (add), "
+                 "previous/next business day, business days between two dates, the last business "
+                 "day of each month (month_ends — the month-end dates risk and positions are "
+                 "reported at), a year's holidays. Calendars: TARGET2 (euro, Euronext Paris — "
+                 "default), UK, US (NYSE), WEEKDAYS. Extra holidays a source lists can be passed.",
+                 _obj({"operation": {"type": "string",
+                                     "enum": ["check", "add", "previous", "next", "between", "month_ends", "holidays"]},
+                       "date": {"type": "string", "description": "YYYY-MM-DD."},
+                       "dates": {"type": "array", "items": {"type": "string"}, "description": "Several dates to check at once."},
+                       "n": {"type": "integer", "description": "Business days to add (negative to go back), for add."},
+                       "end": {"type": "string", "description": "End date, for between."},
+                       "year": {"type": "integer", "description": "For month_ends and holidays."},
+                       "calendar": {"type": "string", "description": "TARGET2 (default), UK, US or WEEKDAYS."},
+                       "holidays": {"type": "array", "items": {"type": "string"},
+                                    "description": "Extra non-business days (YYYY-MM-DD), e.g. from a source's calendar."}},
+                      ["operation"]),
+                 h_business_days, group="Data"),
         ToolSpec("find_tools",
                  "Make tools callable that were not offered this turn. Give a source's slug "
                  "from the source map — \"market_risk\" — to get all of its tools, or describe "
@@ -335,7 +402,8 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
                  scopes: list[dict] | None = None, workspace: str = "",
                  notes: dict[str, list[str]] | None = None,
                  observed: dict[str, str] | None = None,
-                 unexplored: dict[str, list[str]] | None = None) -> str:
+                 unexplored: dict[str, list[str]] | None = None,
+                 focus: set[str] | None = None) -> str:
     """A compact index of the live tool surface for the system prompt.
 
     Names only, grouped. The full descriptions and JSON schemas already travel in the
@@ -375,6 +443,14 @@ def catalog_text(tools: dict[str, ToolSpec], mcp_tools: list[dict],
                      f"are one `find_tools('<source>')` away.")
         for slug, (name, tools_of) in by_server.items():
             server = f"{name} ({slug})" if slug and slug != name else name
+            # Once the question has been routed, the sources it needs are described in full
+            # and the others are named only: with eighteen servers, every source's notes on
+            # every turn took 7k of a 16k local window — for sources the question never used.
+            aside = focus is not None and slug not in focus and name not in focus
+            if aside:
+                lines.append(f"- {server}: {', '.join(_tool_label(t, 0) for t in tools_of[:30])}"
+                             + (f" (+{len(tools_of) - 30} more)" if len(tools_of) > 30 else ""))
+                continue
             described = bool((notes or {}).get(slug))
             width = 0 if (crowded and described) else (42 if crowded else 70)
             shown = ", ".join(_tool_label(t, width) for t in tools_of[:30])

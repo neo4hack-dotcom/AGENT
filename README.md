@@ -118,6 +118,30 @@ Direct mode has no built-in tools, so charts, extracts and PDF reports are Agent
 | `remember` / `recall` | durable memory across conversations |
 | `plan` | the checklist you watch tick over |
 | `current_time` | the machine's date and time |
+| `business_days` | business-day arithmetic from the calendars' rules — TARGET2 (default, also Euronext Paris), UK, US (NYSE): was a date a trading day, T+n, previous / next business day, days between, each month's last business day, a year's holidays |
+
+### Working with the data behind an answer
+
+Every step of an answer opens on what it did and what came back — built for someone who
+will check the figures, not take them on trust:
+
+- **The query as code**: SQL or Python shown formatted, with its own copy button.
+- **The result as a table you can work with**: sort any column, filter rows, numbers
+  formatted (or raw, one click), negatives in red, and a status line that totals the
+  quantities (Σ) and averages the rates, with min / max / count on hover.
+- **Copy for Excel**: tab-separated, numbers with this browser's decimal mark and no
+  thousands separators, so a paste into a French Excel lands as numbers. The same button
+  sits under every table the agent writes in its answer, with a CSV download.
+- **Every row, not the excerpt**: *Excel* / *CSV* on a step fetch the whole result from the
+  server — a large one parked on disk included — with a *Provenance* sheet naming the query.
+- **Edit & run**: change the date or the filter in a step's query and run it yourself,
+  against the same source, without the model — milliseconds instead of a model turn.
+  Read-only tools only (a tool that changes data stays with the agent, behind its
+  approval), the air gap applies to the arguments, secrets are stripped from the result,
+  every run is audited, and none of it is added to the answer's evidence.
+- **Ask about #N** puts a step's reference in the next question — *"chart #5 by desk"*.
+- **Figures verified**: the line under an answer says whether every figure it states was
+  found in a step's result, or which were not (see below).
 
 ### Reports, extracts and charts to take away
 
@@ -150,7 +174,13 @@ table. A local model
 once wrote "the chart below" over an empty page, having named the chart `chart_id` — now
 understood, along with `figure`, `table_ref` and the like.
 
-**Figures in a report's prose are checked against the data** (`app/data/figures.py`). The
+**Figures in answers and reports are checked against the data** (`app/data/figures.py`).
+In an answer, a figure no step returned sends the agent back once to take it from a result
+or compute it with `run_python`; the outcome is shown under the answer (*figures verified*,
+or *2 figures unverified* with the list). Run over the 93 stored answers of the evaluation
+campaigns that state figures, it flagged 17 — among them a correct total the model had
+summed in its head: right that time, unverifiable every time.
+In a report: The
 same model wrote *"Credit has the highest usage at 89.3 %"* above a table saying 65.03 — a
 number that existed nowhere, in a document made to be forwarded. Every figure the text
 states — decimals, or four digits and more that are not a year — must be found among the

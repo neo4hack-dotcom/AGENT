@@ -51,6 +51,21 @@ def signature(name: str, arguments: dict | None) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
+_OUTAGE = re.compile(
+    r"timed? ?out|timeout|not connected|disconnected|connection (?:refused|reset|closed|error)|"
+    r"broken pipe|unavailable|service is down|\b(?:429|500|502|503|504)\b|rate.?limit|too many requests|"
+    r"server (?:error|crashed|exited)|no response|eof|cannot reach|could not reach", re.I)
+
+
+def is_outage(error: str) -> bool:
+    """Whether a failure says the tool did not answer — as opposed to answering "no".
+
+    An error with no text is treated as an outage: nothing came back to learn from.
+    """
+    text = (error or "").strip()
+    return not text or bool(_OUTAGE.search(text[:600]))
+
+
 class LoopGuard:
     def __init__(self, max_total_steps: int, timeout_s: int, stagnation_limit: int = 2) -> None:
         self.max_total_steps = max_total_steps
@@ -68,12 +83,19 @@ class LoopGuard:
         self._tool_fail_streak: dict[str, int] = {}
         self._subjects: dict[str, int] = {}
 
-    def record(self, name: str, arguments: dict | None, ok: bool) -> None:
+    def record(self, name: str, arguments: dict | None, ok: bool, error: str = "") -> None:
         self.total_attempts += 1
         sig = signature(name, arguments)
         self._seen[sig] = self._seen.get(sig, 0) + 1
         self._fail_streak[sig] = 0 if ok else self._fail_streak.get(sig, 0) + 1
-        self._tool_fail_streak[name] = 0 if ok else self._tool_fail_streak.get(name, 0) + 1
+        # Only a tool that did not answer counts towards "the tool is down". One that
+        # answered "VaR is computed at month ends only: …, 2026-05-29" is working and has
+        # just said how to call it — counting that as an outage blocked the corrected call,
+        # with the right date, the moment the model had learned it.
+        if ok:
+            self._tool_fail_streak[name] = 0
+        elif is_outage(error):
+            self._tool_fail_streak[name] = self._tool_fail_streak.get(name, 0) + 1
         subject = self._subject(name, arguments)
         if subject:
             self._subjects[subject] = self._subjects.get(subject, 0) + 1

@@ -427,8 +427,8 @@ export default function App() {
                 ? `${boot.model.model} is hosted by Ollama, not by this machine — prompts leave it.`
                 : boot?.model.capabilities.source ?? '')}
             className="focus-ring flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-2xs dim transition-colors hover:bg-zinc-100 dark:hover:bg-white/[0.06]">
-            <Dot tone={!modelOk ? 'bad' : toolsCapable ? 'good' : 'warn'} />
-            <span className="font-mono">{boot?.model.model || 'no model'}</span>
+            <Dot tone={!boot ? 'idle' : !modelOk ? 'bad' : toolsCapable ? 'good' : 'warn'} />
+            <span className="font-mono">{boot ? (boot.model.model || 'no model') : 'connecting…'}</span>
             {/* Where the model actually runs is the one fact this app must never blur. */}
             {boot?.model.ok && (boot.model.local
               ? <MonitorSmartphone size={11} className="shrink-0 opacity-60" />
@@ -497,7 +497,7 @@ export default function App() {
                 onUpload={api.upload}
                 running={!!live}
                 disabled={!modelOk}
-                disabledReason={boot?.model.error ?? 'No model selected'}
+                disabledReason={!boot ? 'Connecting…' : boot.model.error ?? 'No model selected'}
                 centred={false}
                 vision={boot?.model.capabilities.vision ?? false}
                 accessory={modeSwitch}
@@ -562,7 +562,7 @@ function EmptyState({
         onUpload={api.upload}
         running={running}
         disabled={!ready}
-        disabledReason={boot?.model.error ?? 'No model selected'}
+        disabledReason={!boot ? 'Connecting…' : boot.model.error ?? 'No model selected'}
         centred
         vision={boot?.model.capabilities.vision ?? false}
         accessory={accessory}

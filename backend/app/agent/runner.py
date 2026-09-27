@@ -443,8 +443,43 @@ _NAME_FILTER = re.compile(r"\b(\w*(?:name|nom|customer|client|company|account|ra
 _VISUAL = re.compile(r"\b(montre|montrez|affiche|graph|graphique|chart|courbe|visuali|"
                      r"évolution|evolution|tendance|trend|répartition|repartition|camembert|"
                      r"donut|histogram|diagramme|barres|plot|show me)")
+_CALENDAR = re.compile(r"(fin de mois|month[- ]?end|ouvr[ée]|f[ée]ri[ée]|holiday|\bt ?\+ ?\d|settlement|"
+                       r"r[èe]glement[- ]livraison|jour de bourse|trading day|business day|jour ouvr|"
+                       r"dernier jour|last day of)")
 _FILE = re.compile(r"\b(extract|extrait|export|excel|xlsx|csv|télécharg|fichier|pdf|rapport|"
                    r"report|download)")
+
+
+def _explore_gist(block: dict, limit: int = 700) -> str:
+    """What an exploration step established, in a line the composer can use.
+
+    The first 160 characters of a pretty-printed schema are the first column and a half —
+    composed from that, an answer reported the `trades` table as "incomplete: only the field
+    `versio` is visible" and declined to produce the report it had been asked for.
+    """
+    text = str(block.get("text") or "").strip()
+    try:
+        value = json.loads(text)
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        for key in ("columns", "fields", "tables", "rows", "items", "datasets", "result"):
+            if isinstance(value.get(key), list):
+                value = value[key]
+                break
+    if isinstance(value, list) and value and all(isinstance(v, dict) for v in value):
+        named = [v for v in value if v.get("name") or v.get("column_name") or v.get("table_name")]
+        if named:
+            parts = []
+            for v in named:
+                name = v.get("name") or v.get("column_name") or v.get("table_name")
+                kind = v.get("type") or v.get("data_type") or ""
+                parts.append(f"{name} {kind}".strip() if kind and kind != "table" else str(name))
+            noun = "tables" if all((v.get("type") or "") in ("table", "view") for v in named) else "columns"
+            gist = f"{len(parts)} {noun}: " + ", ".join(parts)
+            return gist if len(gist) <= limit else gist[: limit - 1] + "…"
+    summary = " ".join(str(block.get("summary") or text).split())
+    return summary[:limit]
 
 
 class AgentRunner:
@@ -705,7 +740,7 @@ class AgentRunner:
                 message["lineage"] = lineage.build(ctx.blocks, answer)
             except Exception:  # noqa: BLE001 - provenance must never cost the answer
                 message["lineage"] = {}
-            message["checks"] = ctx.checks + lineage.notes_raised(ctx.blocks)
+            message["checks"] = ctx.checks + lineage.notes_raised(ctx.blocks) + self._figure_check(ctx, answer)
             if ctx.route_plan:
                 message["route"] = ctx.route_plan
             # What the answer rests on, kept with the answer: which outside sources were
@@ -1010,11 +1045,17 @@ class AgentRunner:
         for item in catalogs:
             ctx.pinned_tools.update(t["qualified_name"] for t in item.tools)
         sources_only = [t for t in mcp_tools if t.get("server_role") != "catalog"]
+        # Past the point where every schema fits, sources are chosen once, by meaning, before
+        # the first turn — and only theirs are offered, and described, in full. The rest stay
+        # on the map by name.
+        routed = (await self._route(ctx, text, mcp_tools)
+                  if len(mcp_tools) > int(settings.tool_budget) else None)
         catalog = builtin.catalog_text(tools, sources_only, self.c.mcp.scopes(),
                                        str(Path(self.c.settings.workspace_dir)
                                            .expanduser().resolve()),
                                        notes=self._source_notes(),
-                                       observed=observed, unexplored=unexplored)
+                                       observed=observed, unexplored=unexplored,
+                                       focus=routed)
         if catalogs:
             catalog += "\n\n" + "\n\n".join(catalog_lib.describe_for_prompt(item) for item in catalogs)
         # Stable first, volatile last — see prompts.system_prompt. The nonce notice is the
@@ -1043,6 +1084,7 @@ class AgentRunner:
 
         reflected = False
         deliverable_nudged = False
+        figures_nudged = False
         names_nudged = False
         giveup_nudged = False
         must_compose = False
@@ -1059,10 +1101,6 @@ class AgentRunner:
         # it is spent deliberately rather than on every turn.
         deep_think = True
         turn_temperature = 0.35
-        # Past the point where every schema fits, sources are chosen once, by meaning, before
-        # the first turn — and only theirs are offered in full. The rest stay on the map.
-        routed = (await self._route(ctx, text, mcp_tools)
-                  if len(mcp_tools) > int(settings.tool_budget) else None)
         if ctx.route_plan:
             # A route, not a script: it saves the first turns of wandering between twenty
             # sources, and the model is told to change it as soon as the data disagrees.
@@ -1301,6 +1339,13 @@ class AgentRunner:
                 if not missing and not giveup_nudged and not last_turn:
                     missing = self._gave_up(ctx, (text_block or {}).get("text", ""))
                     giveup_nudged = bool(missing)
+                if not missing and not figures_nudged and not last_turn:
+                    invented = self._ungrounded_figures(ctx, (text_block or {}).get("text", ""))
+                    if invented:
+                        figures_nudged = True
+                        missing = (f"These figures in your answer are in no result of this conversation: "
+                                   f"{', '.join(invented[:8])}. Take each one from the results (compute "
+                                   f"a derived figure with run_python) or remove it, then answer again.")
                 if missing:
                     deliverable_nudged = True
                     ctx.checks.append({"name": "Deliverable", "result": "missing, asked again", "detail": missing})
@@ -1745,6 +1790,11 @@ class AgentRunner:
                 parts.append("## Checked queries that resemble this question\n"
                              "Written and run by whoever set these sources up. Adapt one of "
                              "these before writing SQL from scratch:\n" + "\n".join(lines))
+        if _CALENDAR.search(lowered):
+            parts.append("## Dates in this question are business-day questions\n"
+                         "Month-ends, T+n, holidays, trading days: compute them with "
+                         "`business_days` (TARGET2 by default; UK, US) before querying — "
+                         "a month-end is the last *business* day, and a holiday has no close.")
         if _VISUAL.search(lowered):
             parts.append("## The reader wants to see this\n"
                          "Draw it with `chart`, from the #ref of the call that returned the rows, "
@@ -1754,6 +1804,37 @@ class AgentRunner:
                          "An extract, the data or Excel → `export_data` from the #ref. A report "
                          "or a PDF → draw the charts first, then `create_report`.")
         return ("\n\n" + "\n\n".join(parts)) if parts else ""
+
+    def _figure_check(self, ctx: RunContext, answer: str) -> list[dict]:
+        """The figure check, as the reader sees it under the answer — pass or fail."""
+        from app.data import figures as figures_lib
+        if ctx.status not in ("completed", "done") and not answer.strip():
+            return []
+        stated = figures_lib.figures_in(answer or "")
+        if not stated:
+            return []
+        try:
+            missing = self._ungrounded_figures(ctx, answer)
+        except Exception:  # noqa: BLE001 - a check must never cost the answer
+            return []
+        if missing:
+            return [{"name": "Figures", "result": f"{len(missing)} of {len(stated)} not found in the results",
+                     "detail": ", ".join(missing[:12]) + " — check these against the steps above."}]
+        return [{"name": "Figures", "result": f"all {len(stated)} found in the results",
+                 "detail": "Every figure with decimals or of four digits and more in this answer "
+                           "matches a number a step returned (allowing for rounding and units)."}]
+
+    def _ungrounded_figures(self, ctx: RunContext, answer: str) -> list[str]:
+        """Figures the answer states that no result of the conversation holds."""
+        from app.data import figures as figures_lib
+        if not figures_lib.figures_in(answer or ""):
+            return []
+        conv = self.c.store.conversation(ctx.conversation_id) or {}
+        asked = [str(m.get("content") or "") for m in conv.get("messages") or [] if m.get("role") == "user"]
+        earlier = [m.get("blocks") or [] for m in conv.get("messages") or []
+                   if m.get("role") == "assistant" and m.get("id") != ctx.message_id]
+        texts = figures_lib.evidence_texts([ctx.blocks, *earlier], self.c.workspace(), asked)
+        return figures_lib.ungrounded(answer, figures_lib.evidence_numbers(texts))
 
     def _missing_deliverable(self, ctx: RunContext, question: str) -> str:
         """What the reader asked to receive and has not been given, as a runtime note."""
@@ -2031,7 +2112,7 @@ class AgentRunner:
         block.update({"status": status, "ok": False, "summary": message[:200], "text": message})
         ctx.emit({"type": "tool.end", "index": block["index"], "id": block["id"], "ok": False,
                   "status": status, "summary": block["summary"], "ms": 0})
-        ctx.guard.record(block["name"], block["args"], False)
+        ctx.guard.record(block["name"], block["args"], False, message)
         return {"ok": False, "error": message, "model_text": f"ERROR: {message}"}
 
     async def _invoke(self, ctx: RunContext, call: ToolCall, block: dict,
@@ -2108,7 +2189,7 @@ class AgentRunner:
         if result.get("truncated"):
             block["summary"] = f"[result truncated] {block['summary']}"[:300]
         ctx.usage["tool_calls"] += 1
-        ctx.guard.record(call.name, call.arguments, ok)
+        ctx.guard.record(call.name, call.arguments, ok, "" if ok else (result.get("error") or text or ""))
         # Arguments are recorded as a preview with secrets stripped: enough to see what was
         # done, never enough to become a second place a credential lives.
         preview, _ = trust.redact(json.dumps(call.arguments, ensure_ascii=False,
@@ -2874,7 +2955,7 @@ class AgentRunner:
             if kind == "failed":
                 rendered[block["index"]] = f"{head}\nFAILED: {block.get('summary', '')[:300]}"
             elif kind == "explore":
-                rendered[block["index"]] = f"{head}\n(exploration: {str(block.get('summary') or '')[:160]})"
+                rendered[block["index"]] = f"{head}\n(exploration: {_explore_gist(block)})"
             elif kind == "small":
                 rendered[block["index"]] = f"{head}\n{block.get('text') or ''}"
         omitted = 0

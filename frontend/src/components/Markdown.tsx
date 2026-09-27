@@ -9,6 +9,7 @@
 // streaming. An unterminated code fence, a half-written table, a dangling `**` — each one
 // renders as something reasonable rather than throwing away the rest of the document.
 
+import { TableActions, plainCell } from './DataTable';
 import { type ReactNode } from 'react';
 import { CopyButton, cls } from './ui';
 
@@ -184,7 +185,7 @@ function highlight(code: string): ReactNode[] {
   return out;
 }
 
-function CodeBlock({ lang, code }: { lang: string; code: string }) {
+export function CodeBlock({ lang, code }: { lang: string; code: string }) {
   return (
     <div className="group relative my-3 overflow-hidden rounded-xl border hairline bg-zinc-50/80 dark:bg-black/30">
       <div className="flex items-center justify-between border-b px-3 py-1.5 hairline">
@@ -268,8 +269,11 @@ export function Markdown({ text, className, cite }: {
       const figures = cells.filter((c) => /^[-+−]?[\s\u00a0\u202f]*[€$£¥]?[\s\u00a0\u202f]*[\d][\d\s\u00a0\u202f.,']*(\s?(%|€|\$|£|k|M|Md|bn|EUR|USD|GBP|bp|pb|x))?$/.test(c));
       return cells.length > 0 && figures.length / cells.length >= 0.7;
     });
+    const plainHead = head.map(plainCell);
+    const plainRows = rows.map((row) => head.map((_, i) => plainCell(row[i] ?? '')));
     blocks.push(
-      <div key={`t${blocks.length}`} className="my-3.5 overflow-x-auto rounded-xl border hairline">
+      <div key={`t${blocks.length}`} className="group/table my-3.5">
+      <div className="overflow-x-auto rounded-xl border hairline">
         <table className="w-full border-collapse text-left text-[13px]">
           <thead className="bg-zinc-50 dark:bg-white/[0.04]">
             <tr>{head.map((cell, i) => (
@@ -288,6 +292,11 @@ export function Markdown({ text, className, cite }: {
             ))}
           </tbody>
         </table>
+      </div>
+      {/* The table the reader will want in a spreadsheet: one click, not a retyping session. */}
+      <div className="mt-1 flex justify-end opacity-0 transition-opacity group-hover/table:opacity-100 focus-within:opacity-100">
+        <TableActions columns={plainHead} rows={plainRows} name="table" />
+      </div>
       </div>,
     );
     table = null;

@@ -59,6 +59,8 @@ Quelques formulations qui fonctionnent bien :
 - « Quelles contreparties concentrent le plus d'exposition ? Donne le top 5 avec le montant en EUR. »
 - « Y a-t-il des anomalies dans les trades d'avril (prix hors marché, dates de jours fériés, contreparties inconnues) ? »
 - « Montre l'évolution mensuelle du notionnel par desk sur 2026. »
+- « Quelle est la date de règlement T+2 d'un trade du 30 avril 2026 ? » — les calendriers
+  TARGET2, Londres et New York sont intégrés (jours fériés, fins de mois ouvrées).
 - « Fais-moi un rapport PDF sur l'activité de trading du premier trimestre, avec un graphique et le détail par desk. »
 
 ## 3. Lire une réponse
@@ -83,6 +85,31 @@ d'outils appelés, les tokens consommés et le temps jusqu'au premier mot.
 **AGENT dit ce qu'il n'a pas pu établir.** Un outil en échec, une donnée absente, une source
 injoignable sont signalés tels quels. AGENT ne remplace jamais un résultat manquant par une
 valeur plausible.
+
+### Travailler sur les données d'une étape
+
+Ouvrez une étape (clic sur sa ligne) :
+
+- la **requête SQL** ou le **code Python** s'affiche lisiblement, avec un bouton de copie ;
+- le **résultat** est un tableau : cliquez sur un en-tête pour trier, tapez dans *Filter*
+  pour filtrer, basculez entre nombres formatés et bruts. La dernière ligne totalise les
+  quantités (Σ) et fait la moyenne des taux ; survolez-la pour le min, le max et le nombre ;
+- **Copy for Excel** copie le tableau prêt à coller dans Excel (nombres reconnus comme
+  nombres) ; **Excel** / **CSV** téléchargent **toutes** les lignes du résultat, même au-delà
+  de l'extrait affiché, avec l'onglet *Provenance* ;
+- **Edit & run** : modifiez la requête (une date, un filtre) et exécutez-la vous-même
+  (**⌘/Ctrl+Entrée**), sans passer par l'agent. Seules les sources en lecture le permettent,
+  et ces exécutions ne sont pas ajoutées aux preuves de la réponse ;
+- **Ask about #N** insère la référence de l'étape dans votre prochaine question
+  (« trace #5 par desk »).
+
+Les tableaux écrits par l'agent dans sa réponse ont aussi, au survol, **Copy for Excel** et
+**CSV**.
+
+**Chiffres vérifiés.** Sous chaque réponse, *figures verified* signifie que chaque chiffre
+significatif de la réponse se retrouve dans le résultat d'une étape. *N figures unverified*
+liste ceux qui n'y sont pas — typiquement un total calculé de tête : vérifiez-les avant
+usage.
 
 ## 4. Graphiques
 

@@ -56,7 +56,11 @@ export function Provenance({ message, conversationId }: { message: Message; conv
   const [error, setError] = useState('');
   if (!lineage || (!lineage.nodes.length && !lineage.exploration.length)) return null;
   const checks = message.checks ?? [];
-  const gap = checks.some((c) => /gap/i.test(c.result));
+  const gap = checks.some((c) => /gap|not found|failed|mismatch|flagged|wrong/i.test(c.result));
+  // The figures check has its own mark: it is the one a reader acts on — "every number
+  // here came from a step", or which ones did not.
+  const figures = checks.find((c) => c.name === 'Figures');
+  const unverified = figures && /not found/i.test(figures.result) ? figures.result.split(' ')[0] : '';
   const steps = lineage.nodes.filter((n) => n.kind !== 'exploration');
 
   const explain = async () => {
@@ -77,6 +81,10 @@ export function Provenance({ message, conversationId }: { message: Message; conv
         {checks.length > 0 && (gap
           ? <span className="flex items-center gap-0.5 text-amber-600 dark:text-amber-400"><TriangleAlert size={10} /> check flagged a gap</span>
           : <span className="flex items-center gap-0.5 text-brand-700 dark:text-brand-300"><Check size={10} strokeWidth={3} /> checked</span>)}
+        {figures && (unverified
+          ? <span className="flex items-center gap-0.5 text-amber-600 dark:text-amber-400" title={figures.detail}>
+              · {unverified} figure{unverified === '1' ? '' : 's'} unverified</span>
+          : <span className="text-brand-700 dark:text-brand-300" title={figures.detail}>· figures verified</span>)}
         <ChevronRight size={10} className="transition-transform group-open/prov:rotate-90" />
       </summary>
       <div className="mt-2 space-y-3 border-l-2 border-zinc-200 pl-3 animate-fade-in dark:border-white/10">
