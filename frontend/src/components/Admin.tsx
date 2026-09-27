@@ -8,13 +8,13 @@
 
 import {
   Activity, Brain, Check, Cpu, Database, Eye, FileLock2, GraduationCap, KeyRound, Plug, Settings2,
-  ShieldAlert, ShieldCheck, Sparkles, Trash2, Wrench, X, Zap,
+  PlugZap, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, Trash2, Wrench, X, Zap,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api, setAdminToken } from '../api';
 import type {
   AdminState, AuditReport, Diagnostics, MemoryEntry, ModelOption, RunMetrics, Skill,
-  SkillStats, ToolInfo,
+  SkillStats, ConnectionTest, ToolInfo,
 } from '../types';
 import { McpLibrary } from './McpLibrary';
 import { SourcesPanel } from './Sources';
@@ -155,17 +155,56 @@ function LoginGate({ mode, onDone }: { mode: string; onDone: () => void }) {
 
 /* ------------------------------------------------------------------ model */
 
+function ConnectionReport({ report }: { report: ConnectionTest }) {
+  const Row = ({ ok, label, detail }: { ok: boolean | undefined; label: string; detail: string }) => (
+    <li className="flex items-start gap-2">
+      <span className={cls('mt-px grid h-4 w-4 shrink-0 place-items-center rounded-full',
+        ok ? 'bg-brand-500 text-white' : ok === false ? 'bg-red-500 text-white' : 'bg-zinc-300 text-white dark:bg-zinc-600')}>
+        {ok ? <Check size={10} strokeWidth={3} /> : <X size={10} strokeWidth={3} />}
+      </span>
+      <span><b className="font-medium">{label}</b> <span className="dim">{detail}</span></span>
+    </li>
+  );
+  return (
+    <ul className="mt-2.5 space-y-1.5 rounded-lg border px-3 py-2.5 text-2xs hairline animate-fade-in">
+      <Row ok={report.reachable} label="Server"
+        detail={report.reachable ? `reachable in ${report.list_ms} ms · ${report.models?.length ?? 0} models` : (report.error ?? 'unreachable')} />
+      {report.reachable && (
+        <Row ok={report.chat?.ok} label={`Chat${report.model ? ` · ${report.model}` : ''}`}
+          detail={report.chat ? (report.chat.ok
+            ? `answered “${report.chat.reply}” in ${report.chat.ms} ms${report.chat.thinking ? ' · reasons before answering' : ''}`
+            : (report.chat.error ?? 'no answer')) : 'not run'} />
+      )}
+      {report.chat?.ok && (
+        <Row ok={report.tools?.ok} label="Tool calling"
+          detail={report.tools ? (report.tools.ok
+            ? `called the test tool with ${JSON.stringify(report.tools.arguments)} in ${report.tools.ms} ms${report.tools.native ? '' : ' (recovered from text)'}`
+            : (report.tools.error ?? 'failed')) : 'not run'} />
+      )}
+    </ul>
+  );
+}
+
 function ModelPanel({ onChanged }: { onChanged: () => void }) {
   const toast = useToast();
   const [data, setData] = useState<{ models: ModelOption[]; selected: string; fast_selected: string;
-                                     ok: boolean; error: string | null } | null>(null);
-  const [baseUrl, setBaseUrl] = useState('');
+                                     ok: boolean; error: string | null; provider?: string } | null>(null);
+  const [provider, setProvider] = useState<'ollama' | 'openai'>('ollama');
+  const [ollamaUrl, setOllamaUrl] = useState('');
+  const [openaiUrl, setOpenaiUrl] = useState('');
+  const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState('');
+  const [listing, setListing] = useState<{ names: string[]; error: string | null } | null>(null);
+  const [test, setTest] = useState<ConnectionTest | null>(null);
+  const [busy, setBusy] = useState<'list' | 'test' | 'save' | null>(null);
 
   const load = async () => {
     const [models, prefs] = await Promise.all([api.models(), api.getPrefs()]);
     setData(models);
-    setBaseUrl(String(prefs.effective.ollama_base_url ?? ''));
+    setProvider(prefs.effective.llm_provider === 'openai' ? 'openai' : 'ollama');
+    setOllamaUrl(String(prefs.effective.ollama_base_url ?? ''));
+    setOpenaiUrl(String(prefs.effective.openai_base_url ?? ''));
+    setApiKey(String(prefs.effective.openai_api_key ?? ''));
   };
   useEffect(() => { void load().catch((e) => toast(String(e.message), 'error')); }, []);
 
@@ -179,25 +218,84 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
     } finally { setSaving(''); }
   };
 
+  const baseUrl = provider === 'openai' ? openaiUrl : ollamaUrl;
+  const connection = () => ({ provider, base_url: baseUrl, api_key: provider === 'openai' ? apiKey : '' });
+
+  const save = async () => {
+    setBusy('save');
+    try {
+      await api.setPrefs(provider === 'openai'
+        ? { llm_provider: 'openai', openai_base_url: openaiUrl, openai_api_key: apiKey }
+        : { llm_provider: 'ollama', ollama_base_url: ollamaUrl });
+      await load(); onChanged(); toast('Model server saved');
+    } catch (e) { toast(String((e as Error).message), 'error'); }
+    finally { setBusy(null); }
+  };
+  const listModels = async () => {
+    setBusy('list'); setListing(null);
+    try {
+      const result = await api.llmModels(connection());
+      setListing({ names: result.models.map((m) => m.name), error: result.error });
+    } catch (e) { setListing({ names: [], error: String((e as Error).message) }); }
+    finally { setBusy(null); }
+  };
+  const runTest = async () => {
+    setBusy('test'); setTest(null);
+    try {
+      const sameServer = provider === (data?.provider ?? 'ollama');
+      setTest(await api.llmTest({ ...connection(), model: sameServer ? data?.selected || '' : '' }));
+    } catch (e) { setTest({ provider, base_url: baseUrl, reachable: false, error: String((e as Error).message) }); }
+    finally { setBusy(null); }
+  };
+
   if (!data) return <PanelSkeleton />;
 
   return (
     <div className="space-y-6">
       <section>
-        <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Ollama server</h3>
+        <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Model server</h3>
         <p className="mb-3 text-2xs leading-relaxed dimmer">
-          Every model runs through this endpoint. A model tagged <b>remote</b> is hosted by
-          Ollama rather than by this machine — the status badge in the header always says which.
+          Ollama, or any server with the OpenAI chat-completions API — vLLM, LM Studio, llama.cpp,
+          LocalAI, TGI. Inside the network when the deployment is air-gapped. A model tagged
+          <b> remote</b> is hosted elsewhere, and the header always says so.
         </p>
-        <div className="flex gap-2">
-          <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="http://localhost:11434" className="font-mono !text-xs" />
-          <Button variant="outline" onClick={async () => {
-            await api.setPrefs({ ollama_base_url: baseUrl });
-            await load(); onChanged(); toast('Endpoint saved');
-          }}>Save</Button>
+        <div className="mb-2.5 flex gap-1.5">
+          {(['ollama', 'openai'] as const).map((kind) => (
+            <button key={kind} onClick={() => { setProvider(kind); setListing(null); setTest(null); }}
+              className={cls('focus-ring flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
+                provider === kind ? 'border-brand-500 bg-brand-100 text-brand-800 dark:bg-brand-500/12 dark:text-brand-300' : 'hairline dim')}>
+              {kind === 'ollama' ? 'Ollama' : 'OpenAI-compatible'}
+            </button>
+          ))}
         </div>
-        {data.error && (
+        <div className="space-y-2">
+          <Input value={baseUrl} onChange={(e) => (provider === 'openai' ? setOpenaiUrl : setOllamaUrl)(e.target.value)}
+            placeholder={provider === 'openai' ? 'http://localhost:8000/v1' : 'http://localhost:11434'}
+            className="font-mono !text-xs" />
+          {provider === 'openai' && (
+            <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+              placeholder="API key (leave empty if the server needs none)" className="font-mono !text-xs" />
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button busy={busy === 'save'} disabled={!!busy || !baseUrl.trim()} onClick={() => void save()}>Save</Button>
+            <Button variant="outline" icon={RefreshCw} busy={busy === 'list'} disabled={!!busy || !baseUrl.trim()}
+              onClick={() => void listModels()}>List models</Button>
+            <Button variant="outline" icon={PlugZap} busy={busy === 'test'} disabled={!!busy || !baseUrl.trim()}
+              onClick={() => void runTest()}>Test connection</Button>
+          </div>
+        </div>
+        {listing && (
+          <div className="mt-2.5 rounded-lg border px-3 py-2 text-2xs hairline animate-fade-in">
+            {listing.error
+              ? <span className="text-red-600 dark:text-red-400">{listing.error}</span>
+              : <>
+                  <b className="font-medium">{listing.names.length} model{listing.names.length === 1 ? '' : 's'} served</b>
+                  <span className="dim"> — {listing.names.join(', ') || 'none'}</span>
+                </>}
+          </div>
+        )}
+        {test && <ConnectionReport report={test} />}
+        {data.error && !test && (
           <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700 dark:bg-red-500/10 dark:text-red-300">
             {data.error}
           </p>
@@ -207,8 +305,11 @@ function ModelPanel({ onChanged }: { onChanged: () => void }) {
       <section>
         <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider dim">Reasoning model</h3>
         <p className="mb-3 text-2xs leading-relaxed dimmer">
-          Capabilities come from the server, never guessed from the model's name. Without
-          <b> tools</b>, the agent cannot call anything — it only answers from memory.
+          {data.provider === 'openai'
+            ? <>This API does not declare capabilities: <b>tools</b> is assumed, thinking and vision
+                are guessed from the name — <b>Test connection</b> checks the selected model for real.</>
+            : <>Capabilities come from the server, never guessed from the model's name.</>}
+          {' '}Without <b>tools</b>, the agent cannot call anything — it only answers from memory.
         </p>
         <div className="space-y-1.5">
           {data.models.map((model) => {

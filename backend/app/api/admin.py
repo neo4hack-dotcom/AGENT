@@ -69,45 +69,94 @@ async def models() -> dict:
     agent at all, and one without `vision` silently drops attachments. Showing that in the
     picker is the difference between choosing and guessing.
     """
-    listing = await c.llm.list_models() if hasattr(c.llm, "list_models") else {"ok": False, "models": []}
-    if not listing.get("ok"):
-        from app.llm.provider import OllamaProvider
+    from app.llm.provider import OllamaProvider, OpenAIProvider, describe_model
 
-        listing = await OllamaProvider(c.get("ollama_base_url"), "").list_models()
+    kind = "openai" if c.get("llm_provider") == "openai" else "ollama"
+    base_url = c.get("openai_base_url") if kind == "openai" else c.get("ollama_base_url")
+    key = str(c.get("openai_api_key") or "")
+    lister = OpenAIProvider(base_url, "", key) if kind == "openai" else OllamaProvider(base_url, "")
+    listing = await lister.list_models()
     entries = listing.get("models") or []
-
-    from app.llm.provider import describe_model
-
     semaphore = asyncio.Semaphore(8)
 
     async def enrich(entry: dict) -> dict:
         async with semaphore:
             try:
-                caps = await asyncio.wait_for(
-                    describe_model(c.get("ollama_base_url"), entry["name"]), timeout=12)
+                if kind == "openai":
+                    caps = await OpenAIProvider(base_url, entry["name"], key).capabilities()
+                else:
+                    caps = await asyncio.wait_for(describe_model(base_url, entry["name"]), timeout=12)
             except Exception:
                 caps = {"tools": False, "thinking": False, "vision": False, "context_length": 0,
                         "source": "capabilities unavailable"}
-        # Listed, not hidden, when the air gap refuses it: a model that vanished from the
-        # picker is a mystery, one marked "leaves the network" is an answer.
         return {**entry, "capabilities": caps,
-                "refused": network.check_model(entry["name"], c.get("ollama_base_url")) or ""}
+                "refused": network.check_model(entry["name"], base_url) or ""}
 
     enriched = await asyncio.gather(*(enrich(e) for e in entries)) if entries else []
     return {"ok": listing.get("ok", False), "error": listing.get("error"),
             "models": list(enriched), "selected": c.get("model") or "",
-            "fast_selected": c.get("fast_model") or ""}
+            "fast_selected": c.get("fast_model") or "", "provider": kind, "base_url": base_url}
+
+
+class ConnectionBody(BaseModel):
+    provider: str = Field(default="ollama", pattern="^(ollama|openai)$")
+    base_url: str = Field(min_length=1, max_length=500)
+    api_key: str = Field(default="", max_length=500)
+    model: str = Field(default="", max_length=300)
+
+
+def _connection_key(body: ConnectionBody) -> str:
+    # A masked key sent back from the form means the one already saved.
+    return str(c.get("openai_api_key") or "") if (not body.api_key or "•" in body.api_key) else body.api_key
+
+
+@guarded.post("/llm/models")
+async def llm_models(body: ConnectionBody) -> dict:
+    """The models a server serves, before anything is saved — to pick one with confidence."""
+    from app.llm.provider import OllamaProvider, OpenAIProvider
+    refused = network.check_model("", body.base_url)
+    if refused:
+        return {"ok": False, "models": [], "error": refused}
+    lister = (OpenAIProvider(body.base_url, "", _connection_key(body)) if body.provider == "openai"
+              else OllamaProvider(body.base_url, ""))
+    return await lister.list_models()
+
+
+@guarded.post("/llm/test")
+async def llm_test(body: ConnectionBody) -> dict:
+    """Reach the server, list its models, ask the model for one word, and offer it a tool."""
+    from app.llm.provider import probe_connection
+    refused = network.check_model(body.model or "", body.base_url)
+    if refused:
+        return {"reachable": False, "error": refused, "provider": body.provider, "base_url": body.base_url}
+    report = await probe_connection(body.provider, body.base_url, _connection_key(body), body.model)
+    c.audit.record("llm.test", provider=body.provider, base_url=body.base_url, model=report.get("model"),
+                   reachable=report.get("reachable"), chat=(report.get("chat") or {}).get("ok"),
+                   tools=(report.get("tools") or {}).get("ok"))
+    return report
 
 
 class PrefsBody(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
 
+_SECRET_PREFS = {"openai_api_key"}
+
+
+def _shown(key: str, value: Any) -> Any:
+    """Secrets never travel back to the browser: masked, and a masked value sent back means
+    'unchanged'."""
+    if key in _SECRET_PREFS and value:
+        text = str(value)
+        return text[:3] + "•" * 8 if len(text) > 8 else "•" * 8
+    return value
+
+
 @guarded.get("/prefs")
 async def get_prefs() -> dict:
-    return {"effective": {key: c.get(key) for key in sorted(OVERRIDABLE)},
+    return {"effective": {key: _shown(key, c.get(key)) for key in sorted(OVERRIDABLE)},
             "overridden": sorted(k for k in c.prefs() if k in OVERRIDABLE),
-            "env_defaults": {key: getattr(c.env, key, None) for key in sorted(OVERRIDABLE)}}
+            "env_defaults": {key: _shown(key, getattr(c.env, key, None)) for key in sorted(OVERRIDABLE)}}
 
 
 @guarded.post("/prefs")
@@ -115,10 +164,13 @@ async def set_prefs(body: PrefsBody) -> dict:
     unknown = [key for key in body.values if key not in OVERRIDABLE]
     if unknown:
         raise HTTPException(400, f"Not settable from the UI: {', '.join(unknown)}")
-    c.store.set_prefs(body.values)
+    values = {k: v for k, v in body.values.items() if not (k in _SECRET_PREFS and "•" in str(v or ""))}
+    if "llm_provider" in values and values["llm_provider"] not in ("ollama", "openai"):
+        raise HTTPException(400, "llm_provider is 'ollama' or 'openai'.")
+    c.store.set_prefs(values)
     c.invalidate_llm()
     await c.store.save()
-    return {"effective": {key: c.get(key) for key in sorted(OVERRIDABLE)}}
+    return {"effective": {key: _shown(key, c.get(key)) for key in sorted(OVERRIDABLE)}}
 
 
 # ----------------------------------------------------------------------- MCP

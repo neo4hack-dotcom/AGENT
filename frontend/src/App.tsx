@@ -7,13 +7,14 @@
 import {
   AlertTriangle, Cloud, Command, MonitorSmartphone, Moon, Plus, Sparkles, Sun,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError, api, setAdminToken, streamRun } from './api';
 import { SignIn } from './components/SignIn';
 import { Admin, AdminDoor } from './components/Admin';
 import { Artifacts } from './components/Artifacts';
 import { Palette } from './components/Palette';
 import { Composer } from './components/Composer';
+import { ModeSwitch, loadModeChoice, saveModeChoice, type Mode } from './components/ModeSwitch';
 import { Sidebar } from './components/Sidebar';
 import { AssistantTurn, UserTurn, useStickToBottom, type ApprovalRequest } from './components/Thread';
 import { Badge, Dot, cls, useTheme, useToast } from './components/ui';
@@ -71,6 +72,8 @@ export default function App() {
   const [artifacts, setArtifacts] = useState(false);
   const [palette, setPalette] = useState(false);
   const [approving, setApproving] = useState(false);
+  // Agent, or the model alone with the MCP servers picked beside the paperclip.
+  const [modeChoice, setModeChoice] = useState(loadModeChoice);
   const stopStream = useRef<(() => void) | null>(null);
   const liveRef = useRef<Live | null>(null);
   // Set synchronously, before the request leaves. `running` cannot do this job: it derives
@@ -208,6 +211,7 @@ export default function App() {
     try {
       const started = await api.chat({
         conversation_id: conversation?.id ?? '', text, attachments,
+        mode: modeChoice.mode, servers: modeChoice.mode === 'direct' ? modeChoice.servers : [],
       });
       // Show the user's own turn immediately: waiting for the server round-trip to render
       // what someone just typed is the one latency nobody forgives.
@@ -243,7 +247,12 @@ export default function App() {
     } finally {
       sending.current = false;
     }
-  }, [conversation?.id, onEvent, toast, finishRun]);
+  }, [conversation?.id, onEvent, toast, finishRun, modeChoice]);
+
+  const changeMode = useCallback((mode: Mode, servers: string[]) => {
+    setModeChoice({ mode, servers });
+    saveModeChoice(mode, servers);
+  }, []);
 
   /**
    * Ask a question again, optionally reworded.
@@ -366,6 +375,11 @@ export default function App() {
   const modelOk = boot?.model.ok ?? false;
   const toolsCapable = boot?.model.capabilities.tools ?? false;
   const canSeeAdmin = boot?.admin.authenticated || boot?.admin.mode === 'password';
+  const modeSwitch = (
+    <ModeSwitch mode={modeChoice.mode} servers={boot?.servers ?? []} selected={modeChoice.servers}
+      onChange={changeMode} onOpen={() => void refreshBoot()} disabled={!modelOk || !!live} />
+  );
+  const composerHint = modeChoice.mode === 'direct' ? 'Ask the model directly' : undefined;
 
   if (gate) {
     return <SignIn closed={gate.kind === 'closed'} message={gate.message}
@@ -437,7 +451,8 @@ export default function App() {
       </header>
 
       {empty ? (
-        <EmptyState boot={boot} onSend={send} onStop={stop} running={false} />
+        <EmptyState boot={boot} onSend={send} onStop={stop} running={false}
+          accessory={modeSwitch} placeholder={composerHint} />
       ) : (
         <>
           <main ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
@@ -485,6 +500,8 @@ export default function App() {
                 disabledReason={boot?.model.error ?? 'No model selected'}
                 centred={false}
                 vision={boot?.model.capabilities.vision ?? false}
+                accessory={modeSwitch}
+                placeholder={composerHint}
               />
             </div>
           </div>
@@ -519,8 +536,11 @@ export default function App() {
 /* -------------------------------------------------------------- empty state */
 
 function EmptyState({
-  boot, onSend, onStop, running,
-}: { boot: Bootstrap | null; onSend: (t: string, a: string[]) => void; onStop: () => void; running: boolean }) {
+  boot, onSend, onStop, running, accessory, placeholder,
+}: {
+  boot: Bootstrap | null; onSend: (t: string, a: string[]) => void; onStop: () => void; running: boolean;
+  accessory?: ReactNode; placeholder?: string;
+}) {
   const suggestions = useMemo(() => buildSuggestions(boot), [boot]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const ready = boot?.model.ok ?? false;
@@ -545,6 +565,8 @@ function EmptyState({
         disabledReason={boot?.model.error ?? 'No model selected'}
         centred
         vision={boot?.model.capabilities.vision ?? false}
+        accessory={accessory}
+        placeholder={placeholder}
       />
 
       {/* Examples stay behind one click. They are useful once — on the first run — and

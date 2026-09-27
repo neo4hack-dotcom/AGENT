@@ -202,6 +202,9 @@ export interface Message {
   checks?: { name: string; result: string; detail?: string }[];
   /** The method in plain words, written on request from the lineage. */
   method?: { text: string; model?: string; at?: number };
+  /** 'direct': the model with the chosen servers' tools, no agent layer. */
+  mode?: 'agent' | 'direct';
+  servers?: string[];
 }
 
 export interface LineageNode {
@@ -302,10 +305,20 @@ export interface AdminState {
   remote?: 'password' | 'closed';
 }
 
+export interface DirectServer {
+  id: string;
+  name: string;
+  slug: string;
+  connected: boolean;
+  tool_count: number;
+  role: string;
+}
+
 export interface Bootstrap {
   app: string;
   model: ModelState;
   mcp: McpSummary;
+  servers?: DirectServer[];
   tools: ToolInfo[];
   admin: AdminState;
   prefs: { approval_mode: string };
@@ -514,4 +527,16 @@ export interface CatalogState {
   connected: boolean;
   catalogs: { id: string; name: string; slug: string; connected: boolean; detected: boolean;
               families: string[]; tools: string[] }[];
+}
+
+export interface ConnectionTest {
+  provider: string;
+  base_url: string;
+  reachable: boolean;
+  list_ms?: number;
+  models?: string[];
+  error?: string | null;
+  model?: string;
+  chat?: { ok: boolean; reply?: string; thinking?: boolean; ms?: number; tokens_out?: number; error?: string };
+  tools?: { ok: boolean; native?: boolean; arguments?: Record<string, unknown>; ms?: number; error?: string | null };
 }

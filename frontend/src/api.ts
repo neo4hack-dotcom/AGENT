@@ -5,7 +5,7 @@
 import type {
   AdminState, AuditReport, Bootstrap, CatalogEntry, Conversation, ConversationSummary,
   Artifact, Diagnostics, MemoryEntry, McpServer, ModelOption, RuntimeInfo, SearchHit, Skill,
-  SkillStats, SourceDetail, SourceSummary, StreamEvent, UploadResult, CatalogState,
+  SkillStats, SourceDetail, SourceSummary, StreamEvent, UploadResult, CatalogState, ConnectionTest,
 } from './types';
 
 const TOKEN_KEY = 'agent.admin.token';
@@ -63,7 +63,8 @@ export const api = {
     request<{ ok: boolean }>(`/conversations/${id}`, { method: 'DELETE' }),
 
   // --- chat --------------------------------------------------------------
-  chat: (payload: { conversation_id?: string; text: string; attachments?: string[] }) =>
+  chat: (payload: { conversation_id?: string; text: string; attachments?: string[];
+                    mode?: 'agent' | 'direct'; servers?: string[] }) =>
     request<{ run_id: string; conversation_id: string; user_message_id: string; message_id: string }>(
       '/chat', { method: 'POST', body: body(payload) }),
   cancelRun: (runId: string) => request<{ ok: boolean }>(`/runs/${runId}/cancel`, { method: 'POST' }),
@@ -170,6 +171,11 @@ export const api = {
   trailUrl: (conversationId: string, messageId: string, format: 'md' | 'json' = 'md') =>
     `/api/conversations/${conversationId}/messages/${messageId}/trail?format=${format}`,
   dataCatalog: () => request<CatalogState>('/admin/data-catalog'),
+  llmModels: (body: { provider: string; base_url: string; api_key?: string }) =>
+    request<{ ok: boolean; models: { name: string; context_length?: number }[]; error: string | null }>(
+      '/admin/llm/models', { method: 'POST', body: JSON.stringify(body) }),
+  llmTest: (body: { provider: string; base_url: string; api_key?: string; model?: string }) =>
+    request<ConnectionTest>('/admin/llm/test', { method: 'POST', body: JSON.stringify(body) }),
   importFromCatalog: (id: string) =>
     request<SourceDetail>(`/admin/sources/${id}/from-catalog`, { method: 'POST' }),
   forgetObservations: (id: string) =>
