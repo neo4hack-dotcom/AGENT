@@ -95,7 +95,17 @@ page's CSP allows no outside connection.
   marked *Internal network*, and then only the enterprise firewall holds it inside. This
   module says so rather than implying otherwise;
 - **the chart renderer** — its URL allowlist is empty, so a `data.url` that slipped past
-  the sanitizer is still not fetched.
+  the sanitizer is still not fetched;
+- **Windows file paths** — resolving `\\host\share\x` is already a connection: the SMB
+  client offers the user's NTLM credentials to that host before any containment check can
+  refuse, which is both a credential leak and a path out. UNC, WebDAV and device paths, and
+  any colon but a drive letter's, are refused on the string wherever a path comes from the
+  model or a URL — workspace tools, the bundled Files and Pandas servers, download routes,
+  static files (any URL with a backslash is refused outright) — and `run_python` refuses
+  them in `open()` and `os`;
+- **the environment of child processes** — a stdio server does not inherit the API's
+  `AGENT_*` settings or any variable named like a credential. A server that needs one gets
+  it in its own configuration, where it is masked in Admin and redacted from replies.
 
 ## Who can reach the app
 
@@ -115,7 +125,13 @@ browser tab, so "this machine" is decided with care:
 - **Other machines.** Nothing is served to them unless a password is set:
   `AGENT_ACCESS_PASSWORD` for the agent, `AGENT_ADMIN_PASSWORD` for the agent and admin.
   Sessions are stored as hashes of their tokens; the cookie that carries them for the event
-  stream and downloads is HttpOnly and SameSite=Strict.
+  stream and downloads is HttpOnly, SameSite=Strict, and Secure over HTTPS
+  (`AGENT_TLS_CERT` / `AGENT_TLS_KEY`). Failed sign-ins are limited per peer address — never
+  per forwarded header, which a client could pick afresh for every guess — and across all
+  addresses together, and each is written to the audit log.
+- **Shared machines.** On Remote Desktop, Citrix or a jump host, 127.0.0.1 is everyone
+  logged on. `AGENT_REQUIRE_SIGNIN=true` removes the implicit trust in loopback, and
+  Diagnostics flags a remote session or a server edition of Windows running without it.
 - **The page itself.** Its content security policy allows loading and connecting to its
   own origin only, so an answer that renders a link or an image cannot make the browser
   send data elsewhere — the first thing an injected instruction would try.
@@ -135,12 +151,16 @@ fail; pandas, numpy and workspace writes all work.
 
 On Windows and Linux there is no such sandbox, and that is the honest summary: the
 monkeypatched `socket` is what runs there — it turns an accidental `read_csv("https://…")`
-into a clear refusal, and it does not hold against code written to get out. On Windows the
+into a clear refusal, and it does not hold against code written to get out. On Windows,
+`open()` and `os` also refuse network file paths (`\\host\share`), which reach the
+network through SMB without touching a socket — the same standing: against accident. The
 ceilings come from a job object (memory per process, CPU time, 32 processes, kill of the
-whole tree) instead of rlimits. Where untrusted documents meet `run_python` on those
-platforms, the enterprise firewall is the boundary — or switch the tool off in *Guardrails*.
+whole tree) instead of rlimits, and the reads fenced on macOS (below) are not fenced there:
+the code can read what the account running the app can. Where untrusted documents meet
+`run_python` on those platforms, set `AGENT_ENABLE_PYTHON_TOOL=false` — Admin cannot turn it
+back on — or accept the enterprise firewall as the boundary; Diagnostics warns while it is on.
 
-Reads are fenced as well. Code reads the workspace and the Python installation, and nothing
+Reads are fenced as well (macOS). Code reads the workspace and the Python installation, and nothing
 under `/Users`, `/tmp`, `/Volumes`, `/opt`, `/srv` or `/data` besides. That closes the way
 around the sources: an agent that knows where a server's SQLite file lives could otherwise
 open it directly — unaudited, ungoverned — and the app's own `.env` and store sit in the
@@ -201,7 +221,17 @@ attempt visible in the transcript and the log. That is worth having, and it is n
 as safety.
 
 The expression sandbox in the bundled pandas server carries the same caveat in its own
-docstring. Point these tools at data you are willing to have read.
+docstring. Point these tools at data you are willing to have read — or remove them:
+`AGENT_ENABLE_PYTHON_TOOL=false`, `AGENT_ENABLE_PANDAS=false` and
+`AGENT_ALLOW_CUSTOM_COMMANDS=false` are deployment settings Admin cannot reverse (README →
+*Locking it down*). Custom commands matter because an admin session that can start any
+program is a shell on the machine; locked, only the bundled servers run, on this app's own
+interpreter, and variables that change what an interpreter loads are refused.
+
+What is stored on disk — conversations, memory, the audit log, the workspace, `.env` — is
+narrowed at every start to the account running the app (owner-only; on Windows that account,
+SYSTEM and Administrators, set by SID). A store placed outside the app's folder keeps the
+permissions the deployment gave it, and Diagnostics says so.
 
 ## Reading
 

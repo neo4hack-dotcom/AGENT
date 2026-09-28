@@ -85,6 +85,32 @@ _agent_socket.socket.sendto = _agent_sendto
 _agent_socket.getaddrinfo = _agent_getaddrinfo
 """
 
+# Windows reaches the network through file paths too: `open(r"\\host\share\x")` goes out over
+# SMB (or WebDAV) with the user's credentials, and never touches a Python socket. Same
+# standing as the socket guard — against accident, not against code set on getting out.
+UNC_GUARD = r"""import builtins as _agent_builtins, io as _agent_io, os as _agent_os
+def _agent_path_check(target):
+    try:
+        text = _agent_os.fspath(target)
+    except TypeError:
+        return
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    if text[:2] in ("\\\\", "//", "\\/", "/\\"):
+        raise PermissionError("Network paths are refused for code the agent runs (%r): read data "
+                              "through the connected sources' tools." % (text[:80],))
+def _agent_guarded(fn):
+    def wrapped(target, *rest, **kw):
+        _agent_path_check(target)
+        return fn(target, *rest, **kw)
+    return wrapped
+_agent_builtins.open = _agent_io.open = _agent_guarded(_agent_io.open)
+for _agent_name in ("open", "stat", "lstat", "listdir", "scandir", "mkdir", "makedirs", "remove",
+                    "unlink", "rmdir", "startfile"):
+    if hasattr(_agent_os, _agent_name):
+        setattr(_agent_os, _agent_name, _agent_guarded(getattr(_agent_os, _agent_name)))
+"""
+
 
 def sandbox_available() -> bool:
     return sys.platform == "darwin" and Path(SANDBOX).exists()
@@ -225,7 +251,7 @@ async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: i
 
     prelude = PRELUDE
     if not allow_network and not sandbox_available():
-        prelude += NET_GUARD
+        prelude += NET_GUARD + (UNC_GUARD if WINDOWS else "")
     pipes: tuple[int, int, int, int] | None = None
     extra_args: list[str] = []
     pass_fds: tuple[int, ...] = ()

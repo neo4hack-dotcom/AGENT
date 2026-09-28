@@ -308,7 +308,17 @@ depuis la machine du serveur, ou partout avec le mot de passe d'administration.
 | **Identity & skills** | identité de l'agent et procédures enregistrées |
 | **Memory** | ce que l'agent a retenu, et les faits en attente de validation |
 | **Audit log** | journal chaîné (inviolable) de toutes les actions |
-| **Diagnostics** | état du cloisonnement réseau, des serveurs, du modèle |
+| **Diagnostics** | état du cloisonnement réseau, des interrupteurs de sécurité, des serveurs, du modèle |
+
+**Verrouiller le déploiement.** Certaines capacités se retirent dans `backend/.env`, et
+l'administration ne peut pas les rétablir : `AGENT_ENABLE_PANDAS=false` retire le serveur
+Pandas Frames (il disparaît de la bibliothèque et ne démarre plus),
+`AGENT_ENABLE_PYTHON_TOOL=false` interdit l'exécution de code, `AGENT_ALLOW_CUSTOM_COMMANDS=false`
+limite les serveurs locaux à ceux fournis avec l'application, et `AGENT_REQUIRE_SIGNIN=true`
+exige un mot de passe même sur la machine elle-même (indispensable sur un serveur partagé,
+Bureau à distance ou Citrix). Redémarrez l'application après modification ; *Diagnostics*
+affiche l'état de chaque interrupteur. Le détail figure dans le README, section
+*Locking it down*.
 
 **Tester un serveur de modèles.** Dans *Model*, choisissez le type, saisissez l'URL (pour un
 serveur OpenAI-compatible, elle se termine en général par `/v1`), puis :

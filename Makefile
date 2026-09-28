@@ -30,7 +30,7 @@ build:
 	cd frontend && npm run build
 
 serve: build
-	cd backend && .venv/bin/uvicorn app.main:app --port 3041
+	cd backend && .venv/bin/python -m app
 
 clean:
 	rm -rf backend/.venv frontend/node_modules frontend/dist backend/__pycache__

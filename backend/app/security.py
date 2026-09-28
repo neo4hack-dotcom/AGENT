@@ -42,6 +42,9 @@ LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
 COOKIE = "agent_session"
 _ATTEMPTS: dict[str, list[float]] = {}
 MAX_ATTEMPTS = 8
+# Across every address at once: eight tries per address is no limit to someone with a
+# hundred addresses — or to anyone, were the address theirs to choose.
+MAX_ATTEMPTS_ALL = 40
 ATTEMPT_WINDOW_S = 300
 
 
@@ -57,6 +60,16 @@ def is_local(request: Request) -> bool:
         return False
     forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
     return all(_loopback(hop) for hop in forwarded.split(",") if hop.strip())
+
+
+def trusted_local(container, request: Request) -> bool:
+    """From this machine, *and* the deployment lets that stand in for a sign-in.
+
+    On a laptop, "this machine" is one person. On a shared Windows server — Remote Desktop,
+    Citrix, a jump host — it is everyone logged on to it, and 127.0.0.1 is theirs too.
+    AGENT_REQUIRE_SIGNIN turns the implicit trust off: a password, from everywhere.
+    """
+    return is_local(request) and not bool(getattr(container.env, "require_signin", False))
 
 
 def mode(container) -> str:
@@ -131,8 +144,10 @@ def _same(given: str, expected: str) -> bool:
 
 
 def _client_key(request: Request) -> str:
-    forwarded = [h.strip() for h in ",".join(request.headers.getlist("x-forwarded-for")).split(",") if h.strip()]
-    return (forwarded[-1] if forwarded else (request.client.host if request.client else "")) or "unknown"
+    """Whose attempts these are. The peer address only: the server has already replaced it
+    with the forwarded one when — and only when — the peer is the local proxy. Reading
+    X-Forwarded-For here let any client name a fresh address with every guess."""
+    return (request.client.host if request.client else "") or "unknown"
 
 
 def login(container, request: Request, password: str) -> dict:
@@ -141,11 +156,13 @@ def login(container, request: Request, password: str) -> dict:
     if not admin and not access:
         raise HTTPException(400, "No password is set — the app is open from this machine only.")
     key = _client_key(request)
-    if len(_prune(key)) >= MAX_ATTEMPTS:
+    if len(_prune(key)) >= MAX_ATTEMPTS or len(_prune("*")) >= MAX_ATTEMPTS_ALL:
         raise HTTPException(429, "Too many attempts. Wait a few minutes and try again.")
     role = "admin" if _same(password, admin) else "user" if _same(password, access) else ""
     if not role:
         _ATTEMPTS.setdefault(key, []).append(time.time())
+        _ATTEMPTS.setdefault("*", []).append(time.time())
+        container.audit.record("signin.failed", client=key)
         raise HTTPException(401, "Wrong password.")
     _ATTEMPTS.pop(key, None)
     token = secrets.token_urlsafe(32)
@@ -202,9 +219,14 @@ def role_of(container, request: Request) -> str:
 
 def check_app(container, request: Request) -> None:
     """Raise unless this request may use the app at all (chat, conversations, files)."""
-    if is_local(request) or role_of(container, request):
+    if trusted_local(container, request) or role_of(container, request):
         return
     if remote_mode(container) == "closed":
+        if is_local(request):
+            raise HTTPException(
+                403,
+                "AGENT_REQUIRE_SIGNIN is on but no password is set: set AGENT_ACCESS_PASSWORD "
+                "(and AGENT_ADMIN_PASSWORD to administer), then restart.")
         raise HTTPException(
             403,
             "This agent answers only on the machine it runs on. To use it from other "
@@ -215,10 +237,12 @@ def check_app(container, request: Request) -> None:
 def check_admin(container, request: Request) -> None:
     """Raise unless this request may touch the admin area."""
     if mode(container) == "local-only":
-        if is_local(request):
+        if trusted_local(container, request):
             return
         raise HTTPException(
             403,
+            "Admin needs AGENT_ADMIN_PASSWORD when AGENT_REQUIRE_SIGNIN is on. Set it and restart."
+            if is_local(request) else
             "Admin is restricted to the machine this runs on. To administer it from "
             "elsewhere, set AGENT_ADMIN_PASSWORD and restart.")
     if role_of(container, request) != "admin":
@@ -228,7 +252,7 @@ def check_admin(container, request: Request) -> None:
 def admin_state(container, request: Request) -> dict:
     """What the browser needs to decide whether to show the admin door — or a sign-in."""
     current = mode(container)
-    local = is_local(request)
+    local = trusted_local(container, request)
     role = role_of(container, request)
     signed_in = local or bool(role)
     authenticated = local if current == "local-only" else role == "admin"

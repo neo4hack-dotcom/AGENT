@@ -16,7 +16,7 @@ if not exist "frontend\node_modules" (
     exit /b 1
 )
 set PYTHONUTF8=1
-start "AGENT API :3041" /D "%~dp0backend" cmd /k ".venv\Scripts\python.exe -m uvicorn app.main:app --port 3041"
+start "AGENT API" /D "%~dp0backend" cmd /k ".venv\Scripts\python.exe -m app"
 start "AGENT web :3040" /D "%~dp0frontend" cmd /k "npm run dev"
 echo [AGENT] API       http://localhost:3041
 echo [AGENT] Interface http://localhost:3040

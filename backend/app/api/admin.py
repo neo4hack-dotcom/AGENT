@@ -19,7 +19,7 @@ from app import network
 from app.deps import OVERRIDABLE, container as c
 from app.errors import McpError
 from app.mcp import runtimes
-from app.mcp.catalog import CATALOG, CATEGORIES, instantiate
+from app.mcp.catalog import CATEGORIES, deployment_refusal, instantiate, visible_catalog
 from app.security import COOKIE, admin_state, check_admin, login, logout, request_token
 from app.tools.code import available_modules
 
@@ -179,7 +179,8 @@ async def set_prefs(body: PrefsBody) -> dict:
 @guarded.get("/catalog")
 async def catalog() -> dict:
     used = {s.get("command") for s in c.store.mcp_servers().values() if s.get("enabled", True)}
-    return {"entries": CATALOG, "categories": CATEGORIES, "runtimes": runtimes.probe(used)}
+    return {"entries": visible_catalog(c.settings), "categories": CATEGORIES, "runtimes": runtimes.probe(used),
+            "custom_commands": bool(c.settings.allow_custom_commands)}
 
 
 @guarded.get("/servers")
@@ -224,6 +225,9 @@ async def add_server(body: InstallBody) -> dict:
                "args": body.args, "env": body.env, "url": body.url, "headers": body.headers,
                "cwd": body.cwd, "description": body.description, "category": "Custom",
                "network": body.network, "role": body.role}
+    refused = deployment_refusal(cfg, c.settings)
+    if refused:
+        raise HTTPException(403, refused)
     server = await c.mcp.add_server(cfg)
     await c.store.save()
     snapshot = {}
@@ -250,6 +254,11 @@ class PatchBody(BaseModel):
 @guarded.patch("/servers/{server_id}")
 async def patch_server(server_id: str, body: PatchBody) -> dict:
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    current = c.store.mcp_servers().get(server_id)
+    if current is not None and ({"command", "args", "env"} & patch.keys() or patch.get("enabled")):
+        refused = deployment_refusal({**current, **patch}, c.settings)
+        if refused:
+            raise HTTPException(403, refused)
     server = await c.mcp.update_server(server_id, patch)
     if server is None:
         raise HTTPException(404, "No such server.")
@@ -667,6 +676,9 @@ async def diagnostics() -> dict:
     for runtime in missing:
         warnings.append(f"{runtime['label']} is not on PATH — {runtime['why']}. "
                         f"To use it: {runtime['install']}")
+    from app import hardening
+    hardened, advice = hardening.posture(c.env, c.settings, bool(network.summary()["kernel_sandbox"]))
+    warnings.extend(advice)
     fetching = downloads_at_start(servers)
     if fetching and network.airgapped():
         warnings.append(f"{', '.join(fetching)} start{'s' if len(fetching) == 1 else ''} by fetching a "
@@ -685,6 +697,7 @@ async def diagnostics() -> dict:
         "python_modules": available_modules(),
         "workspace": str(c.workspace()),
         "store": str(c.env.db_path),
+        "hardening": hardened,
         "platform": {"os": platform.system(), "release": platform.release(),
                      "python": platform.python_version(),
                      "event_loop": type(asyncio.get_running_loop()).__name__},

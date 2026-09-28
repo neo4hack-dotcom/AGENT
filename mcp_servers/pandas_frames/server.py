@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _mcp_stdio import McpServer, log  # noqa: E402
+from _mcp_stdio import McpServer, log, remote_path  # noqa: E402
 
 HARD_MAX_BYTES = 1024 ** 3           # 1 GB. Configurable downwards, never upwards.
 DEFAULT_MEMORY_MB = 2048
@@ -519,6 +519,9 @@ def in_workspace(relative: str, must_exist: bool = True) -> Path:
     name = (relative or "").strip()
     if not name:
         raise ValueError("A path is required.")
+    refused = remote_path(name)
+    if refused:
+        raise ValueError(f"{name}: {refused}.")
     target = (CONFIG.workspace / name).resolve()
     if target != CONFIG.workspace and CONFIG.workspace not in target.parents:
         raise ValueError("Refusing to touch anything outside the workspace directory.")
