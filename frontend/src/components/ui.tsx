@@ -11,6 +11,14 @@ export function cls(...parts: Array<string | false | null | undefined>): string 
   return parts.filter(Boolean).join(' ');
 }
 
+const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
+/** A shortcut as the keyboard in front of the user labels it: `⌘⇧O` on a Mac, `Ctrl+Shift+O` elsewhere. */
+export function shortcut(...keys: string[]): string {
+  if (MAC) return keys.map((k) => ({ mod: '⌘', shift: '⇧' })[k] ?? k).join('');
+  return keys.map((k) => ({ mod: 'Ctrl', shift: 'Shift' })[k] ?? k).join('+');
+}
+
 /* ------------------------------------------------------------------ buttons */
 
 type Variant = 'primary' | 'outline' | 'ghost' | 'danger' | 'subtle';

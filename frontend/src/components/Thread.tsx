@@ -17,7 +17,7 @@ import { DataTable, ResultExport, useResultExport } from './DataTable';
 import { CodeBlock, Markdown } from './Markdown';
 import { Provenance } from './Provenance';
 import { AskCard, FileCard } from './Outputs';
-import { Badge, Button, Spinner, cls } from './ui';
+import { Badge, Button, Spinner, cls, shortcut } from './ui';
 
 const TOOL_ICONS: Record<string, LucideIcon> = {
   run_python: Terminal, workspace_read: FileText,
@@ -186,7 +186,7 @@ function Rerun({ block, target, onClose }: {
     <div className="space-y-2 rounded-lg border border-brand-300/50 bg-white/70 p-2.5 dark:border-brand-500/20 dark:bg-black/20">
       <div className="flex items-center gap-2 text-2xs">
         <span className="font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">Your run</span>
-        <span className="dimmer">{codeKey ? `edit the ${codeKey}` : 'edit the arguments'} · ⌘/Ctrl+Enter to run · not part of the answer's evidence</span>
+        <span className="dimmer">{codeKey ? `edit the ${codeKey}` : 'edit the arguments'} · {shortcut('mod', 'Enter')} to run · not part of the answer's evidence</span>
         <button onClick={onClose} className="focus-ring ml-auto rounded px-1 dimmer hover:text-zinc-700 dark:hover:text-zinc-200">close</button>
       </div>
       <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false}

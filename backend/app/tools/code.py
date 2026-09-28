@@ -6,7 +6,8 @@ An agent that can compute is a different class of tool from one that can only ta
 * a **separate process**, so a crash, a segfault or an `os._exit` kills only the child;
 * a **wall-clock watchdog that kills the process group**, because the CPU rlimit alone
   does not stop a child that is asleep on a socket, and on macOS `RLIMIT_AS` is silently
-  ineffective — the limit that actually holds on this platform is the watchdog;
+  ineffective — the limit that actually holds on this platform is the watchdog (on
+  Windows, a job object carries the ceilings and the kill: see winjob.py);
 * a **working directory pinned to the workspace**, so relative paths land somewhere
   bounded and inspectable rather than wherever the API happens to have been started.
 
@@ -21,11 +22,19 @@ import asyncio
 import json
 import os
 import re
-import resource
 import signal
+import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
+
+try:
+    import resource   # POSIX only: CPU, memory and process-count ceilings
+except ImportError:   # Windows — a job object holds those ceilings there (winjob.py)
+    resource = None
+
+WINDOWS = sys.platform == "win32"
 
 PRELUDE = (
     "import sys, os, json, math, statistics, re, datetime, itertools, collections, pathlib\n"
@@ -35,7 +44,7 @@ PRELUDE = (
 # This is the mechanism that turns a five-round-trip plan into a single generation: the
 # model writes the whole procedure — fetch, filter, join, write — and the loop between the
 # steps runs in the interpreter instead of through the model. See tools/bridge_prelude.py.
-BRIDGE_PRELUDE = (Path(__file__).parent / "bridge_prelude.py").read_text()
+BRIDGE_PRELUDE = (Path(__file__).parent / "bridge_prelude.py").read_text(encoding="utf-8")
 
 
 def _wrappers(names: list[str]) -> str:
@@ -45,6 +54,36 @@ def _wrappers(names: list[str]) -> str:
         for name in names if name.isidentifier())
 
 SANDBOX = "/usr/bin/sandbox-exec"
+
+# Where there is no kernel sandbox (Windows, Linux), the child refuses non-local sockets
+# itself. Not a security boundary — code can undo it — but the difference between an
+# air-gapped deployment and one where `pd.read_csv("https://…")` quietly reaches out.
+NET_GUARD = """import socket as _agent_socket
+_agent_orig = {_n: getattr(_agent_socket.socket, _n) for _n in ("connect", "connect_ex", "sendto")}
+_agent_orig_gai = _agent_socket.getaddrinfo
+def _agent_local(address):
+    host = address[0] if isinstance(address, tuple) else address
+    return str(host).split("%")[0].lower() in ("127.0.0.1", "::1", "localhost")
+def _agent_refuse(address):
+    raise PermissionError("Network access is disabled for code the agent runs (%r): read data "
+                          "through the connected sources' tools." % (address,))
+def _agent_connect(self, address, *rest):
+    if not _agent_local(address): _agent_refuse(address)
+    return _agent_orig["connect"](self, address, *rest)
+def _agent_connect_ex(self, address, *rest):
+    if not _agent_local(address): _agent_refuse(address)
+    return _agent_orig["connect_ex"](self, address, *rest)
+def _agent_sendto(self, data, *rest):
+    if rest and not _agent_local(rest[-1]): _agent_refuse(rest[-1])
+    return _agent_orig["sendto"](self, data, *rest)
+def _agent_getaddrinfo(host, *rest, **kw):
+    if host not in (None, "localhost", "127.0.0.1", "::1"): _agent_refuse(host)
+    return _agent_orig_gai(host, *rest, **kw)
+_agent_socket.socket.connect = _agent_connect
+_agent_socket.socket.connect_ex = _agent_connect_ex
+_agent_socket.socket.sendto = _agent_sendto
+_agent_socket.getaddrinfo = _agent_getaddrinfo
+"""
 
 
 def sandbox_available() -> bool:
@@ -89,6 +128,9 @@ def _profile(workspace: Path) -> str:
 
 
 def _limits(memory_mb: int, cpu_s: int):
+    if resource is None:
+        return None
+
     def apply() -> None:
         os.setsid()  # own process group, so the watchdog can kill children too
         try:
@@ -108,6 +150,49 @@ def _limits(memory_mb: int, cpu_s: int):
             pass
 
     return apply
+
+
+def _child_env(workspace: Path) -> dict[str, str]:
+    """The child's whole environment: nothing of the API's own, its temp and home in the
+    workspace. Windows needs a few system variables to start Python at all — without
+    SYSTEMROOT it cannot even seed its random generator."""
+    ws = str(workspace)
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": ws, "PYTHONPATH": "", "TMPDIR": ws,
+           "MPLBACKEND": "Agg", "MPLCONFIGDIR": str(workspace / ".mpl"),
+           "PYTHONIOENCODING": "utf-8"}
+    if WINDOWS:
+        for key in ("SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT",
+                    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"):
+            if os.environ.get(key):
+                env[key] = os.environ[key]
+        env.update({"TEMP": ws, "TMP": ws, "USERPROFILE": ws, "APPDATA": ws, "LOCALAPPDATA": ws})
+    else:
+        env["LC_ALL"] = "C.UTF-8"
+    return env
+
+
+async def _kill_tree(proc, job=None) -> None:
+    """Kill the child and whatever it started. POSIX: its process group. Windows: its job,
+    or the tree through taskkill /T when there is no job — TerminateProcess alone would
+    leave grandchildren running."""
+    if WINDOWS:
+        if job is not None:
+            job.kill()
+        else:
+            try:
+                await asyncio.to_thread(subprocess.run, ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                        capture_output=True, timeout=15)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
 
 
 def available_modules() -> list[str]:
@@ -139,18 +224,30 @@ async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: i
     started = time.time()
 
     prelude = PRELUDE
+    if not allow_network and not sandbox_available():
+        prelude += NET_GUARD
     pipes: tuple[int, int, int, int] | None = None
     extra_args: list[str] = []
     pass_fds: tuple[int, ...] = ()
+    win_handles: list[int] = []
     if bridge is not None:
         child_out_r, child_out_w = os.pipe()
         child_in_r, child_in_w = os.pipe()
-        for fd in (child_out_w, child_in_r):
-            os.set_inheritable(fd, True)
         pipes = (child_out_r, child_out_w, child_in_r, child_in_w)
-        pass_fds = (child_out_w, child_in_r)
-        extra_args = [str(child_out_w), str(child_in_r)]
-        prelude = PRELUDE + BRIDGE_PRELUDE + _wrappers(bridge_tools or [])
+        if WINDOWS:
+            # A file descriptor number means nothing in another Windows process: the child
+            # gets the pipes' OS handles, inherited explicitly, and reopens them as fds.
+            import msvcrt
+            win_handles = [msvcrt.get_osfhandle(child_out_w), msvcrt.get_osfhandle(child_in_r)]
+            for handle in win_handles:
+                os.set_handle_inheritable(handle, True)
+            extra_args = [str(h) for h in win_handles]
+        else:
+            for fd in (child_out_w, child_in_r):
+                os.set_inheritable(fd, True)
+            pass_fds = (child_out_w, child_in_r)
+            extra_args = [str(child_out_w), str(child_in_r)]
+        prelude = prelude + BRIDGE_PRELUDE + _wrappers(bridge_tools or [])
 
     # `from __future__` must be the first statement in a file, and the prelude is now in
     # front of it. Hoisting is the fix; the alternative is a SyntaxError pointing at a line
@@ -161,27 +258,54 @@ async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: i
     future, body = _hoist_future(code)
     source = future + prelude + body
     offset = source[:len(future) + len(prelude)].count("\n")
-    argv = [sys.executable, "-I", "-u", "-c", source, *extra_args]
+    # -I isolates the child from PYTHON* variables, PYTHONIOENCODING included — so UTF-8 is
+    # asked for with -X utf8, which -I does not strip. Without it a Windows child prints in
+    # cp1252 and every accent in a result arrives broken.
+    base = [sys.executable, "-I", "-X", "utf8", "-u"]
+    script: Path | None = None
+    if WINDOWS:
+        # A Windows command line stops at 32 767 characters; prelude, bridge and code pass
+        # that quickly. The source goes in a file, removed once the run ends.
+        script = workspace / ".run" / f"{uuid.uuid4().hex}.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(source, encoding="utf-8")
+        argv = [*base, str(script), *extra_args]
+    else:
+        argv = [*base, "-c", source, *extra_args]
     if sandbox_available() and not allow_network:
         profile = workspace / ".sandbox.sb"
-        profile.write_text(_profile(workspace.resolve()))
+        profile.write_text(_profile(workspace.resolve()), encoding="utf-8")
         argv = [SANDBOX, "-f", str(profile), *argv]
+    options: dict = {"stdout": asyncio.subprocess.PIPE, "stderr": asyncio.subprocess.PIPE,
+                     "cwd": str(workspace), "env": _child_env(workspace)}
+    if WINDOWS:
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        if win_handles:
+            startup = subprocess.STARTUPINFO()
+            startup.lpAttributeList = {"handle_list": win_handles}
+            options["startupinfo"] = startup
+    else:
+        options["preexec_fn"] = _limits(memory_mb, timeout_s)
+        options["pass_fds"] = pass_fds
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(workspace),
-            preexec_fn=_limits(memory_mb, timeout_s),
-            pass_fds=pass_fds,
-            env={"PATH": os.environ.get("PATH", ""), "HOME": str(workspace),
-                 "PYTHONPATH": "", "TMPDIR": str(workspace),
-                 "MPLBACKEND": "Agg", "LC_ALL": "C.UTF-8", "PYTHONIOENCODING": "utf-8"},
-        )
+        proc = await asyncio.create_subprocess_exec(*argv, **options)
+    except NotImplementedError:
+        for fd in (pipes or ()):
+            _close(fd)
+        _remove(script)
+        return {"ok": False, "error": "This server's event loop cannot start processes. On Windows, "
+                                      "start the API without --reload (see README → Windows)."}
     except OSError as exc:
         for fd in (pipes or ()):
             _close(fd)
+        _remove(script)
         return {"ok": False, "error": f"Could not start a Python process: {exc}"}
+
+    # Windows: the memory, CPU and process ceilings `_limits` sets on POSIX, as a job object.
+    job = None
+    if WINDOWS:
+        from . import winjob
+        job = winjob.contain(proc.pid, memory_mb=memory_mb, cpu_s=timeout_s)
 
     pump: asyncio.Task | None = None
     bridge_calls: list[str] = []
@@ -194,17 +318,20 @@ async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: i
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except asyncio.TimeoutError:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
+        await _kill_tree(proc, job)
         await proc.wait()
         await _stop(pump, pipes)
+        if job is not None:
+            job.close()
+        _remove(script)
         return {"ok": False, "elapsed_ms": int((time.time() - started) * 1000),
                 "error": f"Timed out after {timeout_s}s and was killed. Make the computation "
                          f"smaller, or do it in steps."}
 
     await _stop(pump, pipes)
+    if job is not None:
+        job.close()   # and with it anything the code left running in the background
+    _remove(script)
     out = stdout.decode("utf-8", errors="replace")
     err = stderr.decode("utf-8", errors="replace")
     elapsed_ms = int((time.time() - started) * 1000)
@@ -218,15 +345,26 @@ async def run_python(code: str, *, workspace: Path, timeout_s: int, memory_mb: i
             detail += ("\n\nThis process runs with the network denied by the kernel and "
                        "writes confined to the workspace. Read data through the connected "
                        "sources' tools and pass it in, or write inside the workspace.")
-        if proc.returncode == -signal.SIGKILL:
+        if not WINDOWS and proc.returncode == -signal.SIGKILL:
             detail = ("killed — most likely it exceeded the memory or CPU ceiling. "
                       + detail)
+        elif "MemoryError" in detail:
+            detail = (f"it ran out of memory — the ceiling is {memory_mb} MB. Load fewer rows or "
+                      f"columns, or aggregate in the source's query. " + detail)
         return {"ok": False, "elapsed_ms": elapsed_ms, "stdout": out, "error": detail,
                 "bridge_calls": bridge_calls}
     return {"ok": True, "elapsed_ms": elapsed_ms, "stdout": out,
             "stderr": err.strip()[-2000:], "returncode": 0,
             "bridge_calls": bridge_calls,
             "sandboxed": sandbox_available() and not allow_network}
+
+
+def _remove(path: Path | None) -> None:
+    if path is not None:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _close(fd: int) -> None:
@@ -290,7 +428,8 @@ async def _serve_bridge(read_fd: int, write_fd: int, bridge, calls: list[str],
 
 
 _FUTURE = re.compile(r"^\s*from\s+__future__\s+import\s+[^\n]+$", re.M)
-_TRACE_LINE = re.compile(r'File "<string>", line (\d+)')
+# `<string>` from `-c`; the script path when the source was written to a file (Windows).
+_TRACE_LINE = re.compile(r'File "(?:<string>|[^"]*[\\/]\.run[\\/][0-9a-f]{32}\.py)", line (\d+)')
 
 
 def _hoist_future(code: str) -> tuple[str, str]:

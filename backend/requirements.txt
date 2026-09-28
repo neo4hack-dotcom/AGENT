@@ -16,3 +16,7 @@ openpyxl>=3.1
 vl-convert-python>=1.7
 reportlab>=4.2
 pyyaml>=6.0
+
+# Windows has no IANA time-zone database of its own: zoneinfo (the Time server, dates)
+# needs it as a package there.
+tzdata>=2024.1; sys_platform == "win32"

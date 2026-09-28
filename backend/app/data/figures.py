@@ -117,7 +117,7 @@ def evidence_texts(scopes: list[list[dict]], workspace=None, extra: list[str] | 
                 for parked in parked_paths:
                     target = workspace / parked
                     if target.is_file() and target.stat().st_size <= 2_000_000:
-                        texts.append(target.read_text(errors="ignore"))
+                        texts.append(target.read_text(encoding="utf-8", errors="ignore"))
     return texts
 
 

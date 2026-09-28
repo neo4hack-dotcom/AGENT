@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:alt": "AGENT_FRONT_PORT=3042 AGENT_BACKEND_URL=http://localhost:3043 vite",
+    "dev:alt": "vite --mode alt",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

@@ -8,6 +8,7 @@ categorically different from asking the agent a question.
 from __future__ import annotations
 
 import asyncio
+import platform
 import re
 from typing import Any
 
@@ -655,6 +656,10 @@ async def diagnostics() -> dict:
             f"{llm.get('model')} does not support tool calling, so the agent cannot use any "
             f"tool — it can only answer from what it already knows. Pick a model with the "
             f"'tools' capability.")
+    from app.main import platform_problem
+    problem = platform_problem()
+    if problem:
+        warnings.append(problem)
     from app.mcp.catalog import downloads_at_start
     servers = c.store.mcp_servers()
     used = {s.get("command") for s in servers.values() if s.get("enabled", True)}
@@ -680,5 +685,8 @@ async def diagnostics() -> dict:
         "python_modules": available_modules(),
         "workspace": str(c.workspace()),
         "store": str(c.env.db_path),
+        "platform": {"os": platform.system(), "release": platform.release(),
+                     "python": platform.python_version(),
+                     "event_loop": type(asyncio.get_running_loop()).__name__},
         "warnings": warnings,
     }

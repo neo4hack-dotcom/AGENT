@@ -12,6 +12,9 @@ import asyncio
 import ast
 import json
 import os
+import shutil
+import subprocess
+import sys
 import time
 from collections import deque
 from typing import Any
@@ -71,10 +74,20 @@ class StdioTransport(Transport):
     async def start(self) -> None:
         # Inherit the real environment so `npx`/`uvx` resolve node/python the way they do
         # in the user's own shell; explicit vars from the server config win over it.
-        env = {**os.environ, **{k: str(v) for k, v in self.env.items() if v != ""}}
+        # UTF-8 for every child: a Python server on Windows otherwise reads and writes its
+        # pipes in cp1252, and "Société Générale" crosses the wire broken in both directions.
+        env = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **os.environ,
+               **{k: str(v) for k, v in self.env.items() if v != ""}}
+        command = self.command
+        options: dict = {}
+        if sys.platform == "win32":
+            # CreateProcess finds `.exe` alone: `npx`, `uvx` and friends are `.cmd` files, so
+            # they are resolved against PATHEXT first. And no console window per server.
+            command = shutil.which(self.command, path=env.get("PATH")) or self.command
+            options["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
             self._proc = await asyncio.create_subprocess_exec(
-                self.command, *self.args,
+                command, *self.args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -83,7 +96,13 @@ class StdioTransport(Transport):
                 # default 64 KiB line limit killed the reader on the first large result and
                 # left the call waiting for its timeout.
                 limit=STDIO_LINE_LIMIT,
+                **options,
             )
+        except NotImplementedError as exc:
+            # A selector event loop cannot spawn processes on Windows — what uvicorn runs
+            # under --reload. Said plainly, with the fix, instead of a bare traceback.
+            raise McpError("This server's event loop cannot start local MCP servers. On Windows, "
+                           "start the API without --reload (start-windows.bat does).") from exc
         except FileNotFoundError as exc:
             # "Install it" is a dead end when the missing command is a launcher nobody
             # installs by that name — uvx ships with uv. Name the real remedy.

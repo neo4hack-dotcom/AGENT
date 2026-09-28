@@ -11,7 +11,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AGENT_", env_file=".env", extra="ignore")
+    # UTF-8 whatever the OS: left to the locale, Windows reads the file as cp1252 and an
+    # accented password in it no longer matches. `-sig` absorbs the BOM some editors add.
+    model_config = SettingsConfigDict(env_prefix="AGENT_", env_file=".env", env_file_encoding="utf-8-sig",
+                                      extra="ignore")
 
     # The air gap. A property of the deployment, set in the environment (AGENT_AIRGAPPED),
     # never a preference the UI can flip: whoever can reach Admin should not be able to

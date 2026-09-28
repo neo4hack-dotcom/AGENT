@@ -1,0 +1,6 @@
+# Windows scripts keep CRLF whatever the checkout platform: cmd.exe misreads labels and
+# blocks in a batch file with bare LF endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf

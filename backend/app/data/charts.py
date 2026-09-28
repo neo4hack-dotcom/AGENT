@@ -739,18 +739,18 @@ class ChartStore:
     def save(self, conversation_id: str, chart_id: str, spec: dict, source: str) -> dict:
         path = self._path(conversation_id, chart_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        record = json.loads(path.read_text()) if path.exists() else {"id": chart_id, "versions": []}
+        record = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"id": chart_id, "versions": []}
         version = {"version": len(record["versions"]) + 1, "spec": spec, "source": source,
                    "created_at": time.time()}
         record["versions"].append(version)
-        path.write_text(json.dumps(record, ensure_ascii=False, default=str))
+        path.write_text(json.dumps(record, ensure_ascii=False, default=str), encoding="utf-8")
         return self._view(chart_id, version)
 
     def latest(self, conversation_id: str, chart_id: str) -> dict | None:
         path = self._path(conversation_id, chart_id.strip())
         if not path.exists():
             return None
-        record = json.loads(path.read_text())
+        record = json.loads(path.read_text(encoding="utf-8"))
         return self._view(record["id"], record["versions"][-1]) if record["versions"] else None
 
     def all_latest(self, conversation_id: str) -> list[dict]:

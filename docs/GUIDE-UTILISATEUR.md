@@ -272,13 +272,16 @@ secrets et la piste d'audit restent actifs dans les deux modes.
 
 ## 10. Conversations, raccourcis, mémoire
 
-| Raccourci | Effet |
-|---|---|
-| **⌘K** (Ctrl+K) | palette : actions, réglages, conversations, recherche dans leur contenu |
-| **⌘⇧K** | historique des conversations |
-| **⌘⇧O** | nouvelle conversation |
-| **⌘,** | administration (si vous y avez accès) |
-| **/** | placer le curseur dans le champ de saisie |
+| Mac | Windows | Effet |
+|---|---|---|
+| **⌘K** | **Ctrl+K** | palette : actions, réglages, conversations, recherche dans leur contenu |
+| **⌘⇧K** | **Ctrl+Maj+K** | historique des conversations |
+| **⌘⇧O** | **Ctrl+Maj+O** | nouvelle conversation |
+| **⌘,** | **Ctrl+,** | administration (si vous y avez accès) |
+| **/** | **/** | placer le curseur dans le champ de saisie |
+
+Partout ailleurs dans ce guide, **⌘** se lit **Ctrl** sous Windows ; l'interface affiche
+d'elle-même la touche de votre clavier.
 
 Une conversation reprend là où vous l'avez laissée, même après un rechargement de la page
 pendant une réponse.
@@ -344,6 +347,11 @@ Ouvrez l'étape citée ([#N]) pour voir la requête et son résultat, ou cliquez
 **Un serveur MCP n'apparaît pas dans le mode direct.**
 Seuls les serveurs **connectés** sont proposés. Leur état et leurs messages d'erreur se lisent
 dans Admin → *MCP servers*.
+
+**Sous Windows : « … event loop cannot start … without --reload »**
+L'API a été lancée avec `--reload`, qui empêche sous Windows de démarrer Python et les
+serveurs MCP locaux. Relancez-la avec `start-windows.bat` (ou `serve-windows.bat`) ; Admin →
+*Diagnostics* → *Platform* doit alors indiquer `ProactorEventLoop`.
 
 **« … is outside the private network »**
 Le déploiement est cloisonné (air-gap) : un modèle, un serveur ou une URL hors du réseau

@@ -22,8 +22,9 @@ covers asking questions, reading the evidence, charts, Excel extracts and PDF re
 
 ## Getting started
 
-Requires **Python 3.12+**, **Ollama** with at least one model that can call tools, and
-**Node 20+** to build the interface (not to run it: production serves the built files).
+Runs on macOS, Linux and [Windows](#windows). Requires **Python 3.12+**, **Ollama** with at
+least one model that can call tools, and **Node 20+** to build the interface (not to run it:
+production serves the built files).
 
 ```bash
 make install
@@ -42,6 +43,37 @@ is no CORS at all:
 ```bash
 make serve
 ```
+
+### Windows
+
+No `make` on Windows: three scripts at the root do the same, by double-click or from `cmd`.
+
+| Script | Does |
+|---|---|
+| `install-windows.bat` | finds Python 3.12+ (`py -3`, then `python`), creates `backend\.venv`, installs both sides, copies `.env.example` to `backend\.env` |
+| `start-windows.bat` | development: the API on `:3041` and the interface on `:3040`, each in its own window |
+| `serve-windows.bat` | production: builds the interface, then one process on `:3041` (`--no-build` skips the build) |
+
+The installer does what long paths on Windows require: npm's cache moves to
+`%SystemDrive%\npm-cache`, and `LongPathsEnabled` is switched on — which needs an
+Administrator prompt once; without it the script says so and carries on. Offline, `pip` and
+`npm` go through the internal mirrors declared in `pip.ini` and `.npmrc`, as on any other
+machine.
+
+What differs from macOS and Linux, and why:
+
+- **The API runs without `--reload`.** On Windows, uvicorn's reloader switches asyncio to
+  the selector loop, which cannot start processes: neither `run_python` nor any local MCP
+  server would. The scripts leave it off; restart the API window after a backend change.
+  Started by hand with `--reload`, the API says so at startup and in *Diagnostics*.
+- **`run_python` ceilings come from a job object** — memory per process, CPU time, 32
+  processes at most, and a kill that reaches everything the code started. The network is
+  refused inside the interpreter rather than by the kernel (see [Human control](#human-control)).
+- **Everything is read and written as UTF-8** — the store, `.env`, exports, and the pipes
+  to every child process — rather than in the console's code page, which would break every
+  accent in a result.
+- `tzdata` is installed for exchange calendars (Windows ships no time-zone database), and
+  `npm run dev:alt` replaces the inline variables `cmd.exe` cannot run.
 
 ### Choosing a model
 
@@ -330,12 +362,14 @@ Built-in tools only ever write inside the workspace, so they are gated in "alway
 alone: asking to approve every `run_python` would make the agent useless exactly when it is
 most useful. A trusted MCP server can be auto-approved, server by server.
 
-`run_python` runs in a separate process with CPU, memory and wall-clock limits. On macOS
-it also runs in a kernel sandbox: no network, writes only in the workspace, and no reads of
-home directories or data folders beyond the workspace — data arrives through the sources,
-never straight off the disk. Elsewhere there is no kernel sandbox, and the code runs with
-this app's own rights: treat it as a guard against runaway and accident there. The switch
-is in *Guardrails*.
+`run_python` runs in a separate process with CPU, memory and wall-clock limits (a job
+object on Windows). On macOS it also runs in a kernel sandbox: no network, writes only in
+the workspace, and no reads of home directories or data folders beyond the workspace — data
+arrives through the sources, never straight off the disk. Elsewhere there is no kernel
+sandbox: the interpreter refuses sockets to anything but loopback, which stops an innocent
+`pd.read_csv("https://…")` but not code set on getting out, and the code runs with this
+app's own rights — treat it as a guard against runaway and accident there. The switch is in
+*Guardrails*.
 
 ---
 
@@ -375,7 +409,7 @@ UI: whoever reaches Admin cannot open a path out.
 | MCP over HTTP | the endpoint must be internal — loopback, a private address, or a suffix in `AGENT_INTERNAL_DOMAINS` — and so must every redirect |
 | MCP over stdio | `npx`/`uvx`/`pip` run offline; internet packages are refused by name; on macOS the process runs in a kernel sandbox allowing loopback only |
 | MCP needing an internal host | a database client (detected from its configuration, or set to *Internal network* in the server form) keeps the network; the enterprise firewall is what holds it inside |
-| `run_python` | kernel sandbox, network denied |
+| `run_python` | macOS: kernel sandbox, network denied. Windows, Linux: sockets refused inside the interpreter except to loopback — a guard, not a sandbox |
 | Tool arguments carrying a URL | refused unless the host is internal; cloud metadata addresses always refused (tools that only draw or write — charts, reports, exports — take URLs as data: nothing they are given is fetched) |
 | The browser | CSP `connect-src 'self'`, self-hosted fonts, no external asset of any kind |
 | Charts rendered server-side | the renderer's URL allowlist is empty |
@@ -570,6 +604,8 @@ to have written now exists with the right content.
   database is needed the day several instances write at once.
 - Outside macOS there is no kernel sandbox for MCP processes: the air gap there rests on
   offline package managers, the checks above and your firewall — and Diagnostics says so.
+- Windows support is written for and checked on macOS, not yet run on a Windows machine:
+  report what breaks there, with *Diagnostics* → *Platform*.
 - Memory recall uses weighted term overlap, not embeddings: inspectable, no second model to
   load, and enough for the handful of durable facts a personal agent accumulates.
 

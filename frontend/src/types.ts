@@ -488,6 +488,7 @@ export interface Diagnostics {
   python_modules: string[];
   workspace: string;
   store: string;
+  platform?: { os: string; release: string; python: string; event_loop: string };
   warnings: string[];
   network?: { airgapped: boolean; internal_domains: string[]; kernel_sandbox: boolean;
               cloud_model_allowed: boolean };

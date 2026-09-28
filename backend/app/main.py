@@ -13,6 +13,7 @@ import base64
 import contextlib
 import hashlib
 import re
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -25,8 +26,31 @@ from app.api.routes import router as api_router
 from app.deps import container as c
 
 
+def platform_problem() -> str:
+    """What about this platform's setup would break the app, said up front — or "".
+
+    On Windows only the proactor event loop can start processes, and every local MCP server
+    and run_python is a process. uvicorn --reload switches to the selector loop; started that
+    way the app boots, then fails on the first tool with an error that names nothing.
+    """
+    if sys.platform == "win32":
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return ""
+        if not isinstance(loop, getattr(asyncio, "ProactorEventLoop", ())):
+            return ("This Windows server runs a selector event loop, which cannot start processes: "
+                    "local MCP servers and run_python will fail. Start the API without --reload "
+                    "(start-windows.bat does).")
+    return ""
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    problem = platform_problem()
+    if problem:
+        # Printed where whoever started the server is looking; also shown in Diagnostics.
+        print(f"[AGENT] {problem}", flush=True)
     await c.store.start_flusher()
     c.workspace()
     if c.settings.mcp_autoconnect:

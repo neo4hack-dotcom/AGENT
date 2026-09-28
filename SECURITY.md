@@ -133,6 +133,13 @@ between looks wrong. A monkeypatched `socket` module would not do; `ctypes` walk
 past it. Verified by trying: sockets, `subprocess curl` and writes outside the workspace all
 fail; pandas, numpy and workspace writes all work.
 
+On Windows and Linux there is no such sandbox, and that is the honest summary: the
+monkeypatched `socket` is what runs there — it turns an accidental `read_csv("https://…")`
+into a clear refusal, and it does not hold against code written to get out. On Windows the
+ceilings come from a job object (memory per process, CPU time, 32 processes, kill of the
+whole tree) instead of rlimits. Where untrusted documents meet `run_python` on those
+platforms, the enterprise firewall is the boundary — or switch the tool off in *Guardrails*.
+
 Reads are fenced as well. Code reads the workspace and the Python installation, and nothing
 under `/Users`, `/tmp`, `/Volumes`, `/opt`, `/srv` or `/data` besides. That closes the way
 around the sources: an agent that knows where a server's SQLite file lives could otherwise

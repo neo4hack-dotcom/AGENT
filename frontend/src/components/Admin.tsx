@@ -19,7 +19,7 @@ import type {
 import { McpLibrary } from './McpLibrary';
 import { SourcesPanel } from './Sources';
 import {
-  Badge, Button, Dot, Empty, Field, IconButton, Input, Switch, cls, useConfirm,
+  Badge, Button, Dot, Empty, Field, IconButton, Input, Switch, cls, shortcut, useConfirm,
   useToast,
 } from './ui';
 
@@ -861,6 +861,10 @@ function DiagnosticsPanel() {
           : 'not loaded right now'}
         extra={`Context window requested: ${data.context_window} tokens`} />
       <Row label="Python modules available" value={data.python_modules.join(', ') || 'standard library only'} tone="good" />
+      {data.platform && (
+        <Row label="Platform" tone={data.platform.os === 'Windows' && !/Proactor/.test(data.platform.event_loop) ? 'warn' : 'good'}
+          value={`${data.platform.os} ${data.platform.release} · Python ${data.platform.python} · ${data.platform.event_loop}`} />
+      )}
       <Row label="Workspace" value={data.workspace} tone="good" />
       <Row label="Store" value={data.store} tone="good" />
     </div>
@@ -953,7 +957,7 @@ function PanelSkeleton() {
 
 export function AdminDoor({ onOpen, warn }: { onOpen: () => void; warn: boolean }) {
   return (
-    <IconButton icon={Settings2} label="Admin (⌘,)" onClick={onOpen}
+    <IconButton icon={Settings2} label={`Admin (${shortcut('mod', ',')})`} onClick={onOpen}
       className={cls(warn && 'text-amber-500 hover:text-amber-600')} />
   );
 }

@@ -92,6 +92,14 @@ class McpServer:
         return {"content": [{"type": "text", "text": text}], "isError": failed}
 
     def run(self) -> None:
+        # UTF-8 on the protocol channel, whatever launched us: on Windows piped stdio is
+        # cp1252 by default, which breaks every accent in either direction; and "\n", not
+        # "\r\n", as the line terminator the protocol specifies.
+        for stream, newline in ((sys.stdin, None), (sys.stdout, "\n"), (sys.stderr, None)):
+            try:
+                stream.reconfigure(encoding="utf-8", **({"newline": newline} if newline else {}))
+            except (AttributeError, ValueError):
+                pass
         routes = {"initialize": self._initialize, "tools/list": self._list_tools,
                   "tools/call": self._call_tool, "ping": lambda _p: {}}
         log(f"{self.title} {self.version} ready on stdio")

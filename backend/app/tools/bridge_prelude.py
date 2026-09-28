@@ -14,7 +14,14 @@ import json as _json
 import os as _os
 import sys as _sys
 
-_W, _R = int(_sys.argv[1]), int(_sys.argv[2])
+if _sys.platform == "win32":
+    # On Windows the parent passes the pipes' OS handles, inherited explicitly; they become
+    # file descriptors here. Elsewhere the numbers are inherited descriptors already.
+    import msvcrt as _msvcrt
+    _W = _msvcrt.open_osfhandle(int(_sys.argv[1]), _os.O_WRONLY)
+    _R = _msvcrt.open_osfhandle(int(_sys.argv[2]), _os.O_RDONLY)
+else:
+    _W, _R = int(_sys.argv[1]), int(_sys.argv[2])
 _buf = b""
 
 

@@ -12,7 +12,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import type { ConversationSummary, SearchHit, Skill } from '../types';
-import { cls } from './ui';
+import { cls, shortcut } from './ui';
 
 export interface Command {
   id: string;
@@ -70,7 +70,7 @@ export function Palette({
   const commands = useMemo<Command[]>(() => {
     const go = (fn: () => void) => () => { onClose(); fn(); };
     const base: Command[] = [
-      { id: 'new', label: 'New chat', group: 'Do', icon: Plus, hint: '⌘⇧O', run: go(onNew) },
+      { id: 'new', label: 'New chat', group: 'Do', icon: Plus, hint: shortcut('mod', 'shift', 'O'), run: go(onNew) },
       { id: 'files', label: 'Workspace files', group: 'Do', icon: FolderOpen, run: go(onArtifacts) },
       { id: 'history', label: 'All conversations', group: 'Do', icon: MessageSquare, run: go(onSidebar) },
       { id: 'theme', label: 'Switch theme', group: 'Do', icon: Sun, run: go(onTheme) },

@@ -17,7 +17,7 @@ import { Composer } from './components/Composer';
 import { ModeSwitch, loadModeChoice, saveModeChoice, type Mode } from './components/ModeSwitch';
 import { Sidebar } from './components/Sidebar';
 import { AssistantTurn, UserTurn, useStickToBottom, type ApprovalRequest } from './components/Thread';
-import { Badge, Dot, cls, useTheme, useToast } from './components/ui';
+import { Badge, Dot, cls, shortcut, useTheme, useToast } from './components/ui';
 import type {
   AskRequest, Block, Bootstrap, FileOut, Conversation, ConversationSummary, Message, PlanStep, StreamEvent, Usage,
 } from './types';
@@ -409,12 +409,12 @@ export default function App() {
 
       <header className={cls('z-20 flex shrink-0 items-center gap-1 px-3 py-2.5 transition-[padding] duration-200',
         sidebar && 'sm:pl-[19rem]')}>
-        <button onClick={() => setPalette(true)} title="Everything (⌘K)"
+        <button onClick={() => setPalette(true)} title={`Everything (${shortcut('mod', 'K')})`}
           className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
           <Command size={15} strokeWidth={1.9} />
         </button>
         {!empty && (
-          <button onClick={newConversation} title="New chat (⌘⇧O)"
+          <button onClick={newConversation} title={`New chat (${shortcut('mod', 'shift', 'O')})`}
             className="focus-ring grid h-8 w-8 place-items-center rounded-lg dimmer transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/[0.07] dark:hover:text-zinc-200">
             <Plus size={16} strokeWidth={1.9} />
           </button>
