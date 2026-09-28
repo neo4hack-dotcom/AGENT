@@ -3,7 +3,12 @@ uvicorn[standard]>=0.32
 pydantic>=2.9
 pydantic-settings>=2.6
 httpx>=0.27
-python-multipart>=0.0.9
+# Floors at the releases that fixed what a server facing a network cares about:
+# Range-header and multipart denial of service (Starlette CVE-2025-62727, CVE-2025-54121;
+# python-multipart CVE-2024-53981) and request smuggling (h11 CVE-2025-43859).
+starlette>=0.49.1
+python-multipart>=0.0.18
+h11>=0.16.0
 
 # Available to the agent's run_python tool. Not needed to boot: the tool reports which
 # of these it actually found, so a lighter install degrades honestly instead of failing
@@ -11,6 +16,9 @@ python-multipart>=0.0.9
 numpy>=1.26
 pandas>=2.2
 openpyxl>=3.1
+# openpyxl parses workbooks through defusedxml when it is installed: an .xlsx is XML, and
+# one from outside must not expand entities into gigabytes or reach for external ones.
+defusedxml>=0.7.1
 
 # Charts rendered off-screen (PDF) and the PDF itself; source models are YAML.
 vl-convert-python>=1.7

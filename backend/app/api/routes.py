@@ -282,7 +282,9 @@ async def artifacts() -> list[dict]:
         if not path.is_file() or path.name.startswith("."):
             continue
         relative = path.relative_to(root)
-        if relative.parts and relative.parts[0] in ("uploads", ".results"):
+        # Hidden folders are the app's own: `.results`, `.run` (run_python's scripts on
+        # Windows), `.mpl` — not the user's files.
+        if relative.parts and (relative.parts[0] == "uploads" or any(p.startswith(".") for p in relative.parts)):
             continue
         stat = path.stat()
         found.append({"path": str(relative), "name": path.name, "bytes": stat.st_size,

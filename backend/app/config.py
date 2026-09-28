@@ -27,7 +27,14 @@ class Settings(BaseSettings):
     allow_cloud_model: bool = False
 
     app_name: str = "AGENT"
+    # Where `python -m app` listens. Loopback by default: reachable from other machines only
+    # when the deployment says so — then with passwords (below) and, ideally, TLS.
+    host: str = "127.0.0.1"
     port: int = 3041
+    # A certificate and its key (PEM) serve the app over HTTPS: passwords and answers then
+    # cross the network encrypted, and the sign-in cookie is marked Secure.
+    tls_cert: str = ""
+    tls_key: str = ""
     db_path: str = "data/agent.json"
     # Memory lives in its own SQLite file: full-text search wants an index, and
     # the transcript store wants to stay a readable JSON document.
@@ -68,6 +75,10 @@ class Settings(BaseSettings):
     # DNS rebinding, where a hostile domain re-resolves to this machine.
     allowed_hosts: str = ""
     session_ttl_s: int = 604800
+    # Loopback is not a sign-in. On a shared machine — Remote Desktop, Citrix, a jump host —
+    # 127.0.0.1 belongs to everyone logged on to it; with this on, a password is asked of
+    # every request, this machine's included.
+    require_signin: bool = False
 
     # --- Agent guardrails: sane defaults, all overridable per deployment ---
     # Tool-calling turns in one answer. 14 was a budget, not a limit, and it cut off the
@@ -97,7 +108,15 @@ class Settings(BaseSettings):
 
     # --- Built-in tools ---
     workspace_dir: str = "data/workspace"   # the only directory file tools may touch
+    # Deployment switches. Off here is off: Admin may turn run_python off, never back on
+    # past what the deployment allows. See "Locking it down" in the README.
     enable_python_tool: bool = True
+    # The bundled Pandas Frames server (dataframes through an expression sandbox). Off: it
+    # leaves the library, cannot be added, and a configured one does not start.
+    enable_pandas: bool = True
+    # Stdio servers other than the ones bundled with this app. Off: Admin cannot start an
+    # arbitrary program — the one thing that makes an admin session a shell on this machine.
+    allow_custom_commands: bool = True
     python_timeout_s: int = 45
     python_memory_mb: int = 2048
 

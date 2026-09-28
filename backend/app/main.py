@@ -24,6 +24,7 @@ from app import security
 from app.api.admin import guarded as admin_guarded, router as admin_router
 from app.api.routes import router as api_router
 from app.deps import container as c
+from app.tools.files import remote_path
 
 
 def platform_problem() -> str:
@@ -53,6 +54,10 @@ async def lifespan(app: FastAPI):
         print(f"[AGENT] {problem}", flush=True)
     await c.store.start_flusher()
     c.workspace()
+    from app import hardening
+    for entry in await asyncio.to_thread(hardening.restrict, c.env):
+        if not entry["private"]:
+            print(f"[AGENT] Not narrowed to this account: {entry['path']} — {entry['detail']}", flush=True)
     if c.settings.mcp_autoconnect:
         # In the background: one slow server must not delay the first page load.
         asyncio.create_task(c.mcp.connect_enabled())
@@ -88,8 +93,9 @@ _HEADERS = {
 
 
 def _csp(script_hashes: list[str]) -> str:
-    # 'unsafe-eval' is Vega's expression compiler; there is no inline script without a hash.
-    scripts = " ".join(["'self'", "'unsafe-eval'", *(f"'sha256-{h}'" for h in script_hashes)])
+    # No 'unsafe-eval': charts run Vega's expression interpreter, not its compiler. No inline
+    # script without a hash.
+    scripts = " ".join(["'self'", *(f"'sha256-{h}'" for h in script_hashes)])
     return ("default-src 'self'; "
             f"script-src {scripts}; "
             "style-src 'self' 'unsafe-inline'; "
@@ -111,6 +117,11 @@ async def guard(request: Request, call_next):
     and someone on another machine must have signed in. See app/security.py.
     """
     path = request.url.path
+    # No URL of this app contains a backslash. On Windows one decoded from %5C turns a
+    # file lookup — static assets, the SPA fallback, a workspace file — into `\\host\share`,
+    # which Windows opens (offering the user's NTLM credentials) before any check refuses it.
+    if "\\" in path or "\x00" in path:
+        return _refuse(400, "Refused: this path is not one this app serves.")
     if not security.host_allowed(c, request.headers.get("host") or ""):
         return _refuse(421, "This host name is not one this app answers to. If it is yours, "
                             "add it to AGENT_ALLOWED_HOSTS.")
@@ -172,6 +183,8 @@ if (STATIC_DIR / "index.html").is_file():
         # returns HTML that fails to parse as JSON three layers up.
         if path.startswith("api/"):
             return JSONResponse({"detail": "not found"}, status_code=404)
+        if remote_path(path):
+            return FileResponse(STATIC_DIR / "index.html")
         candidate = (STATIC_DIR / path).resolve()
         if candidate.is_file() and STATIC_DIR in candidate.parents:
             return FileResponse(candidate)

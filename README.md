@@ -13,7 +13,9 @@ llama.cpp, LocalAI, TGI…), on this machine or on a server inside your network.
 configuration could open are closed where they open: cloud models and model servers outside
 the network are refused, MCP endpoints must be internal, package managers run offline, and on macOS
 every local MCP server runs inside a kernel sandbox that allows the loopback interface and
-nothing else. See [Air-gapped deployment](#air-gapped-deployment).
+nothing else. See [Air-gapped deployment](#air-gapped-deployment), and
+[Locking it down](#locking-it-down) for the switches that remove what a deployment does not
+need — code execution, the pandas server, custom programs, sign-in-free local access.
 
 **Using it rather than running it?** The [user guide](docs/GUIDE-UTILISATEUR.md) (in French)
 covers asking questions, reading the evidence, charts, Excel extracts and PDF reports.
@@ -41,8 +43,12 @@ Production is one process; the backend serves the built SPA from the same origin
 is no CORS at all:
 
 ```bash
-make serve
+make serve          # = build, then `python -m app` in backend/
 ```
+
+`python -m app` reads where to listen from `backend/.env` — `AGENT_HOST` (loopback by
+default), `AGENT_PORT`, and `AGENT_TLS_CERT` / `AGENT_TLS_KEY` for HTTPS — so a deployment
+is described in one file, not split between it and a launch command.
 
 ### Windows
 
@@ -52,7 +58,7 @@ No `make` on Windows: three scripts at the root do the same, by double-click or 
 |---|---|
 | `install-windows.bat` | finds Python 3.12+ (`py -3`, then `python`), creates `backend\.venv`, installs both sides, copies `.env.example` to `backend\.env` |
 | `start-windows.bat` | development: the API on `:3041` and the interface on `:3040`, each in its own window |
-| `serve-windows.bat` | production: builds the interface, then one process on `:3041` (`--no-build` skips the build) |
+| `serve-windows.bat` | production: builds the interface, then one process (`python -m app`: host, port and TLS from `backend\.env`; `--no-build` skips the build) |
 
 The installer does what long paths on Windows require: npm's cache moves to
 `%SystemDrive%\npm-cache`, and `LongPathsEnabled` is switched on — which needs an
@@ -72,8 +78,19 @@ What differs from macOS and Linux, and why:
 - **Everything is read and written as UTF-8** — the store, `.env`, exports, and the pipes
   to every child process — rather than in the console's code page, which would break every
   accent in a result.
-- `tzdata` is installed for exchange calendars (Windows ships no time-zone database), and
-  `npm run dev:alt` replaces the inline variables `cmd.exe` cannot run.
+- **Network paths are refused before they are looked at.** On Windows, merely resolving
+  `\\host\share\file` connects to that host over SMB and offers the user's NTLM
+  credentials — before any check can say no. UNC and device paths (`\\…`, `//…`, `\\?\`,
+  `\\.\`) and alternate data streams (`name:stream`) are therefore refused on the string,
+  in the workspace tools, the bundled Files and Pandas servers, the download routes and any
+  URL containing a backslash; inside `run_python`, `open()` and `os` refuse them too.
+- **The data folder and `backend\.env` are narrowed to the account running the app** at
+  every start (`icacls`, by SID: SYSTEM, Administrators and that account). A folder created
+  under `C:\` otherwise lets every authenticated user of the machine read the conversations.
+- `tzdata` is installed for exchange calendars (Windows ships no time-zone database),
+  `npm run dev:alt` replaces the inline variables `cmd.exe` cannot run, the dev proxy targets
+  `127.0.0.1` (Node may resolve `localhost` to `::1`), and export names avoid the device
+  names Windows reserves (`nul.csv` would be the null device).
 
 ### Choosing a model
 
@@ -383,7 +400,16 @@ app's own rights — treat it as a guard against runaway and accident there. The
 - **Other web pages** open in the same browser cannot use it: requests from another site
   are refused (`Sec-Fetch-Site`, `Origin`), the Host header must name this app (which stops
   DNS rebinding — add your own host names to `AGENT_ALLOWED_HOSTS`), and the page's content
-  security policy lets it load and connect to its own origin only.
+  security policy lets it load and connect to its own origin only — and run no `eval`:
+  charts use Vega's expression interpreter, so a chart spec cannot become code.
+- **A shared machine** — Remote Desktop, Citrix, a jump host — is "this machine" for
+  everyone logged on to it. `AGENT_REQUIRE_SIGNIN=true` ends the implicit trust: a password
+  for every request, loopback included. Diagnostics flags a remote session or a Windows
+  Server edition that runs without it.
+- **Over the network**, set `AGENT_TLS_CERT` and `AGENT_TLS_KEY`: passwords and answers
+  then travel encrypted, and the session cookie is marked Secure. Sign-in failures are
+  counted per client address — the real peer, never a forwarded header a client could
+  choose — and across all addresses at once, and each one is written to the audit log.
 
 ## Admin
 
@@ -409,9 +435,11 @@ UI: whoever reaches Admin cannot open a path out.
 | MCP over HTTP | the endpoint must be internal — loopback, a private address, or a suffix in `AGENT_INTERNAL_DOMAINS` — and so must every redirect |
 | MCP over stdio | `npx`/`uvx`/`pip` run offline; internet packages are refused by name; on macOS the process runs in a kernel sandbox allowing loopback only |
 | MCP needing an internal host | a database client (detected from its configuration, or set to *Internal network* in the server form) keeps the network; the enterprise firewall is what holds it inside |
-| `run_python` | macOS: kernel sandbox, network denied. Windows, Linux: sockets refused inside the interpreter except to loopback — a guard, not a sandbox |
+| `run_python` | macOS: kernel sandbox, network denied. Windows, Linux: sockets refused inside the interpreter except to loopback, and on Windows network file paths too — a guard, not a sandbox (`AGENT_ENABLE_PYTHON_TOOL=false` removes it) |
+| Windows file paths | UNC, WebDAV and device paths refused before resolution, everywhere a path can come from the model or a URL — resolving one would already send credentials out |
+| Secrets in child processes | a stdio server never inherits `AGENT_*` variables or anything named like a credential from the API's environment; what it needs is set in its own configuration |
 | Tool arguments carrying a URL | refused unless the host is internal; cloud metadata addresses always refused (tools that only draw or write — charts, reports, exports — take URLs as data: nothing they are given is fetched) |
-| The browser | CSP `connect-src 'self'`, self-hosted fonts, no external asset of any kind |
+| The browser | CSP `connect-src 'self'`, no `unsafe-eval`, self-hosted fonts, no external asset of any kind |
 | Charts rendered server-side | the renderer's URL allowlist is empty |
 
 **Provisioning offline.** Nothing is downloaded at run time, so everything is installed
@@ -426,6 +454,61 @@ ollama pull gpt-oss:20b                       # on the Ollama host, or import th
 
 `npx -y package` works offline only once the package is in the npm cache or installed
 globally; a server that fails to start says so on its card, with its own stderr.
+
+## Locking it down
+
+Every capability the agent has can be removed from the deployment, in `backend/.env`. These
+are environment settings, not preferences: Admin can turn run_python off, never back on past
+what the environment allows, and cannot touch the others at all. Restart after changing them.
+
+| Setting | Default | Set to close |
+|---|---|---|
+| `AGENT_AIRGAPPED` | `true` | — keep it: models, MCP endpoints and packages stay inside the network |
+| `AGENT_REQUIRE_SIGNIN` | `false` | `true`: no implicit trust for 127.0.0.1 — for shared machines (RDS, Citrix) |
+| `AGENT_ADMIN_PASSWORD` · `AGENT_ACCESS_PASSWORD` | empty | long passwords (Diagnostics warns under 12 characters) |
+| `AGENT_ENABLE_PYTHON_TOOL` | `true` | `false`: the model cannot run code at all |
+| `AGENT_ENABLE_PANDAS` | `true` | `false`: the Pandas Frames server leaves the library, cannot be added, and a configured one does not start |
+| `AGENT_ALLOW_CUSTOM_COMMANDS` | `true` | `false`: only the servers bundled with the app run as processes — Admin cannot launch another program, change a bundled server's interpreter, or set `PYTHONPATH`, `NODE_OPTIONS`, `LD_PRELOAD` and the like on it. HTTP servers inside the network remain |
+| `AGENT_HOST` | `127.0.0.1` | keep loopback unless other machines need it — then with `AGENT_TLS_CERT` / `AGENT_TLS_KEY` |
+
+The strictest profile, for a deployment where documents from outside meet the agent:
+
+```ini
+AGENT_AIRGAPPED=true
+AGENT_REQUIRE_SIGNIN=true
+AGENT_ADMIN_PASSWORD=<long, known to the administrators>
+AGENT_ACCESS_PASSWORD=<long, given to the users>
+AGENT_ENABLE_PYTHON_TOOL=false
+AGENT_ENABLE_PANDAS=false
+AGENT_ALLOW_CUSTOM_COMMANDS=false
+```
+
+What remains is reading through MCP servers you chose, drawing charts and writing extracts
+and reports into the workspace. Whatever the switches, the data folder (conversations,
+memory, audit log, workspace) and `backend/.env` are narrowed at every start to the account
+running the app — owner-only on macOS and Linux; that account, SYSTEM and Administrators on
+Windows. Admin → *Diagnostics* shows each switch as it is enforced,
+and warns about what is open: a shared machine without `AGENT_REQUIRE_SIGNIN`, a network
+listener without TLS, `run_python` without a kernel sandbox, a data folder other accounts
+can read.
+
+**What no setting in an application can promise**, said so it is not assumed: an
+administrator of the machine can read anything the app stores; a model can be wrong or be
+talked into a wrong answer (the trust layer makes that visible, not impossible); and a
+database client MCP server reaches the host it is configured for — the enterprise firewall
+is the boundary there, as for everything outside this process. "100 %" is the firewall, the
+machine's own hardening and these switches together, not any one of them.
+
+**Checking it.** The protections above have tests that run offline, on Windows as elsewhere:
+
+```bash
+cd backend && python -m unittest discover tests
+```
+
+`npm audit` and `pip-audit` found no known vulnerability in the dependencies at the time of
+writing; the floors in `requirements.txt` sit at the releases that fixed the ones a
+network-facing server cares about, and `defusedxml` keeps workbooks from outside from
+expanding XML entities.
 
 ---
 
@@ -599,13 +682,15 @@ to have written now exists with the right content.
 
 - A small model gets things wrong. The guardrails make its mistakes visible and
   recoverable; they do not remove them.
-- `run_python` is not a security sandbox (see above).
+- `run_python` is not a security sandbox (see above) — `AGENT_ENABLE_PYTHON_TOOL=false`
+  where that matters.
 - The JSON store assumes **a single process**. It holds up well for a personal agent; a real
   database is needed the day several instances write at once.
 - Outside macOS there is no kernel sandbox for MCP processes: the air gap there rests on
   offline package managers, the checks above and your firewall — and Diagnostics says so.
 - Windows support is written for and checked on macOS, not yet run on a Windows machine:
-  report what breaks there, with *Diagnostics* → *Platform*.
+  report what breaks there, with *Diagnostics* → *Platform*. The tests in `backend/tests`
+  are the first thing to run there.
 - Memory recall uses weighted term overlap, not embeddings: inspectable, no second model to
   load, and enough for the handful of durable facts a personal agent accumulates.
 

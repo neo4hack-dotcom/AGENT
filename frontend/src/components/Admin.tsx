@@ -440,11 +440,13 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
   const toast = useToast();
   const [prefs, setPrefs] = useState<Record<string, unknown> | null>(null);
   const [overridden, setOverridden] = useState<string[]>([]);
+  const [envDefaults, setEnvDefaults] = useState<Record<string, unknown>>({});
 
   const load = async () => {
     const data = await api.getPrefs();
     setPrefs(data.effective);
     setOverridden(data.overridden);
+    setEnvDefaults(data.env_defaults ?? {});
   };
   useEffect(() => { void load(); }, []);
 
@@ -488,7 +490,10 @@ function GuardrailsPanel({ onChanged }: { onChanged: () => void }) {
       <section className="space-y-2">
         <h3 className="text-xs font-semibold uppercase tracking-wider dim">Capabilities</h3>
         <Switch checked={!!prefs.enable_python_tool} label="Python execution"
-          hint="Separate process, working directory bounded to the workspace, killed past the timeout. This is not a security sandbox: the code runs with this app's own rights."
+          disabled={envDefaults.enable_python_tool === false}
+          hint={envDefaults.enable_python_tool === false
+            ? 'Off for this deployment (AGENT_ENABLE_PYTHON_TOOL=false) — only the environment can turn it back on.'
+            : "Separate process, working directory bounded to the workspace, killed past the timeout. This is not a security sandbox: the code runs with this app's own rights."}
           onChange={(v) => void update({ enable_python_tool: v })} />
       </section>
 
@@ -844,6 +849,7 @@ function DiagnosticsPanel() {
             data.network.internal_domains.length ? `internal domains: ${data.network.internal_domains.join(', ')}` : 'internal = loopback and private addresses',
           ].join(' · ')} />
       )}
+      {data.hardening && <HardeningRows h={data.hardening} />}
       <Row label="Active model" value={data.model.model || '—'}
         tone={data.model.ok ? 'good' : 'bad'} extra={data.model.capabilities.source} />
       <Row label="MCP servers"
@@ -868,6 +874,28 @@ function DiagnosticsPanel() {
       <Row label="Workspace" value={data.workspace} tone="good" />
       <Row label="Store" value={data.store} tone="good" />
     </div>
+  );
+}
+
+/** The deployment switches that bear on what the app can reach and run — see README → Locking it down. */
+function HardeningRows({ h }: { h: NonNullable<Diagnostics['hardening']> }) {
+  const on = (v: boolean) => (v ? 'on' : 'off');
+  return (
+    <>
+      <Row label="Access"
+        tone={h.shared_machine && !h.require_signin ? 'warn' : 'good'}
+        value={h.require_signin ? 'Password for every request, this machine included'
+          : `This machine without sign-in${h.admin_password || h.access_password ? ' · others with a password' : ' · no one else'}`}
+        extra={[`listens on ${h.listens}`, h.listens !== 'this machine' ? (h.tls ? 'HTTPS' : 'plain HTTP') : '',
+          h.shared_machine ? `shared machine: ${h.shared_machine}` : ''].filter(Boolean).join(' · ')} />
+      <Row label="Code execution"
+        tone={h.python_tool && !h.kernel_sandbox ? 'warn' : 'good'}
+        value={`run_python ${on(h.python_tool)}${!h.python_tool_allowed ? ' (locked by the deployment)' : ''} · Pandas Frames ${on(h.pandas)} · custom commands ${h.custom_commands ? 'allowed' : 'locked'}`}
+        extra={h.kernel_sandbox ? 'kernel sandbox: network denied, reads fenced' : 'no kernel sandbox on this OS'} />
+      <Row label="Data at rest" tone={h.data_private ? 'good' : 'warn'}
+        value={h.data_private ? 'Readable by this account only' : 'Not narrowed to this account'}
+        extra={h.data.map((d) => d.path).join(' · ')} />
+    </>
   );
 }
 

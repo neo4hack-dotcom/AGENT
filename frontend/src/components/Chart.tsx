@@ -118,8 +118,10 @@ export function ChartView({ chart }: { chart: ChartOut }) {
           background: dark ? null : '#ffffff00',
           autosize: chart.spec.autosize ?? { type: 'fit-x', contains: 'padding' },
         };
+        // ast: expressions are interpreted, never compiled to JavaScript — a spec written from
+        // data the agent read cannot become code, and the page's CSP needs no 'unsafe-eval'.
         const result = await embed(host.current, spec as never, {
-          actions: false, renderer: 'svg', tooltip: { theme: dark ? 'dark' : 'light' },
+          ast: true, actions: false, renderer: 'svg', tooltip: { theme: dark ? 'dark' : 'light' },
           ...(theme.locale ? { formatLocale: theme.locale.format, timeFormatLocale: theme.locale.time } : {}),
         } as never);
         if (cancelled) { result.finalize(); return; }

@@ -10,7 +10,9 @@ const FRONT_HOST = process.env.AGENT_FRONT_HOST ?? 'localhost';
 export default defineConfig(({ mode }) => {
   const alt = mode === 'alt';
   const FRONT_PORT = Number(process.env.AGENT_FRONT_PORT ?? (alt ? 3042 : 3040));
-  const BACKEND_URL = process.env.AGENT_BACKEND_URL ?? (alt ? 'http://localhost:3043' : 'http://localhost:3041');
+  // 127.0.0.1, not localhost: Node may resolve localhost to ::1 first (Windows does), while
+  // the API listens on IPv4 loopback only — and the proxy then answers "connection refused".
+  const BACKEND_URL = process.env.AGENT_BACKEND_URL ?? (alt ? 'http://127.0.0.1:3043' : 'http://127.0.0.1:3041');
   return {
     plugins: [react()],
     server: {

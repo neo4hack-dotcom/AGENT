@@ -489,6 +489,13 @@ export interface Diagnostics {
   workspace: string;
   store: string;
   platform?: { os: string; release: string; python: string; event_loop: string };
+  hardening?: {
+    airgapped: boolean; kernel_sandbox: boolean; require_signin: boolean;
+    admin_password: boolean; access_password: boolean; listens: string; tls: boolean;
+    python_tool: boolean; python_tool_allowed: boolean; pandas: boolean; custom_commands: boolean;
+    data_private: boolean; data: { path: string; private: boolean; detail: string }[];
+    shared_machine: string;
+  };
   warnings: string[];
   network?: { airgapped: boolean; internal_domains: string[]; kernel_sandbox: boolean;
               cloud_model_allowed: boolean };

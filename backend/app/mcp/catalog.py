@@ -14,6 +14,7 @@ server" form away, over stdio or HTTP, inside the network.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,62 @@ def downloads_at_start(servers: dict[str, dict]) -> list[str]:
 
 
 CATALOG_BY_ID: dict[str, dict[str, Any]] = {entry["id"]: entry for entry in CATALOG}
+
+# Variables that change what an interpreter loads before the server's own code runs. Under
+# AGENT_ALLOW_CUSTOM_COMMANDS=false a bundled server keeps its script, and these would be a
+# way to swap it: PYTHONPATH at a folder the agent can write to, NODE_OPTIONS=--require….
+_LOADER_ENV = re.compile(r"^(PYTHON|LD_|DYLD_|PERL5|NODE_OPTIONS$|NODE_PATH$|PATH$|PATHEXT$|COMSPEC$|"
+                         r"RUBYOPT$|RUBYLIB$|JAVA_TOOL_OPTIONS$|_JAVA_OPTIONS$|JDK_JAVA_OPTIONS$|"
+                         r"BASH_ENV$|ENV$)", re.IGNORECASE)
+
+
+def bundled_folder(server: dict) -> str:
+    """The bundled server a stdio config runs (`files`, `pandas_frames`…), or ""."""
+    args = server.get("args") or []
+    if server.get("transport", "stdio") != "stdio" or not args:
+        return ""
+    try:
+        script = Path(str(args[0])).resolve()
+    except (OSError, ValueError):
+        return ""
+    if script.name == "server.py" and script.parent.parent == BUNDLED.resolve() and script.is_file():
+        return script.parent.name
+    return ""
+
+
+def is_pandas(server: dict) -> bool:
+    return server.get("catalog_id") == "pandas-frames" or bundled_folder(server) == "pandas_frames"
+
+
+def deployment_refusal(server: dict, settings) -> str | None:
+    """Why the deployment's own switches forbid this server, or None. Checked where a server
+    is added, edited and — the one place that cannot be walked around — started."""
+    name = server.get("name") or "This server"
+    if is_pandas(server) and not settings.enable_pandas:
+        return f"{name} is switched off for this deployment (AGENT_ENABLE_PANDAS=false)."
+    if server.get("transport", "stdio") == "stdio" and not settings.allow_custom_commands:
+        if not bundled_folder(server):
+            return (f"{name}: this deployment runs only the servers bundled with the app "
+                    f"(AGENT_ALLOW_CUSTOM_COMMANDS=false), and '{server.get('command') or '?'}' "
+                    f"with these arguments is not one of them. Reach other sources over HTTP.")
+        loaders = sorted(k for k in (server.get("env") or {}) if _LOADER_ENV.match(str(k)))
+        if loaders:
+            return (f"{name}: {', '.join(loaders)} would change what the interpreter loads, which "
+                    f"this deployment does not allow (AGENT_ALLOW_CUSTOM_COMMANDS=false).")
+    return None
+
+
+def launch_command(server: dict, settings) -> str:
+    """The program to start. Locked down, a bundled server always runs on this app's own
+    interpreter — whatever command was saved with it."""
+    if not settings.allow_custom_commands and bundled_folder(server):
+        return PYTHON
+    return str(server.get("command") or "")
+
+
+def visible_catalog(settings) -> list[dict[str, Any]]:
+    """The library as this deployment offers it."""
+    return [entry for entry in CATALOG if entry["id"] != "pandas-frames" or settings.enable_pandas]
 
 CATEGORIES = ["Files", "Data", "Catalog", "Reasoning"]
 

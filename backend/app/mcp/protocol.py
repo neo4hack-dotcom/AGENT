@@ -12,6 +12,7 @@ import asyncio
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,17 @@ from app.mcp.runtimes import install_hint
 
 CLIENT_INFO = {"name": "lumen", "title": "Agent Super-Agent", "version": "1.0.0"}
 CLIENT_CAPABILITIES: dict[str, Any] = {"roots": {"listChanged": False}}
+
+# Inherited variables a server process never gets: this app's own settings (its passwords,
+# its model key) and anything named like a credential. A server that needs one is given it
+# in its own configuration, where it is masked, redacted from replies and scoped to it.
+_WITHHELD = re.compile(r"^AGENT_|PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CREDENTIAL",
+                       re.IGNORECASE)
+
+
+def inherited_env() -> dict[str, str]:
+    """The API's environment minus what a server process has no business seeing."""
+    return {k: v for k, v in os.environ.items() if not _WITHHELD.search(k)}
 
 
 class Transport:
@@ -76,7 +88,7 @@ class StdioTransport(Transport):
         # in the user's own shell; explicit vars from the server config win over it.
         # UTF-8 for every child: a Python server on Windows otherwise reads and writes its
         # pipes in cp1252, and "Société Générale" crosses the wire broken in both directions.
-        env = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **os.environ,
+        env = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **inherited_env(),
                **{k: str(v) for k, v in self.env.items() if v != ""}}
         command = self.command
         options: dict = {}

@@ -7,7 +7,11 @@ after resolving, and checking the string before that is the classic way this goe
 
 from __future__ import annotations
 
+import re
+import sys
 from pathlib import Path
+
+WINDOWS = sys.platform == "win32"
 
 TEXT_SUFFIXES = {".txt", ".md", ".json", ".csv", ".tsv", ".yml", ".yaml", ".py", ".js",
                  ".ts", ".tsx", ".jsx", ".html", ".css", ".sql", ".sh", ".toml", ".ini",
@@ -18,9 +22,37 @@ class OutsideWorkspace(ValueError):
     pass
 
 
+_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def remote_path(raw: str, windows: bool = WINDOWS) -> str:
+    r"""Why this path must not even be looked at, or "".
+
+    On Windows, resolving `\\host\share\x` opens it: the SMB client connects to that host
+    and offers the user's NTLM credentials before any containment check has a chance to say
+    no — a credential leak and a way out of the network, triggered by merely checking a
+    path. So the string is judged first: UNC and device paths (`\\…`, `//…`, `\\?\`,
+    `\\.\`) are refused, and so is any colon but a drive letter's — `name:stream` writes
+    a hidden alternate data stream, `CON:` opens a device.
+    """
+    text = str(raw or "")
+    if "\x00" in text:
+        return "a path cannot contain a NUL character"
+    if not windows:
+        return ""
+    if re.match(r"^[\\/]{2}", text):
+        return "network (UNC) and device paths are refused"
+    if ":" in (text[2:] if _DRIVE.match(text) else text):
+        return "a colon is only allowed after a drive letter (C:\\…)"
+    return ""
+
+
 def resolve(workspace: Path, path: str) -> Path:
     workspace = workspace.resolve()
     raw = (path or "").strip()
+    refused = remote_path(raw)
+    if refused:
+        raise OutsideWorkspace(f"'{path}': {refused}. Files live under {workspace}.")
     # The catalogue advertises the workspace by its full path, so the agent naturally hands
     # that path straight back. Joining it turned it into <workspace>/Users/…/workspace — a
     # directory that does not exist — and the tool answered "no such file" instead of
@@ -102,6 +134,9 @@ def import_file(workspace: Path, source: str, name: str, granted: list[str],
     The source must sit inside a directory the user has explicitly granted to a connected
     server. That is the user's own grant, honoured — not a new privilege.
     """
+    refused = remote_path(source) or remote_path(name)
+    if refused:
+        return {"ok": False, "error": f"'{source}': {refused}."}
     origin = Path(source or "").expanduser()
     if not origin.is_absolute():
         return {"ok": False, "error": f"'{source}' must be an absolute path."}

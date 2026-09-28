@@ -67,7 +67,15 @@ class Memory:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
-        self._db.executescript(SCHEMA)
+        try:
+            self._db.executescript(SCHEMA)
+        except sqlite3.OperationalError as exc:
+            if "fts5" in str(exc).lower():
+                raise RuntimeError(
+                    "This Python's SQLite has no FTS5 full-text search, which memory needs. The "
+                    "python.org installers (Windows, macOS) and Linux distributions include it; "
+                    "install Python 3.12+ from one of those.") from exc
+            raise
         self._db.commit()
         self._migrate_from_json()
 

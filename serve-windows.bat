@@ -1,6 +1,7 @@
 @echo off
 :: AGENT - production sous Windows (equivalent de `make serve`).
-:: Construit l'interface puis sert l'API et l'interface depuis un seul processus sur :3041.
+:: Construit l'interface puis sert l'API et l'interface depuis un seul processus.
+:: Hote, port et TLS viennent de backend\.env (AGENT_HOST, AGENT_PORT, AGENT_TLS_CERT/KEY).
 :: Pas de --reload, pour la meme raison que dans start-windows.bat.
 setlocal EnableExtensions
 cd /d "%~dp0"
@@ -20,6 +21,6 @@ popd
 :run
 set PYTHONUTF8=1
 cd /d "%~dp0backend"
-echo [AGENT] http://localhost:3041   ^(Ctrl+C pour arreter^)
-".venv\Scripts\python.exe" -m uvicorn app.main:app --port 3041
+echo [AGENT] Ctrl+C pour arreter.
+".venv\Scripts\python.exe" -m app
 endlocal
