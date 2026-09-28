@@ -172,6 +172,9 @@ export const api = {
     request<{ ok: boolean; text: string; error: string; ms: number; truncated: boolean; redacted: number; tool: string }>(
       `/conversations/${conversationId}/messages/${messageId}/steps/${number}/rerun`,
       { method: 'POST', body: JSON.stringify({ arguments: args }) }),
+  addCheckedQuery: (tool: string, question: string, sql: string) =>
+    request<{ ok: boolean; added: boolean; count: number; source: string }>('/admin/checked-queries',
+      { method: 'POST', body: JSON.stringify({ tool, question, sql }) }),
   pdfUrl: (conversationId: string, messageId: string) =>
     `/api/conversations/${conversationId}/messages/${messageId}/pdf`,
   trailUrl: (conversationId: string, messageId: string, format: 'md' | 'json' = 'md') =>

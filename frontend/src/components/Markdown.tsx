@@ -20,11 +20,56 @@ import { CopyButton, cls } from './ui';
 // punctuation wrapped around a link, which looks like a rendering bug in every answer.
 const INLINE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\n]+\*|~~[^~]+~~|!\[[^\]]*\]\([^)\s]+\)|!\[[^\]]*\](?!\()|\[[^\]]*\]\([^)\s]+\)|[[【]#\d{1,3}[\]】]|【[^】]+】|https?:\/\/[^\s<>()]+)/g;
 
-/** Plain text, with soft line breaks turned into real ones. */
+/** Plain text, with soft line breaks turned into real ones — and each traced figure marked. */
 function withBreaks(text: string, key: string): ReactNode[] {
   const lines = text.split('\n');
-  return lines.flatMap((line, i) =>
-    i === 0 ? [line] : [<br key={`${key}-br${i}`} />, line]);
+  return lines.flatMap((line, i) => {
+    const marked = markFigures(line, `${key}-l${i}`);
+    return i === 0 ? marked : [<br key={`${key}-br${i}`} />, ...marked];
+  });
+}
+
+/** The answer's figures and where each came from. Set per message, like the cite prefix. */
+let figureTraces: { raw: string; refs: string[]; found: boolean; asked?: boolean }[] = [];
+let figurePattern: RegExp | null = null;
+
+function markFigures(line: string, key: string): ReactNode[] {
+  if (!figurePattern || !line) return [line];
+  const parts = line.split(figurePattern);
+  if (parts.length === 1) return [line];
+  return parts.map((part, i) => {
+    const trace = i % 2 === 1 ? figureTraces.find((f) => f.raw === part) : undefined;
+    return trace ? <Figure key={`${key}-f${i}`} trace={trace} /> : part;
+  });
+}
+
+function scrollToStep(ref: string) {
+  const node = document.getElementById(`${citePrefix}${ref.replace(/^#/, '').split(' ')[0]}`);
+  if (!node) return false;
+  for (let parent = node.closest('details'); parent; parent = parent.parentElement?.closest('details') ?? null) {
+    parent.open = true;
+  }
+  node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  node.classList.add('evidence-flash');
+  setTimeout(() => node.classList.remove('evidence-flash'), 1400);
+  return true;
+}
+
+/** A figure the reader can point at: which step returned it — or that none did. */
+function Figure({ trace }: { trace: { raw: string; refs: string[]; found: boolean; asked?: boolean } }) {
+  const title = trace.refs.length ? `From ${trace.refs.join(', ')} — click to see the step`
+    : trace.asked ? 'From your question'
+    : 'Not found in any step\'s result — computed or written by the model: check before use';
+  return (
+    <span title={title}
+      onClick={() => { if (trace.refs[0]) scrollToStep(trace.refs[0]); }}
+      className={cls('underline decoration-dotted underline-offset-[3px]',
+        trace.refs.length ? 'cursor-pointer decoration-brand-500/60 hover:decoration-brand-600'
+          : trace.asked ? 'decoration-zinc-400/60'
+          : 'decoration-amber-500 decoration-2')}>
+      {trace.raw}
+    </span>
+  );
 }
 
 /** Where citations point. Set per message so `#1` in one answer never jumps into another. */
@@ -216,12 +261,20 @@ function splitRow(line: string): string[] {
 // inert text instead of links. They carry no meaning anywhere in an answer.
 const INVISIBLE = /[\u200b\u200c\u200d\u2060\ufeff]/g;
 
-export function Markdown({ text, className, cite }: {
+export function Markdown({ text, className, cite, figures }: {
   text: string; className?: string;
   /** Prefix for citation anchors, unique per message. */
   cite?: string;
+  /** The answer's traced figures (finished answers only). */
+  figures?: { raw: string; refs: string[]; found: boolean; asked?: boolean }[];
 }) {
   citePrefix = cite ?? '';
+  figureTraces = figures ?? [];
+  // Bounded on both sides: a trace for "0,5" must not underline the tail of "10,5".
+  figurePattern = figureTraces.length
+    ? new RegExp(`(?<![\\d.,])(${[...figureTraces].sort((a, b) => b.raw.length - a.raw.length)
+        .map((f) => f.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\d]|[.,]\\d)`)
+    : null;
   const lines = (text || '').replace(INVISIBLE, '').split('\n');
   const blocks: ReactNode[] = [];
   let list: { ordered: boolean; items: string[] } | null = null;

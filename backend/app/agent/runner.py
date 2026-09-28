@@ -443,9 +443,14 @@ _NAME_FILTER = re.compile(r"\b(\w*(?:name|nom|customer|client|company|account|ra
 _VISUAL = re.compile(r"\b(montre|montrez|affiche|graph|graphique|chart|courbe|visuali|"
                      r"évolution|evolution|tendance|trend|répartition|repartition|camembert|"
                      r"donut|histogram|diagramme|barres|plot|show me)")
-_CALENDAR = re.compile(r"(fin de mois|month[- ]?end|ouvr[ée]|f[ée]ri[ée]|holiday|\bt ?\+ ?\d|settlement|"
-                       r"r[èe]glement[- ]livraison|jour de bourse|trading day|business day|jour ouvr|"
-                       r"dernier jour|last day of)")
+_MONTHS = (r"janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[ûu]t|septembre|octobre|novembre|d[ée]cembre|"
+           r"january|february|march|april|may|june|july|august|september|october|november|december")
+# Month-ends, T+n, holidays — and any explicit date: a close "on 1 May" is first a question
+# of whether 1 May was a trading day.
+_CALENDAR = re.compile(rf"(fin de mois|fin (?:{_MONTHS})|end of (?:the )?(?:month|quarter|{_MONTHS})|"
+                       rf"month[- ]?end|ouvr[ée]|f[ée]ri[ée]|holiday|\bt ?\+ ?\d|settlement|"
+                       rf"r[èe]glement[- ]livraison|jour de bourse|trading day|business day|jour ouvr|"
+                       rf"dernier jour|last day of|\b\d{{1,2}}(?:er)? (?:{_MONTHS}) \d{{4}}|\b\d{{4}}-\d{{2}}-\d{{2}}\b)")
 _FILE = re.compile(r"\b(extract|extrait|export|excel|xlsx|csv|télécharg|fichier|pdf|rapport|"
                    r"report|download)")
 
@@ -581,6 +586,7 @@ class AgentRunner:
         try:
             await (self._run_direct(ctx, text, images) if ctx.direct else self._run(ctx, text, images))
             ctx.status = "completed" if not ctx.error else "failed"
+            self._cite_if_uncited(ctx)
         except RunCancelled:
             ctx.status = "cancelled"
             ctx.emit({"type": "status", "phase": "cancelled"})
@@ -741,6 +747,7 @@ class AgentRunner:
             except Exception:  # noqa: BLE001 - provenance must never cost the answer
                 message["lineage"] = {}
             message["checks"] = ctx.checks + lineage.notes_raised(ctx.blocks) + self._figure_check(ctx, answer)
+            message["figures"] = self._figure_trace(ctx, answer)
             if ctx.route_plan:
                 message["route"] = ctx.route_plan
             # What the answer rests on, kept with the answer: which outside sources were
@@ -958,7 +965,15 @@ class AgentRunner:
                    if sid in self.c.store.mcp_servers() and self.c.store.mcp_servers()[sid]["name"] not in names]
         if missing:
             ctx.emit({"type": "notice", "message": f"Not connected, so not available: {', '.join(missing)}."})
-        system = prompts.direct_system(names) + trust.spotlight_notice(ctx.nonce)
+        system = prompts.direct_system(names)
+        try:
+            from app.data.calendars import facts_for
+            facts = facts_for(text)
+        except Exception:  # noqa: BLE001
+            facts = []
+        if facts:
+            system += "\n\nDates in the question, computed (TARGET2):\n" + "\n".join(f"- {f}" for f in facts)
+        system += trust.spotlight_notice(ctx.nonce)
         messages = self._history(ctx.conversation_id, ctx.message_id)
         messages.append({"role": "user", "content": text})
         image_payload = [(i["data"], i.get("mime", "image/png")) for i in images if i.get("data")]
@@ -1093,6 +1108,7 @@ class AgentRunner:
         # schemas, fewer tools in full, older results masked, the middle compacted.
         squeeze = False
         squeezed = False
+        slow_turns = 0
         empty_turns = 0
         tools_used = 0
         pending_hint: str | None = None
@@ -1161,8 +1177,16 @@ class AgentRunner:
                     functions = schemas(offered, True)
                     overhead = (context.text_tokens(system)
                                 + context.text_tokens(json.dumps(functions, default=str)))
+            # Callable from code: what is offered, and every read-only tool of the routed sources
+            # and of the pinned ones. A schema offered costs prompt tokens; a function in the
+            # Python prelude costs none — trimming the first for the window had taken
+            # `get_price_history` out of reach of the very program that needed it.
+            reachable = {t["qualified_name"] for t in mcp_tools if not t.get("write") and (
+                (routed and (t.get("server_slug") or t["server_name"]) in routed)
+                or t["qualified_name"] in ctx.pinned_tools)}
             ctx.bridge_names = ([n for n in tools if n != "run_python"]
-                                + [t["qualified_name"] for t in offered])
+                                + list(dict.fromkeys([t["qualified_name"] for t in offered]
+                                                     + sorted(reachable))))
             if omitted and iteration == 0:
                 # Bookkeeping, not news: nothing here asks anything of the reader, and it
                 # fires on nearly every turn once a few servers are connected. `quiet`
@@ -1208,17 +1232,40 @@ class AgentRunner:
                 think_block["text"] += piece
                 ctx.emit({"type": "thinking.delta", "index": think_block["index"], "text": piece})
 
-            result = await self.c.llm.chat(
-                messages,
-                system=system,
-                tools=None if last_turn else functions,
-                temperature=turn_temperature,
-                think=deep_think,
-                on_text=on_text,
-                on_thinking=on_thinking,
-                images=image_payload or None,
-                should_stop=lambda: ctx.cancelled,
-            )
+            try:
+                result = await self.c.llm.chat(
+                    messages,
+                    system=system,
+                    tools=None if last_turn else functions,
+                    temperature=turn_temperature,
+                    think=deep_think,
+                    on_text=on_text,
+                    on_thinking=on_thinking,
+                    images=image_payload or None,
+                    should_stop=lambda: ctx.cancelled,
+                )
+            except NotConfigured as exc:
+                # One slow turn used to fail the whole run — 54 minutes of work, and the
+                # model's half-written plan published as the answer. A turn that times out
+                # is retried once, lighter; a second one ends the loop, and the answer is
+                # composed from what was gathered instead of lost with it.
+                if "did not answer in time" not in str(exc):
+                    raise
+                ctx.check_cancelled()
+                slow_turns += 1
+                ctx.supersede_text()
+                if slow_turns == 1 and not last_turn:
+                    ctx.emit({"type": "notice", "message":
+                              "The model took too long on one turn — retrying it with a smaller "
+                              "prompt and no extended reasoning."})
+                    squeeze, deep_think = True, False
+                    continue
+                if tools_used:
+                    ctx.emit({"type": "notice", "message":
+                              "The model is too slow to continue — answering from the results "
+                              "gathered so far."})
+                    break
+                raise
             ctx.check_cancelled()
             image_payload = []  # attachments belong to the first turn only
             deep_think = False   # re-enabled below only when something actually goes wrong
@@ -1360,11 +1407,20 @@ class AgentRunner:
                                        "detail": str(gap.get("missing") or "")[:300]
                                                  + (f" → ran {gap['tool']}" if gap.get("tool") else "")})
                     if not gap.get("complete"):
-                        if gap.get("tool"):
-                            await self._run_gap_step(ctx, gap["tool"], gap["arguments"], tools)
+                        step = (await self._run_gap_step(ctx, gap["tool"], gap["arguments"], tools)
+                                if gap.get("tool") else None)
+                        ctx.supersede_text()
+                        if step and not step["ok"] and not last_turn and iteration < settings.max_iterations - 2:
+                            # The critic's step failed — a wrong name, a holiday date. Composing
+                            # now would write "could not be retrieved" over a fixable call; the
+                            # agent gets one more turn, with the failure, to make it.
+                            pending_hint = prompts.note(
+                                f"The final check found a gap and tried {step['ref']} {step['name']}, "
+                                f"which failed: {step['error']} Make the call that closes the gap "
+                                f"correctly (fix the argument or the date), then answer.")
+                            continue
                         # The draft was judged incomplete, so it is a draft: the answer is
                         # composed once, at the end, from every piece of evidence at once.
-                        ctx.supersede_text()
                         must_compose = True
                 if must_compose:
                     ctx.supersede_text()
@@ -1516,6 +1572,13 @@ class AgentRunner:
                 if m.get("role") == "assistant" and m.get("id") != ctx.message_id
                 for b in m.get("blocks") or []]
 
+    def _router_timeout(self) -> float:
+        """How long routing may take. 25 s was set against a hosted model; a local one on a
+        laptop takes that long to read the source map, the router timed out on every
+        question, and the run fell back to the full prompt — slower by far than waiting."""
+        llm_timeout = float(getattr(self.c.settings, "llm_timeout_s", 900) or 900)
+        return max(30.0, min(240.0, llm_timeout / 4))
+
     async def _route(self, ctx: RunContext, question: str, mcp_tools: list[dict]) -> set[str] | None:
         """The sources this question needs, chosen by what they hold — or None to fall back.
 
@@ -1560,9 +1623,14 @@ class AgentRunner:
                 json_schema={"type": "object",
                              "properties": {"sources": {"type": "array", "items": {"type": "string"}},
                                             "reason": {"type": "string"}},
-                             "required": ["sources"]}), timeout=25)
+                             "required": ["sources"]}), timeout=self._router_timeout())
             data = json.loads(result.content or "{}")
-        except Exception:  # noqa: BLE001 - no routing is a slower run, not a failed one
+        except Exception as exc:  # noqa: BLE001 - no routing is a slower run, not a failed one
+            # Said, not swallowed: a router that times out silently leaves every source
+            # described in full on every turn — 7k tokens a local model then re-reads.
+            ctx.emit({"type": "notice", "quiet": True, "message":
+                      f"Source routing skipped ({type(exc).__name__}): every source stays in the "
+                      f"prompt for this question."})
             return None
         picked = data.get("sources") if isinstance(data, dict) else data
         if not isinstance(picked, list):
@@ -1791,10 +1859,19 @@ class AgentRunner:
                              "Written and run by whoever set these sources up. Adapt one of "
                              "these before writing SQL from scratch:\n" + "\n".join(lines))
         if _CALENDAR.search(lowered):
-            parts.append("## Dates in this question are business-day questions\n"
-                         "Month-ends, T+n, holidays, trading days: compute them with "
-                         "`business_days` (TARGET2 by default; UK, US) before querying — "
-                         "a month-end is the last *business* day, and a holiday has no close.")
+            # Computed here, not left to the model: a 4B model answered that 1 May 2026 "is a
+            # Sunday, markets are closed" — it is a Friday, closed for Labour Day, and the
+            # answer the reader needed was the close of 30 April.
+            from app.data.calendars import facts_for
+            try:
+                facts = facts_for(question)
+            except Exception:  # noqa: BLE001 - facts are a help, never a failure
+                facts = []
+            parts.append("## Dates in this question — computed, not remembered\n"
+                         + ("".join(f"- {line}\n" for line in facts) if facts else "")
+                         + "For any other month-end, T+n, holiday or trading-day question, use "
+                           "`business_days` (TARGET2 by default; UK, US). A month-end is the last "
+                           "*business* day; a holiday has no close — give the last close before it.")
         if _VISUAL.search(lowered):
             parts.append("## The reader wants to see this\n"
                          "Draw it with `chart`, from the #ref of the call that returned the rows, "
@@ -1823,6 +1900,48 @@ class AgentRunner:
         return [{"name": "Figures", "result": f"all {len(stated)} found in the results",
                  "detail": "Every figure with decimals or of four digits and more in this answer "
                            "matches a number a step returned (allowing for rounding and units)."}]
+
+    def _cite_if_uncited(self, ctx: RunContext) -> None:
+        """An answer that states figures and cites nothing gets its sources from the trace.
+
+        The rule to cite is the model's to keep, and a small one drops it — M5 had the right
+        trader and the right 41.9 %, computed in a step, and not one [#N] in the text. Which
+        step each figure came from is known here; the line is written from that, not asked
+        for again.
+        """
+        answer_blocks = [b for b in ctx.blocks if b.get("type") == "text" and not b.get("superseded")
+                         and (b.get("text") or "").strip()]
+        if not answer_blocks:
+            return
+        answer = "\n".join(b["text"] for b in answer_blocks)
+        if re.search(r"[\[【]#\d{1,3}[\]】]", answer):
+            return
+        refs = []
+        for trace in self._figure_trace(ctx, answer):
+            for ref in trace.get("refs") or []:
+                label = ref.split(" ")[0]
+                if label not in refs:
+                    refs.append(label)
+        if not refs:
+            return
+        from app.data.report import detect_language
+        colon = " :" if detect_language(answer) == "fr" else ":"      # French typography
+        line = f"\n\n*Sources{colon} {' '.join(f'[{r}]' for r in refs[:8])}*"
+        last = answer_blocks[-1]
+        last["text"] = last["text"].rstrip() + line
+        ctx.emit({"type": "text.delta", "index": last["index"], "text": line})
+
+    def _figure_trace(self, ctx: RunContext, answer: str) -> list[dict]:
+        """Figure → the steps that hold it, for the answer's figures (see figures.trace)."""
+        from app.data import figures as figures_lib
+        try:
+            conv = self.c.store.conversation(ctx.conversation_id) or {}
+            asked = [str(m.get("content") or "") for m in conv.get("messages") or [] if m.get("role") == "user"]
+            earlier = [m.get("blocks") or [] for m in conv.get("messages") or []
+                       if m.get("role") == "assistant" and m.get("id") != ctx.message_id]
+            return figures_lib.trace(answer, [ctx.blocks, *earlier], self.c.workspace(), asked)
+        except Exception:  # noqa: BLE001 - tracing must never cost the answer
+            return []
 
     def _ungrounded_figures(self, ctx: RunContext, answer: str) -> list[str]:
         """Figures the answer states that no result of the conversation holds."""
@@ -1889,8 +2008,28 @@ class AgentRunner:
         if not draft or any(b.get("name") == "ask_user" for b in ctx.blocks if b.get("type") == "tool"):
             return ""
         if not re.search(r"(ne peu[tx]|impossible|pas (possible|disponible)|aucun(e)? .{0,40}(disponible|fourni)|"
-                         r"cannot|can't|not (possible|available)|unable to)", draft[:600], re.I):
+                         r"n'ai pas (les|d'|acc[èe]s|assez)|pas (acc[èe]s|les (informations|donn[ée]es))|"
+                         r"(n'est|ne sont) pas (accessibles?|disponibles?)|manque(nt)? (de|les) donn[ée]es|"
+                         r"cannot|can't|not (possible|available|accessible)|unable to|(do not|don't) have|"
+                         r"no (access|data available))", draft[:800], re.I):
             return ""
+        # The commonest stall of a small model: it read the schema, then declared the data out
+        # of reach — having never run a single query. Name the tool that fetches it.
+        tools = [b for b in ctx.blocks if b.get("type") == "tool"]
+        fetched = any(b.get("ok") and not _EXPLORATION.search(b.get("name") or "") for b in tools)
+        explored = {(b.get("name") or "").split("__")[0] for b in tools
+                    if "__" in (b.get("name") or "") and _EXPLORATION.search(b.get("name") or "")}
+        if not fetched and explored:
+            query_tools = [t["qualified_name"] for t in self.c.mcp.tools()
+                           if (t.get("server_slug") or "") in explored
+                           and re.search(r"(read_query|query|sql|select|fetch|get_rows|search)", t["name"])
+                           and not t.get("write")]
+            if query_tools:
+                ctx.pinned_tools.update(query_tools[:3])
+                return (f"You have only looked at the structure — no data has been fetched yet, so it is "
+                        f"not 'unavailable': it has not been asked for. Query it now with "
+                        f"{' or '.join(f'`{q}`' for q in query_tools[:2])} (a SELECT over the columns you "
+                        f"just saw), then answer from the rows.")
         return ("The draft concludes this cannot be done. Before that: re-read the question against the "
                 "data (a date like 'the day's close' next to a trade means that trade's date; 'at the end "
                 "of the half' is the last date the data covers). If a reasonable reading works, do it. If "
@@ -2108,6 +2247,41 @@ class AgentRunner:
         # unusable at exactly the moment it is being most useful.
         return mode == "always" and bool(spec and spec.write)
 
+    def _typed_data(self, ctx: RunContext, code: str) -> list[str]:
+        """Data-like numbers typed into code that no result holds.
+
+        The figure check reads the answer; this reads the computation's *inputs*. A 4B model
+        asked for VaR usage fetched the right VaR and limits, then typed a limit of 5 800 000
+        into its code where the source said 4 500 000 — the arithmetic was right, the input
+        invented, and its output became "evidence" the answer could cite. A number of five
+        digits or more (not a power of ten), or with two decimals or more, is data; typed
+        without a source, it is refused before it runs. A line marked `# constant` is the
+        analyst's own parameter and is left alone.
+        """
+        from app.data import figures as figures_lib
+        literals: list[tuple[str, float, int]] = []
+        for line in code.splitlines():
+            if re.search(r"#\s*(constant|param|parameter|threshold|seuil|hypoth)", line, re.I):
+                continue
+            body = re.sub(r"(['\"]).*?\1", " ", line.split("#", 1)[0])   # not inside strings
+            for match in re.finditer(r"(?<![\w.])(\d[\d_]*(?:\.\d+)?)(?![\w.])", body):
+                raw = match.group(1).replace("_", "")
+                value = float(raw)
+                decimals = len(raw.split(".")[1]) if "." in raw else 0
+                power_of_ten = value >= 1 and float(f"1e{len(str(int(value))) - 1}") == value
+                if (decimals == 0 and value >= 10000 and not power_of_ten) or (decimals >= 2 and value >= 1):
+                    literals.append((raw, value, decimals))
+        if not literals:
+            return []
+        conv = self.c.store.conversation(ctx.conversation_id) or {}
+        asked = [str(m.get("content") or "") for m in conv.get("messages") or [] if m.get("role") == "user"]
+        earlier = [m.get("blocks") or [] for m in conv.get("messages") or []
+                   if m.get("role") == "assistant" and m.get("id") != ctx.message_id]
+        evidence = figures_lib.evidence_numbers(
+            figures_lib.evidence_texts([ctx.blocks, *earlier], self.c.workspace(), asked))
+        return list(dict.fromkeys(raw for raw, value, decimals in literals
+                                  if not figures_lib._matches(value, decimals, evidence)))
+
     def _fail(self, ctx: RunContext, block: dict, message: str, status: str = "error") -> dict:
         block.update({"status": status, "ok": False, "summary": message[:200], "text": message})
         ctx.emit({"type": "tool.end", "index": block["index"], "id": block["id"], "ok": False,
@@ -2132,6 +2306,15 @@ class AgentRunner:
             return {"ok": True, "error": "",
                     "model_text": cached["text"] + "\n\n[identical call — this is the result "
                                                    "you already received earlier in this run]"}
+        if call.name == "run_python":
+            typed = self._typed_data(ctx, str((call.arguments or {}).get("code") or ""))
+            if typed:
+                return self._fail(ctx, block,
+                    f"Not run: this code types numbers that no result of this conversation contains "
+                    f"({', '.join(typed[:6])}). If they are data, they are wrong or invented — load the "
+                    f"real values instead: rows('#N') gives the rows of result #N as a list of dicts. "
+                    f"If they are genuine constants of the method (a threshold, a day count), name them "
+                    f"in a comment on the same line (# constant) and run again.")
         try:
             if spec is not None:
                 result = await asyncio.wait_for(spec.handler(**(call.arguments or {})),
@@ -2148,6 +2331,30 @@ class AgentRunner:
         except Exception as exc:  # noqa: BLE001 - a broken tool must not end the run
             result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
+        if not result.get("ok") and spec is None:
+            repaired = self._repair_arguments(call, result.get("error") or "")
+            if repaired is not None:
+                # One unknown argument, one required argument missing: the same value under
+                # the name the schema asks for. `instrument_id` for `identifier`, `table` for
+                # `table_name` — a run once ended on exactly that, the critic's own step having
+                # used the wrong name and nobody left to retry it.
+                renamed, fixed_args = repaired
+                try:
+                    retry = await asyncio.wait_for(self.c.mcp.call(call.name, fixed_args),
+                                                   timeout=self.c.settings.tool_timeout_s)
+                except Exception:  # noqa: BLE001 - the original failure stands
+                    retry = {"ok": False}
+                note = f"[argument `{renamed[0]}` was sent as `{renamed[1]}`, the name this tool accepts]"
+                if retry.get("ok"):
+                    call.arguments = fixed_args
+                    block["args"] = fixed_args
+                    result = {**retry, "text": f"{retry.get('text') or ''}\n\n{note}"}
+                elif "error" in retry:
+                    # The renamed call reached the tool and failed on its merits ("no close on
+                    # a holiday"): that is the error worth reading, not the naming one.
+                    call.arguments = fixed_args
+                    block["args"] = fixed_args
+                    result = {**retry, "error": f"{retry.get('error') or 'failed'}\n{note}"}
         elapsed = int((time.time() - started) * 1000)
         ok = bool(result.get("ok"))
         if not ok and spec is None:
@@ -2210,6 +2417,17 @@ class AgentRunner:
         if ok:
             ctx.tool_cache[key] = {"summary": summary, "text": text[:40000]}
             ctx.recent_tools = [call.name, *[t for t in ctx.recent_tools if t != call.name]][:8]
+            if "__" in call.name and _EXPLORATION.search(call.name):
+                # A source whose tables were just listed or described is about to be queried:
+                # keep its query tools on offer. Without routing, the tool selection had filled
+                # its slots with every "desk" tool in the estate — meeting-room desks included —
+                # and the agent described the same three tables nine times with no way to read
+                # a row.
+                slug = call.name.split("__")[0]
+                ctx.pinned_tools.update(
+                    t["qualified_name"] for t in self.c.mcp.tools()
+                    if (t.get("server_slug") or "") == slug and not t.get("write")
+                    and re.search(r"(read_query|query|sql|select|fetch|search)", t["name"]))
         label = block.get("ref", "")
         model_text = (f"[{label}] {model_body}" if ok and label
                       else f"ERROR: {result.get('error', 'failed')}")
@@ -2289,6 +2507,35 @@ class AgentRunner:
         body = self._offloaded(ctx, call, block, cleaned)
         return cleaned, trust.fence(ctx.nonce, origin, body + warning)
 
+    def _parked_summary(self, ctx: RunContext, path: str, body: str) -> str:
+        from app.data.rows import rows_from_text
+        wanted = path.strip().lstrip("./")
+        owner = next((b for scope in [ctx.blocks, *[m for m in self._earlier_blocks_by_message(ctx)]]
+                      for b in scope if b.get("type") == "tool"
+                      and str(b.get("offloaded") or "").lstrip("./") == wanted), None)
+        ref = (owner or {}).get("ref", "")
+        try:
+            rows = rows_from_text(body) or []
+        except Exception:  # noqa: BLE001 - a description is a courtesy, not a parse
+            rows = []
+        shape = ""
+        if rows:
+            columns = list(dict.fromkeys(k for r in rows[:50] for k in r))
+            first = json.dumps(rows[:3], ensure_ascii=False, default=str)[:900]
+            shape = f"{len(rows)} rows; columns: {', '.join(columns[:30])}. First rows: {first}\n"
+        use = (f"`rows('{ref}')` in run_python (a list of dicts — `pd.DataFrame(rows('{ref}'))`), "
+               f"`batch_call(rows_from='{ref}', …)` to call a tool for each row, `export_data(source='{ref}')` "
+               f"for a file, `chart(data='{ref}')` to draw it" if ref else
+               f"run_python on `{path}` (pd.read_json / pd.read_csv), or a dataframe tool loading it")
+        return (f"[{path} is a parked result{f' — the full output of {ref}' if ref else ''}, "
+                f"{len(body):,} characters: too large to read into the conversation, which is why it "
+                f"was parked. Do not read it again. {shape}Work on it with {use}.]")
+
+    def _earlier_blocks_by_message(self, ctx: RunContext) -> list[list[dict]]:
+        conv = self.c.store.conversation(ctx.conversation_id) or {}
+        return [m.get("blocks") or [] for m in reversed(conv.get("messages") or [])
+                if m.get("role") == "assistant" and m.get("id") != ctx.message_id]
+
     def _offloaded(self, ctx: RunContext, call: ToolCall, block: dict, text: str) -> str:
         """Park an oversized result on disk and leave a handle in its place.
 
@@ -2300,6 +2547,13 @@ class AgentRunner:
         # from the excerpt, they never reached the model at all. So the file gets the data,
         # and the notes follow the excerpt.
         body, notes = context.split_notes(text)
+        path = str((call.arguments or {}).get("path") or "")
+        if ".results/" in path and len(body) > 9000:
+            # Reading a parked result back is how it got parked in the first place: parked
+            # again, it became a copy the model read, which was parked again — nine reads of
+            # the same 96 KB in one run, until the time budget ran out. It is described
+            # instead, with the ways to work on it that do not pass it through the context.
+            return self._parked_summary(ctx, path, body) + (f"\n\n{notes}" if notes else "")
         off = context.offload(body, self.c.workspace() / ".results",
                               block.get("id", "x"), call.name)
         if off is None:
@@ -2335,6 +2589,24 @@ class AgentRunner:
                 f"question's date is relative to the records — the day's close of a trade, the end of the "
                 f"period — use the records' own dates instead.")
 
+    def _repair_arguments(self, call: ToolCall, error: str) -> tuple[tuple[str, str], dict] | None:
+        """The call with its one misnamed argument renamed — when the schema leaves no doubt."""
+        if not re.search(r"unexpected keyword|additional propert|unknown (argument|field|parameter)|"
+                         r"not allowed|missing .*required|required property", error, re.I):
+            return None
+        tool = self.c.mcp.resolve(call.name)
+        schema = (tool or {}).get("input_schema") or {}
+        accepted = set((schema.get("properties") or {}).keys())
+        required = set(schema.get("required") or [])
+        args = dict(call.arguments or {})
+        unknown = [k for k in args if accepted and k not in accepted]
+        missing = [k for k in required if k not in args]
+        if len(unknown) != 1 or len(missing) != 1:
+            return None
+        wrong, right = unknown[0], missing[0]
+        args[right] = args.pop(wrong)
+        return (wrong, right), args
+
     def _enrich_error(self, call: ToolCall, result: dict) -> dict:
         """Attach to a failure the one thing that makes the next attempt succeed."""
         today = self._today_note(call)
@@ -2342,6 +2614,17 @@ class AgentRunner:
             result = {**result, "error": f"{result.get('error') or 'failed'}{today}"}
         error = (result.get("error") or "").lower()
         tool = self.c.mcp.resolve(call.name)
+        sql = next((str(v) for k, v in (call.arguments or {}).items()
+                    if k in ("query", "sql", "statement") and isinstance(v, str)), "")
+        if sql and tool is not None:
+            from app.data import sql_dialect
+            conn = self.c.mcp.connections.get(tool["server_id"])
+            info = (conn.snapshot().get("server_info") if conn else {}) or {}
+            dialect = sql_dialect.dialect_of(json.dumps(info), tool.get("server_name", ""),
+                                             tool.get("description", ""), result.get("error") or "")
+            cure = sql_dialect.hint(dialect, sql, result.get("error") or "")
+            if cure:
+                return {**result, "error": f"{result.get('error', '')}\n\n{cure}"}
         if any(hint in error for hint in self._VALIDATION_HINTS):
             if tool is None or not tool.get("input_schema"):
                 return result
@@ -2784,10 +3067,19 @@ class AgentRunner:
                           if b["type"] == "text" and not b.get("superseded"))[:2000]
         readable = [name for name, spec in tools.items() if not spec.write]
         readable += [t["qualified_name"] for t in self.c.mcp.tools() if not t["write"]]
+        # The critic names the next call, dates included: it gets the same computed date
+        # facts as the agent, or it asks for the close of a holiday.
+        try:
+            from app.data.calendars import facts_for
+            dated = "".join(f"- {line}\n" for line in facts_for(goal))
+        except Exception:  # noqa: BLE001
+            dated = ""
         try:
             result = await self.c.fast_llm.chat(
                 [{"role": "user",
-                  "content": f"Question: {goal}\n\nTools you may name: {', '.join(readable)}\n\n"
+                  "content": f"Question: {goal}\n\n"
+                             + (f"Dates in the question (computed):\n{dated}\n" if dated else "")
+                             + f"Tools you may name: {', '.join(readable)}\n\n"
                              f"Evidence so far:\n{evidence}\n\nDraft answer:\n{draft}"}],
                 system=prompts.REFLECT_SYSTEM, temperature=0.0, think=False,
                 json_schema={"type": "object",
@@ -2814,7 +3106,7 @@ class AgentRunner:
         return {"complete": False, "missing": missing, "tool": tool_name, "arguments": arguments}
 
     async def _run_gap_step(self, ctx: RunContext, tool_name: str, arguments: dict,
-                            tools: dict[str, builtin.ToolSpec]) -> None:
+                            tools: dict[str, builtin.ToolSpec]) -> dict:
         call = ToolCall(id=new_id("t"), name=tool_name, arguments=arguments)
         spec = tools.get(tool_name)
         mcp_tool = None if spec else self.c.mcp.resolve(tool_name)
@@ -2827,7 +3119,9 @@ class AgentRunner:
         ctx.emit({"type": "tool.start", "index": block["index"], "id": block["id"],
                   "name": tool_name, "args": arguments, "server": block["server"],
                   "kind": block["kind"], "by": "critic", "ref": block["ref"]})
-        await self._invoke(ctx, call, block, tools)
+        outcome = await self._invoke(ctx, call, block, tools)
+        return {"ok": bool(outcome.get("ok")), "ref": block["ref"], "name": tool_name,
+                "error": str(outcome.get("error") or "")[:600]}
 
     # ------------------------------------------------------------------ closing
     async def _final_answer(self, ctx: RunContext, question: str,

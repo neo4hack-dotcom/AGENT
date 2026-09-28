@@ -422,12 +422,15 @@ def polish(spec: dict, rows: list[dict], fields: dict[str, dict] | None = None,
             d = encoding.get(channel)
             if not isinstance(d, dict) or not (d.get("field") or d.get("aggregate") == "count"):
                 continue
-            key = (d.get("field"), d.get("aggregate"), json.dumps(d.get("timeUnit")), json.dumps(d.get("bin")))
+            # json.dumps throughout: a model writes `"field": ["a", "b"]` or an aggregate object,
+            # and a raw list in a set key crashed the whole chart with "unhashable type".
+            key = tuple(json.dumps(d.get(k), sort_keys=True, default=str)
+                        for k in ("field", "aggregate", "timeUnit", "bin"))
             if key in seen:
                 continue
             seen.add(key)
             entry = {k: d[k] for k in ("field", "type", "aggregate", "timeUnit", "bin") if k in d}
-            info = fields.get(d.get("field") or "", {})
+            info = fields.get(d.get("field") if isinstance(d.get("field"), str) else "", {})
             entry["title"] = d.get("title") or (titled(info) if info else
                                                 ("Count" if d.get("aggregate") == "count" else d.get("field")))
             entry.update(_tooltip_format(info, d, locale))
@@ -675,7 +678,8 @@ async def check_renders(spec: dict, locale: str = "fr-FR") -> None:
     except Exception as exc:  # noqa: BLE001 - vl-convert raises plain exceptions
         text = " ".join(l.strip() for l in str(exc).splitlines() if l.strip())
         # Keep the error, drop the JavaScript stack frames after it.
-        message = re.split(r"\s+at\s+\S*(?:https?://|\()", text)[0][:400] or type(exc).__name__
+        message = re.split(r"\s+at\s+(?:[\w$.<>\[\]]+\s+)?\(?(?:https?://|file://|node:|[\w./-]+:\d+:\d+)",
+                           text)[0][:400] or type(exc).__name__
         raise ChartError(f"Vega-Lite could not draw this spec: {message}") from exc
 
 
@@ -786,3 +790,41 @@ COOKBOOK = """Vega-Lite idioms (field names must be columns of the data):
 - target line: layer {"mark":"rule","encoding":{"y":{"datum":95000}}}.
 - aggregate inside the chart: "transform":[{"aggregate":[{"op":"sum","field":"amount","as":"total"}],"groupby":["region"]}].
 - formats: axis {"format":",.0f"} or {"format":"~s"}; currency labels via "title":"Revenue (EUR)"."""
+
+
+_TIME_KINDS = {"date", "month", "year", "quarter", "week", "datetime", "time"}
+_MEASURE_KINDS = {"count", "currency", "percent", "number", "quantity", "amount", "ratio", "measure"}
+
+
+def default_spec(rows: list[dict]) -> dict | None:
+    """A plain, correct chart for rows whose shape says what to draw — or None.
+
+    For when a model sent a spec that cannot be parsed and time is short: a time column (or
+    a category) on x, the first measure on y, a small category as colour. Line over time,
+    bars otherwise. The rows are the query's; only the drawing is decided here.
+    """
+    from app.data.chart_sense import infer
+    if not rows:
+        return None
+    kinds = infer(rows)
+    columns = list(dict.fromkeys(k for r in rows[:50] for k in r))
+    time = next((c for c in columns if (kinds.get(c) or {}).get("kind") in _TIME_KINDS), None)
+    measures = [c for c in columns if (kinds.get(c) or {}).get("kind") in _MEASURE_KINDS
+                or ((kinds.get(c) or {}).get("max") is not None and (kinds.get(c) or {}).get("kind") != "year")]
+    categories = [c for c in columns if (kinds.get(c) or {}).get("kind") in ("category", "name", "code")
+                  and 1 < int((kinds.get(c) or {}).get("distinct") or 0) <= 12]
+    if not measures:
+        return None
+    y = measures[0]
+    if time:
+        spec = {"mark": {"type": "line", "point": True},
+                "encoding": {"x": {"field": time, "type": "ordinal" if (kinds.get(time) or {}).get("kind") in ("month", "quarter", "year") else "temporal"},
+                             "y": {"field": y, "type": "quantitative"}}}
+        if categories:
+            spec["encoding"]["color"] = {"field": categories[0], "type": "nominal"}
+        return spec
+    label = next((c for c in columns if c not in measures), None)
+    if label is None:
+        return None
+    return {"mark": "bar", "encoding": {"x": {"field": label, "type": "nominal", "sort": "-y"},
+                                        "y": {"field": y, "type": "quantitative"}}}

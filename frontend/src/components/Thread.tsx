@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { adminToken, api } from '../api';
-import type { AskRequest, Block, Message, PlanStep, Usage } from '../types';
+import type { AskRequest, Block, FigureTrace, Message, PlanStep, Usage } from '../types';
 import { ChartView } from './Chart';
 import { DataTable, ResultExport, useResultExport } from './DataTable';
 import { CodeBlock, Markdown } from './Markdown';
@@ -196,6 +196,7 @@ function Rerun({ block, target, onClose }: {
       <div className="flex items-center gap-2">
         <Button size="xs" busy={busy} onClick={() => void run()}>Run</Button>
         {result && <span className="text-2xs dimmer">{result.ok ? `${result.ms} ms` : ''}</span>}
+        {result?.ok && codeKey && <SaveChecked tool={block.name ?? ''} sql={draft} />}
       </div>
       {result && !result.ok && (
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-red-600 dark:text-red-400">{result.error}</pre>
@@ -205,6 +206,48 @@ function Rerun({ block, target, onClose }: {
             name={`${block.name}-rerun`} />
         : <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] dim">{result.text.slice(0, 20000)}</pre>)}
     </div>
+  );
+}
+
+/**
+ * A corrected query, kept as a worked example for its source: the agent reads the checked
+ * queries that resemble a question before writing SQL. Administrators only — the server
+ * refuses everyone else, and says so here.
+ */
+function SaveChecked({ tool, sql }: { tool: string; sql: string }) {
+  const [open, setOpen] = useState(false);
+  const [question, setQuestion] = useState('');
+  const [state, setState] = useState<'' | 'busy' | string>('');
+  const save = async () => {
+    setState('busy');
+    try {
+      const out = await api.addCheckedQuery(tool, question, sql);
+      setState(out.added ? `Saved for ${out.source} (${out.count} checked)` : `Already a checked query of ${out.source}`);
+      setOpen(false);
+    } catch (e) {
+      const message = (e as Error).message;
+      setState(/401|403|admin/i.test(message) ? 'Only an administrator can add checked queries' : message);
+    }
+  };
+  if (!open) {
+    return (
+      <span className="flex items-center gap-2 text-2xs">
+        <button onClick={() => setOpen(true)} title="Keep this query as a worked example the agent reuses for similar questions"
+          className="focus-ring rounded px-1.5 py-0.5 font-medium text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-500/10">
+          Save as checked query
+        </button>
+        {state && state !== 'busy' && <span className="dimmer">{state}</span>}
+      </span>
+    );
+  }
+  return (
+    <span className="flex flex-1 items-center gap-1.5 text-2xs">
+      <input autoFocus value={question} onChange={(e) => setQuestion(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && question.trim().length > 2) void save(); if (e.key === 'Escape') setOpen(false); }}
+        placeholder="The question this query answers" maxLength={300}
+        className="focus-ring min-w-0 flex-1 rounded border bg-transparent px-2 py-1 hairline" />
+      <Button size="xs" busy={state === 'busy'} disabled={question.trim().length < 3} onClick={() => void save()}>Save</Button>
+    </span>
   );
 }
 
@@ -405,7 +448,9 @@ export function ApprovalCard({
 
 /* ---------------------------------------------------------------- message */
 
-function Blocks({ blocks, live, cite }: { blocks: Block[]; live: boolean; cite?: string }) {
+function Blocks({ blocks, live, cite, figures }: {
+  blocks: Block[]; live: boolean; cite?: string; figures?: FigureTrace[];
+}) {
   const lastIndex = blocks.length - 1;
   return (
     <>
@@ -419,7 +464,7 @@ function Blocks({ blocks, live, cite }: { blocks: Block[]; live: boolean; cite?:
         if (!(block.text || '').trim()) return null;
         return (
           <div key={`b${block.index}`} className={cls(block.superseded ? 'hidden' : live && 'animate-fade-in')}>
-            <Markdown text={block.text ?? ''} cite={cite} />
+            <Markdown text={block.text ?? ''} cite={cite} figures={figures} />
           </div>
         );
       })}
@@ -596,7 +641,7 @@ export function AssistantTurn({
     <div className="animate-fade-up">
       <Work message={message} live={!!live} phase={phase} cite={cite} draft={draft}
         log={(notices ?? []).filter((n) => n.quiet).map((n) => n.text)} />
-      <Blocks blocks={answer} live={!!live} cite={cite} />
+      <Blocks blocks={answer} live={!!live} cite={cite} figures={live ? undefined : message.figures} />
 
       {/* Charts and files are part of the answer, not of the work that produced it. */}
       {outputs.map((b) => (b.chart

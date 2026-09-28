@@ -8,6 +8,7 @@ categorically different from asking the agent a question.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -458,6 +459,64 @@ async def put_source(server_id: str, body: SourceBody) -> dict:
     await c.store.save()
     return {**_source_summary(server), "model_yaml": knowledge["model_yaml"],
             "profile": knowledge["profile"], "errors": errors}
+
+
+def _append_checked_query(model_yaml: str, question: str, sql: str) -> str:
+    """The model text with one more checked query — inserted, not re-dumped, so the
+    administrator's comments and layout survive."""
+    import yaml
+    entry = yaml.safe_dump([{"question": question, "sql": sql}], allow_unicode=True, sort_keys=False,
+                           default_style=None, width=1000)
+    lines = model_yaml.rstrip("\n").split("\n") if model_yaml.strip() else []
+    start = next((i for i, line in enumerate(lines) if re.match(r"^verified_queries\s*:", line)), None)
+    if start is None:
+        return "\n".join([*lines, "verified_queries:", *("  " + l for l in entry.rstrip().split("\n"))]) + "\n"
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end][0] in " \t-#"):
+        end += 1
+    item = next((re.match(r"^(\s*)- ", l).group(1) for l in lines[start + 1:end] if re.match(r"^\s*- ", l)), "  ")
+    block = [item + l for l in entry.rstrip().split("\n")]
+    if lines[start].split(":", 1)[1].strip() in ("[]", "~", "null"):
+        lines[start] = "verified_queries:"
+    return "\n".join([*lines[:end], *block, *lines[end:]]) + "\n"
+
+
+class CheckedQueryBody(BaseModel):
+    tool: str = Field(max_length=200)
+    question: str = Field(min_length=3, max_length=300)
+    sql: str = Field(min_length=6, max_length=20_000)
+
+
+@guarded.post("/checked-queries")
+async def add_checked_query(body: CheckedQueryBody) -> dict:
+    """A query the analyst corrected and ran, kept as a worked example for its source.
+
+    The agent reads the checked queries that resemble a question before writing SQL from
+    scratch — the fastest way to teach it a definition ("count trades, not versions") is to
+    show it the query that gets it right. Added to the source's model, where Admin → Data
+    sources shows and edits it like any other.
+    """
+    import yaml
+    tool = c.mcp.resolve(body.tool)
+    if tool is None:
+        raise HTTPException(404, f"No connected tool {body.tool}.")
+    server_id = tool["server_id"]
+    _source_or_404(server_id)
+    knowledge = c.knowledge.get(server_id)
+    model = yaml.safe_load(knowledge.get("model_yaml") or "") or {}
+    if not isinstance(model, dict):
+        raise HTTPException(409, "This source's model is not a mapping; fix it in Admin → Data sources first.")
+    pairs = model.setdefault("verified_queries", []) or []
+    if any(" ".join(str(p.get("sql", "")).split()) == " ".join(body.sql.split()) for p in pairs if isinstance(p, dict)):
+        return {"ok": True, "added": False, "count": len(pairs), "source": tool["server_name"]}
+    updated, errors = c.knowledge.update(
+        server_id, model_yaml=_append_checked_query(knowledge.get("model_yaml") or "", body.question.strip(),
+                                                    body.sql.strip()))
+    if errors:
+        raise HTTPException(400, "; ".join(errors)[:500])
+    await c.store.save()
+    c.audit.record("source.checked_query", server=tool["server_name"], question=body.question[:200])
+    return {"ok": True, "added": True, "count": len(pairs) + 1, "source": tool["server_name"]}
 
 
 @guarded.post("/sources/{server_id}/profile")

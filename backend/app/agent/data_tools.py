@@ -351,15 +351,38 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                       chart_id: str = "", **_: Any) -> dict:
         raw_spec = spec
         spec = _as_obj(spec)
+        defaulted = ""
+        salvaged = False
         if isinstance(raw_spec, str) and raw_spec.strip()[:1] == "{" and not isinstance(spec, dict):
-            # Say what is actually wrong: "must be a Vega-Lite object" sent a model that had
-            # written one — with a stray brace — back to write the same object again.
+            # A complete object followed by debris ("Extra data") is the object: keep it.
+            try:
+                spec, _end = json.JSONDecoder().raw_decode(raw_spec.strip())
+                salvaged = True
+            except ValueError:
+                spec = raw_spec
+        if isinstance(raw_spec, str) and raw_spec.strip()[:1] == "{" and not isinstance(spec, dict):
+            # Unparseable. With rows to draw, a plain chart from their shape beats another
+            # model turn spent rewriting 1 500 characters of JSON — the run that failed this
+            # way had the right monthly counts in hand and ran out of time rewriting the spec.
             try:
                 json.loads(raw_spec)
+                error = "unknown"
             except ValueError as exc:
-                return {"ok": False, "error": f"spec is not valid JSON ({exc}). Send a short spec — "
+                error = str(exc)
+            fallback = None
+            if data not in (None, "", []):
+                try:
+                    fallback = chart_lib.default_spec(resolve(_as_obj(data))[0])
+                except rows_lib.SourceError:
+                    fallback = None
+            if fallback is None:
+                return {"ok": False, "error": f"spec is not valid JSON ({error}). Send a short spec — "
                                               f"'mark' and 'encoding' are enough; the app adds "
                                               f"the theme, sizes, axes and title."}
+            spec = fallback
+            defaulted = (f" The spec sent was not valid JSON ({error}), so this is a default chart "
+                         f"drawn from the rows' shape; revise it with a short spec if it is not the "
+                         f"one the reader asked for.")
         _COMPOSED = ("mark", "layer", "facet", "repeat", "concat", "hconcat", "vconcat")
         if isinstance(spec, dict) and isinstance(spec.get("spec"), dict) \
                 and not any(k in spec for k in _COMPOSED):
@@ -409,11 +432,22 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                                           f"'aggregate' transform) and chart the result."}
         columns = rows_lib.columns_of(rows)
         locale = str(c.get("chart_locale") or "fr-FR")
-        try:
+        async def draw(chart_spec: dict) -> dict:
+            try:
+                return await draw_checked(chart_spec)
+            except chart_lib.ChartError:
+                raise
+            except (TypeError, KeyError, ValueError, AttributeError) as exc:
+                # A spec shaped in a way the polishing did not expect is a bad spec, said as
+                # one — never a Python traceback, and never the end of the chart.
+                raise chart_lib.ChartError(f"The spec could not be read ({type(exc).__name__}: {exc}). "
+                                           f"Send a short one: 'mark' and 'encoding'.") from exc
+
+        async def draw_checked(chart_spec: dict) -> dict:
             # Fields first, on the model's own spec: a column that does not exist is
             # refused before anyone is asked what it means.
-            chart_lib.validate_fields(chart_lib.sanitize(spec), columns)
-            fields, reviewed = await meaning(spec, rows, title, previous)
+            chart_lib.validate_fields(chart_lib.sanitize(chart_spec), columns)
+            fields, reviewed = await meaning(chart_spec, rows, title, previous)
             # The editor's title for a new chart; a revision keeps the one it has unless
             # the analyst gives another.
             if previous:
@@ -421,15 +455,29 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
             else:
                 final_title = (reviewed.get("title") or "").strip()[:140] or title
                 final_subtitle = subtitle or (reviewed.get("subtitle") or "").strip()[:160]
-            full = chart_lib.assemble(spec, rows, final_title, final_subtitle, fields, locale)
+            full = chart_lib.assemble(chart_spec, rows, final_title, final_subtitle, fields, locale)
             chart_lib.label_codes(full, rows, getattr(ctx, "code_names", {}) or {})
             chart_lib.validate_fields(full, columns)
             problem = chart_lib.degenerate(full, rows, fields)
             if problem:
                 raise chart_lib.ChartError(problem)
             await chart_lib.check_renders(full, locale)
+            return full
+
+        try:
+            full = await draw(spec)
         except chart_lib.ChartError as exc:
-            return {"ok": False, "error": str(exc)}
+            # A spec salvaged from broken JSON that still does not draw: the rows' own chart.
+            fallback = chart_lib.default_spec(rows) if salvaged else None
+            if fallback is None:
+                return {"ok": False, "error": str(exc)}
+            try:
+                full = await draw(fallback)
+            except chart_lib.ChartError:
+                return {"ok": False, "error": str(exc)}
+            reason = str(exc).splitlines()[0].split(" at ")[0][:200]
+            defaulted = (f" The spec sent was broken ({reason}); this is a default chart drawn from "
+                         f"the rows' shape — revise it with a short spec if needed.")
         chart_id = chart_id or store.next_id(ctx.conversation_id)
         view = store.save(ctx.conversation_id, chart_id, full, source)
         shape = chart_lib.describe(full, rows)
@@ -439,7 +487,7 @@ def register(tools: dict[str, builtin.ToolSpec], runner, ctx) -> None:
                 "text": (f"Chart {chart_id}{revised} is drawn under your answer: {shape}, rows "
                          f"from {source}. Columns: {', '.join(columns)}. Do not restate its "
                          f"numbers; say in a sentence what it shows. To change it, call chart "
-                         f"with chart_id='{chart_id}' and the full revised spec."),
+                         f"with chart_id='{chart_id}' and the full revised spec.{defaulted}"),
                 "chart": {**view, "typed": typed}}
 
     # ---------------------------------------------------------------- ask_user

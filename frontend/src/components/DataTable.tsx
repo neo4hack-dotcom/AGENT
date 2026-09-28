@@ -278,9 +278,9 @@ export function DataTable({ columns, rows, name, full }: {
               className="w-24 bg-transparent outline-none placeholder:text-zinc-400" />
           </label>
         )}
-        <button onClick={() => setRaw((v) => !v)} title="Show numbers exactly as returned"
+        <button onClick={() => setRaw((v) => !v)} title={raw ? `Group thousands (${numberFormat.format(1234567.5)})` : 'Show numbers exactly as returned'}
           className={cls('focus-ring rounded px-1 hover:text-zinc-700 dark:hover:text-zinc-200', raw && 'text-brand-700 dark:text-brand-300')}>
-          {raw ? 'raw' : numberFormat.format(1234.5)}
+          {raw ? 'formatted numbers' : 'raw numbers'}
         </button>
         <span className="ml-auto" />
         <TableActions columns={columns} rows={shown} name={name} full={full} />

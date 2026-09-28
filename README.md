@@ -139,7 +139,16 @@ will check the figures, not take them on trust:
   Read-only tools only (a tool that changes data stays with the agent, behind its
   approval), the air gap applies to the arguments, secrets are stripped from the result,
   every run is audited, and none of it is added to the answer's evidence.
+- **Save as checked query** (administrators): a query corrected with *Edit & run* is added
+  to its source's model as a worked example — the agent reads the checked queries that
+  resemble a question before writing SQL, so a definition fixed once ("count trades, not
+  versions") stays fixed. Inserted into the model's text, so the administrator's comments
+  and layout survive.
 - **Ask about #N** puts a step's reference in the next question — *"chart #5 by desk"*.
+- **Every figure points to its step.** Figures in an answer are underlined: hover for the
+  step that returned the number, click to scroll to it; one no step returned is underlined
+  in amber — computed or written by the model.
+- A chart's **Data** panel is the same working table: its rows sorted, totalled, copied.
 - **Figures verified**: the line under an answer says whether every figure it states was
   found in a step's result, or which were not (see below).
 
@@ -457,6 +466,63 @@ than an opaque import error.
   masked, and the middle is compacted. A turn cut off anyway is retried once in the smaller
   prompt before the run gives up and composes from what it has. Each turn's usage records
   the split (`context_parts`).
+- **A slow local model degrades, it does not fail.** Timeouts sized for a hosted model
+  broke a laptop one silently: source routing had 25 s, a local model takes longer than
+  that to read the source map, so every question fell back to all eighteen sources
+  described in full — the slowest prompt there is. Routing now gets a quarter of the model
+  timeout, and says so when it is skipped. A turn that times out is retried once with a
+  smaller prompt and no extended reasoning; a second one ends the loop and the answer is
+  composed from what was gathered — where it used to fail the run after 54 minutes and
+  publish the model's half-written plan.
+- **Dates are computed, not remembered.** A 4B model answered that 1 May 2026 "is a
+  Sunday" — a Friday, closed for Labour Day, whose answer was the close of 30 April. Every
+  date a question names now arrives in the prompt with its weekday, whether it is a
+  TARGET2 business day, the business days around it, and for "fin mai 2026" the month's
+  last business day (29 May); `business_days` covers the rest.
+- **Numbers typed into code are checked before it runs.** The answer's figures were
+  checked; the computation's inputs were not — a model typed a VaR limit of 5 800 000
+  where the source said 4 500 000, and the wrong ratio became evidence. `run_python` code
+  whose data-like literals (five digits or more, or two decimals or more) appear in no
+  result is refused with the way to load the real values (`rows('#N')`); a line marked
+  `# constant` is the analyst's parameter.
+- **SQL in the source's dialect.** A syntax error from a source comes back with the fix
+  in its own dialect — SQLite, Oracle, ClickHouse, PostgreSQL, MySQL, SQL Server, told
+  from the server's declared identity: `x::float` → `CAST(x AS REAL)`, `LIMIT n` →
+  `FETCH FIRST n ROWS ONLY`, `DATE_TRUNC` → `strftime` / `TRUNC` / `toStartOfMonth`. The
+  same help reaches the analyst's own *Edit & run*.
+- **One misnamed argument is renamed, not refused.** When a call fails with exactly one
+  unknown argument and exactly one required argument missing — `instrument_id` for
+  `identifier`, `table` for `table_name` — the value is sent under the schema's name and
+  the result says so. A run once ended on exactly that, the critic's own step having used
+  the wrong name.
+- **An answer with figures and no citation gets its sources written.** The trace knows
+  which step returned each figure; when the model forgets every `[#N]`, a *Sources* line
+  is added from it — M5 had the right trader and the right 41.9 %, and cited nothing.
+- **A chart is not lost to its JSON.** A complete spec followed by debris is kept; a spec
+  that cannot be read at all, with rows to draw, becomes a default chart from the rows'
+  shape (time on x, the measure on y, a small category as colour), said to the model so it
+  can revise. M7 had the right monthly counts and ran out of time rewriting 1 500
+  characters of broken JSON. A crash on list-valued fields in a spec (`unhashable type`)
+  is fixed, and Vega errors come back without their JavaScript stack.
+- **Code can call every read-only tool of the routed sources**, not only the ones whose
+  schemas fit in the prompt this turn: a function in the Python prelude costs no tokens.
+- **A parked result is described, not re-read.** Reading a parked 96 KB result back
+  parked the read — a copy the model then read, which was parked in turn: nine reads of the
+  same data in one run, until the time budget ran out. A read of `.results/…` now returns
+  the result's shape (rows, columns, first rows) and the ways to work on it that keep it
+  out of the context: `rows('#4')` in `run_python`, `batch_call(rows_from='#4')`,
+  `export_data(source='#4')`, `chart(data='#4')`.
+- **Looking is not fetching.** A small model lists the tables, describes them, then
+  answers that the data "is not accessible" — having never run a query. A draft that gives
+  up after exploration alone is sent back naming the source's query tool, and a source
+  whose tables were just described keeps its query tools on offer.
+- **A file in the workspace is a snapshot.** A stale `trades.csv` from another conversation
+  was once read in place of the trade store. A data file read from the workspace now comes
+  with its age and a reminder that the source is where current data lives.
+- **A tool that answers "no" is not down.** The loop guard counted three failures of a
+  tool as an outage — including *"VaR is computed at month ends only: …, 2026-05-29"*, the
+  tool telling the model exactly how to call it. The corrected call, with the right date,
+  was then refused. Only timeouts, disconnections, 5xx and rate limits count now.
 - **A small model's formatting slips are repaired, not punished.** Each of these cost a
   local 4B model its chart or its report during the PDF tests, on a call that was right in
   substance:

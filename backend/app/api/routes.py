@@ -94,7 +94,30 @@ async def get_conversation(conv_id: str) -> dict:
                 message["error"] = ("This answer was cut short when the server stopped. "
                                     "Ask again.")
                 c.store.touch()
+    _backfill_figures(conv, active)
     return {**conv, "active_run_id": active}
+
+
+def _backfill_figures(conv: dict, active: str | None) -> None:
+    """Figure traces for answers written before they were recorded — computed once, kept."""
+    from app.data import figures as figures_lib
+    messages = conv.get("messages") or []
+    asked = [str(m.get("content") or "") for m in messages if m.get("role") == "user"]
+    changed = False
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant" or "figures" in message or message.get("status") != "completed":
+            continue
+        if active and index == len(messages) - 1:
+            continue
+        answer = _answer_text(message)
+        scopes = [m.get("blocks") or [] for m in messages[: index + 1] if m.get("role") == "assistant"]
+        try:
+            message["figures"] = figures_lib.trace(answer, list(reversed(scopes)), c.workspace(), asked)
+            changed = True
+        except Exception:  # noqa: BLE001 - a missing trace is a plain answer, nothing worse
+            message["figures"] = []
+    if changed:
+        c.store.touch()
 
 
 class RenameBody(BaseModel):
@@ -437,6 +460,16 @@ async def rerun_step(conv_id: str, message_id: str, number: int, body: RerunBody
     started = _time.time()
     result = await c.mcp.call(tool["qualified_name"], body.arguments)
     text = str(result.get("text") or result.get("error") or "")
+    if not result.get("ok"):
+        # The analyst's own SQL gets the same help the agent's does: the source's dialect.
+        from app.data import sql_dialect
+        sql = next((str(v) for k, v in body.arguments.items() if k in ("query", "sql", "statement")), "")
+        conn = c.mcp.connections.get(tool["server_id"])
+        info = (conn.snapshot().get("server_info") if conn else {}) or {}
+        cure = sql_dialect.hint(sql_dialect.dialect_of(json.dumps(info), tool.get("server_name", ""),
+                                                       tool.get("description", ""), text), sql, text)
+        if cure:
+            text = f"{text}\n\n{cure}"
     text, redacted = trust.redact(text, c.secret_values())
     elapsed = int((_time.time() - started) * 1000)
     c.audit.record("step.rerun", conversation=conv_id, message=message_id, ref=ref,

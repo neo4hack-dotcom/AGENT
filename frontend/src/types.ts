@@ -204,6 +204,8 @@ export interface Message {
   checks?: { name: string; result: string; detail?: string }[];
   /** The method in plain words, written on request from the lineage. */
   method?: { text: string; model?: string; at?: number };
+  /** Each figure the answer states, and the steps whose result holds it. */
+  figures?: FigureTrace[];
   /** 'direct': the model with the chosen servers' tools, no agent layer. */
   mode?: 'agent' | 'direct';
   servers?: string[];
@@ -305,6 +307,13 @@ export interface AdminState {
   local: boolean;
   signed_in?: boolean;
   remote?: 'password' | 'closed';
+}
+
+export interface FigureTrace {
+  raw: string;
+  refs: string[];
+  found: boolean;
+  asked?: boolean;
 }
 
 export interface DirectServer {

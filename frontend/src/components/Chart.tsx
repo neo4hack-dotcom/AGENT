@@ -9,6 +9,7 @@
 // Hovering a mark shows what it is; clicking pins that bubble, so a value can be read, and
 // compared with another, without holding the mouse still.
 
+import { DataTable } from './DataTable';
 import { Code2, Download, Image as ImageIcon, PenLine, Table2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
@@ -183,30 +184,14 @@ export function ChartView({ chart }: { chart: ChartOut }) {
         )}
       </figcaption>
       {panel === 'data' && (
-        <div className="mt-2 max-h-72 overflow-auto rounded-lg border hairline animate-fade-in">
-          <table className="w-full border-collapse text-[11px]">
-            <thead className="sticky top-0 bg-zinc-100/95 dark:bg-zinc-900/95">
-              <tr>{columns.map((c) => (
-                <th key={c} className="whitespace-nowrap border-b px-2.5 py-1.5 text-left font-mono font-semibold hairline dim">{c}</th>
-              ))}</tr>
-            </thead>
-            <tbody>
-              {chart.data.slice(0, 500).map((row, i) => (
-                <tr key={i} className="even:bg-zinc-50/60 dark:even:bg-white/[0.02]">
-                  {columns.map((c) => {
-                    const value = row[c];
-                    return (
-                      <td key={c} className={cls('px-2.5 py-1 font-mono dim',
-                        typeof value === 'number' && 'text-right tabular-nums')}>
-                        {value === null || value === undefined ? '' : typeof value === 'number'
-                          ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(value)}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        // The chart's own rows, as a table an analyst can sort, total and take to Excel.
+        <div className="mt-2 animate-fade-in">
+          <DataTable columns={columns}
+            rows={chart.data.slice(0, 5000).map((row) => columns.map((c) => {
+              const value = row[c];
+              return value === undefined ? null : (value as string | number | boolean | null);
+            }))}
+            name={(chart.title || chart.id).replace(/[^\w.\- ]+/g, '')} />
         </div>
       )}
       {panel === 'spec' && (

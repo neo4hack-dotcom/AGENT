@@ -101,7 +101,13 @@ Ouvrez une étape (clic sur sa ligne) :
   (**⌘/Ctrl+Entrée**), sans passer par l'agent. Seules les sources en lecture le permettent,
   et ces exécutions ne sont pas ajoutées aux preuves de la réponse ;
 - **Ask about #N** insère la référence de l'étape dans votre prochaine question
-  (« trace #5 par desk »).
+  (« trace #5 par desk ») ;
+- **Save as checked query** (administrateur) : une requête corrigée devient un exemple de
+  référence pour sa source, que l'agent réutilisera sur les questions semblables.
+
+**D'où vient ce chiffre ?** Dans une réponse, les chiffres sont soulignés en pointillé :
+survolez-en un pour voir l'étape qui l'a renvoyé, cliquez pour y aller. Un chiffre souligné
+en **orange** ne vient d'aucune étape : il a été calculé ou écrit par le modèle, à vérifier.
 
 Les tableaux écrits par l'agent dans sa réponse ont aussi, au survol, **Copy for Excel** et
 **CSV**.

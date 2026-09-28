@@ -155,8 +155,22 @@ def build_registry(settings, memory, workspace: Path, on_plan,
         result = file_tool.read_file(workspace, path)
         if not result.get("ok"):
             return elsewhere(result)
-        return {"ok": True, "summary": f"{path} — {result['size']} bytes",
-                "text": result["text"]}
+        text = result["text"]
+        # A data file lying in the workspace is a snapshot someone saved, not a source: a
+        # stale trades.csv from another conversation was once read in place of the trade
+        # store and charted as the answer. Its age is stated where the model reads it.
+        if re.search(r"\.(csv|tsv|xlsx?|json|parquet)$", path, re.I) and ".results/" not in path:
+            try:
+                target = file_tool.resolve(workspace, path)
+                saved = datetime.fromtimestamp(target.stat().st_mtime)
+                age_h = (datetime.now() - saved).total_seconds() / 3600
+                if age_h > 1:
+                    text = (f"[{path} is a file saved in the workspace on {saved:%Y-%m-%d %H:%M} "
+                            f"({age_h:.0f} h ago) — a snapshot, not a live source. If the question is "
+                            f"about current data, query the source instead.]\n{text}")
+            except Exception:  # noqa: BLE001 - the note is a courtesy; the read already succeeded
+                pass
+        return {"ok": True, "summary": f"{path} — {result['size']} bytes", "text": text}
 
     async def h_write_file(path: str = "", content: str = "", **_: Any) -> dict:
         result = file_tool.write_file(workspace, path, content)
