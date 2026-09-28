@@ -270,3 +270,71 @@ Derivatives above 70 %" at 66 % (a wrong comparison, which no figure check can s
 an invented 89.3 % (which step 10 now catches). The **PDF** button under an answer builds the same kind of
 document from the stored run without asking the model anything, which is the dependable
 path on hardware like this.
+
+# The CIB analyst on a laptop: four iterations with a local 4B model
+
+Six cases of the CIB bench — F2 (VaR vs limit at a month-end), F4 (a close on a holiday),
+F5 / M10 (DV01, and a +50 bp what-if), M5 (amendment rate by trader), M7 (monthly activity
+charted), M9 (an Excel extract of off-market trades) — run with `qwen3.5:4b` on an 8 GB
+laptop, 18 servers connected, the model partly on CPU: one to three minutes per model
+turn. Each iteration ran on the fixes of the one before; every failure was read call by
+call before anything was changed.
+
+| Case | Baseline | It. 2 | It. 3 | It. 4 | It. 5 |
+|---|---|---|---|---|---|
+| F2 VaR vs limit, "fin mai" | ✗ corrected call blocked by the loop guard | ✓ | ✗ limits retyped wrong in code | ✓ 528 s, 4 calls | — |
+| F4 close on 1 May (holiday) | — | — | ✗ "1 May 2026 is a Sunday" | ✗ holiday found; `instrument_id` for `identifier` | ✗ holiday found; critic asked for the holiday's own close |
+| F5 DV01 by desk | ✓ | ✓ | — | — | — |
+| M5 amendment rate by trader | ✗ wrong rate | ✗ gave up after the schema | ✗ fix written in PostgreSQL | ✗ **41.9 % right**, no citation | ✗ 32.9 % (wrong denominator) — flagged *6 figures unverified* |
+| M7 monthly chart | ✓ | ✗ no query tool offered | ✓ | ✗ right counts, spec not JSON | ✗ chart drawn, versions counted (432) |
+| M9 Excel extract (375 lookups) | ✗ run failed on one slow turn | ✗ parked result re-read 9× | ✗ history tool out of reach of code | ✗ 367 prices fetched, time ran out | — |
+| M10 +50 bp what-if | ✗ invented DV01, gave up | ✓ | ✓ (538 s, from 1 220) | ✓ 552 s | — |
+
+Read case by case rather than as a score: every failure of iterations 1–3 was the app's —
+a guard, a timeout, a lost tool, a re-parked file — and each was removed. By iterations 4–5
+the failures are the model's own reasoning: a denominator, versions counted as trades, a
+date asked for after the right one was known. Those are what the checks make *visible*:
+the wrong M5 rate shipped with "6 of 13 figures not found in the results" under it and the
+figures underlined in amber. A 4B model on a laptop gets F2, F5, M10 right in under ten
+minutes each and M5 right on a good run; M9 (375 lookups joined and exported) remains
+beyond its time budget here.
+
+Fixes after iteration 4, measured in iteration 5 where they applied: a misnamed argument
+is renamed and retried (F4 — then the critic asked for the holiday's own close, so the
+critic now gets the computed date facts, and a failed critic step gives the agent one
+more turn instead of composing); an answer with figures and no citation gets a *Sources*
+line from the trace (M5); a broken chart spec is salvaged or replaced by the rows' own
+chart (M7 — drawn in iteration 5).
+
+What each failure taught, and what changed:
+
+- **The loop guard took a tool's "no" for an outage.** "VaR is computed at month ends
+  only: …, 2026-05-29" three times made the guard refuse the corrected call with the right
+  date. Only timeouts, disconnections, 5xx and rate limits count now.
+- **Routing timed out silently.** 25 s suited a hosted model; the local one needs minutes,
+  so every question fell back to all eighteen sources described in full. Routing now gets a
+  quarter of the model timeout, and says when it is skipped. With routing back, the prompt
+  fell from 11.1k to 8.8k tokens and M10 from 20 to 9 minutes.
+- **One slow turn failed a 54-minute run** and published the model's plan as the answer:
+  a turn that times out is now retried lighter, then the answer is composed from what was
+  gathered.
+- **Mental arithmetic, then invented inputs.** The figure check sent F2's first draft back
+  (ratios computed in the model's head) and the model computed them in `run_python` —
+  then, in the next iteration, typed a wrong limit into that code. Data-like numbers in
+  code that no result holds are now refused before it runs.
+- **Looking is not fetching.** Twice a run described tables and answered that the data was
+  "not accessible". Such a draft is sent back naming the query tool; a described source
+  keeps its query tools on offer; the give-up detector reads "je n'ai pas les
+  informations" and "ne sont pas accessibles".
+- **A parked result read back was parked again** — nine copies of the same 96 KB. It is now
+  described (rows, columns, first rows) with the ways to use it outside the context.
+- **Dates and dialects.** Weekdays and holidays of the dates a question names are computed
+  into the prompt; SQL syntax errors come back with the fix in the source's dialect.
+- **The schema digest cut a column list in half** ("only the field `versio` is visible");
+  exploration steps are now summarised as column lists.
+
+The deterministic parts were checked apart from the model: calendars against known
+dates (Easter, substitute holidays, the risk server's own month-end list), the figure
+check against 93 stored answers (17 flagged — mentally summed totals among them), the
+typed-data guard against the code that failed F2, Excel formats, and the UI features in
+the browser.

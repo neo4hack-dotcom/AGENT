@@ -13,7 +13,9 @@ llama.cpp, LocalAI, TGI…), on this machine or on a server inside your network.
 configuration could open are closed where they open: cloud models and model servers outside
 the network are refused, MCP endpoints must be internal, package managers run offline, and on macOS
 every local MCP server runs inside a kernel sandbox that allows the loopback interface and
-nothing else. See [Air-gapped deployment](#air-gapped-deployment).
+nothing else. See [Air-gapped deployment](#air-gapped-deployment), and
+[Locking it down](#locking-it-down) for the switches that remove what a deployment does not
+need — code execution, the pandas server, custom programs, sign-in-free local access.
 
 **Using it rather than running it?** The [user guide](docs/GUIDE-UTILISATEUR.md) (in French)
 covers asking questions, reading the evidence, charts, Excel extracts and PDF reports.
@@ -22,8 +24,9 @@ covers asking questions, reading the evidence, charts, Excel extracts and PDF re
 
 ## Getting started
 
-Requires **Python 3.12+**, **Ollama** with at least one model that can call tools, and
-**Node 20+** to build the interface (not to run it: production serves the built files).
+Runs on macOS, Linux and [Windows](#windows). Requires **Python 3.12+**, **Ollama** with at
+least one model that can call tools, and **Node 20+** to build the interface (not to run it:
+production serves the built files).
 
 ```bash
 make install
@@ -40,8 +43,54 @@ Production is one process; the backend serves the built SPA from the same origin
 is no CORS at all:
 
 ```bash
-make serve
+make serve          # = build, then `python -m app` in backend/
 ```
+
+`python -m app` reads where to listen from `backend/.env` — `AGENT_HOST` (loopback by
+default), `AGENT_PORT`, and `AGENT_TLS_CERT` / `AGENT_TLS_KEY` for HTTPS — so a deployment
+is described in one file, not split between it and a launch command.
+
+### Windows
+
+No `make` on Windows: three scripts at the root do the same, by double-click or from `cmd`.
+
+| Script | Does |
+|---|---|
+| `install-windows.bat` | finds Python 3.12+ (`py -3`, then `python`), creates `backend\.venv`, installs both sides, copies `.env.example` to `backend\.env` |
+| `start-windows.bat` | development: the API on `:3041` and the interface on `:3040`, each in its own window |
+| `serve-windows.bat` | production: builds the interface, then one process (`python -m app`: host, port and TLS from `backend\.env`; `--no-build` skips the build) |
+
+The installer does what long paths on Windows require: npm's cache moves to
+`%SystemDrive%\npm-cache`, and `LongPathsEnabled` is switched on — which needs an
+Administrator prompt once; without it the script says so and carries on. Offline, `pip` and
+`npm` go through the internal mirrors declared in `pip.ini` and `.npmrc`, as on any other
+machine.
+
+What differs from macOS and Linux, and why:
+
+- **The API runs without `--reload`.** On Windows, uvicorn's reloader switches asyncio to
+  the selector loop, which cannot start processes: neither `run_python` nor any local MCP
+  server would. The scripts leave it off; restart the API window after a backend change.
+  Started by hand with `--reload`, the API says so at startup and in *Diagnostics*.
+- **`run_python` ceilings come from a job object** — memory per process, CPU time, 32
+  processes at most, and a kill that reaches everything the code started. The network is
+  refused inside the interpreter rather than by the kernel (see [Human control](#human-control)).
+- **Everything is read and written as UTF-8** — the store, `.env`, exports, and the pipes
+  to every child process — rather than in the console's code page, which would break every
+  accent in a result.
+- **Network paths are refused before they are looked at.** On Windows, merely resolving
+  `\\host\share\file` connects to that host over SMB and offers the user's NTLM
+  credentials — before any check can say no. UNC and device paths (`\\…`, `//…`, `\\?\`,
+  `\\.\`) and alternate data streams (`name:stream`) are therefore refused on the string,
+  in the workspace tools, the bundled Files and Pandas servers, the download routes and any
+  URL containing a backslash; inside `run_python`, `open()` and `os` refuse them too.
+- **The data folder and `backend\.env` are narrowed to the account running the app** at
+  every start (`icacls`, by SID: SYSTEM, Administrators and that account). A folder created
+  under `C:\` otherwise lets every authenticated user of the machine read the conversations.
+- `tzdata` is installed for exchange calendars (Windows ships no time-zone database),
+  `npm run dev:alt` replaces the inline variables `cmd.exe` cannot run, the dev proxy targets
+  `127.0.0.1` (Node may resolve `localhost` to `::1`), and export names avoid the device
+  names Windows reserves (`nul.csv` would be the null device).
 
 ### Choosing a model
 
@@ -139,7 +188,16 @@ will check the figures, not take them on trust:
   Read-only tools only (a tool that changes data stays with the agent, behind its
   approval), the air gap applies to the arguments, secrets are stripped from the result,
   every run is audited, and none of it is added to the answer's evidence.
+- **Save as checked query** (administrators): a query corrected with *Edit & run* is added
+  to its source's model as a worked example — the agent reads the checked queries that
+  resemble a question before writing SQL, so a definition fixed once ("count trades, not
+  versions") stays fixed. Inserted into the model's text, so the administrator's comments
+  and layout survive.
 - **Ask about #N** puts a step's reference in the next question — *"chart #5 by desk"*.
+- **Every figure points to its step.** Figures in an answer are underlined: hover for the
+  step that returned the number, click to scroll to it; one no step returned is underlined
+  in amber — computed or written by the model.
+- A chart's **Data** panel is the same working table: its rows sorted, totalled, copied.
 - **Figures verified**: the line under an answer says whether every figure it states was
   found in a step's result, or which were not (see below).
 
@@ -321,12 +379,14 @@ Built-in tools only ever write inside the workspace, so they are gated in "alway
 alone: asking to approve every `run_python` would make the agent useless exactly when it is
 most useful. A trusted MCP server can be auto-approved, server by server.
 
-`run_python` runs in a separate process with CPU, memory and wall-clock limits. On macOS
-it also runs in a kernel sandbox: no network, writes only in the workspace, and no reads of
-home directories or data folders beyond the workspace — data arrives through the sources,
-never straight off the disk. Elsewhere there is no kernel sandbox, and the code runs with
-this app's own rights: treat it as a guard against runaway and accident there. The switch
-is in *Guardrails*.
+`run_python` runs in a separate process with CPU, memory and wall-clock limits (a job
+object on Windows). On macOS it also runs in a kernel sandbox: no network, writes only in
+the workspace, and no reads of home directories or data folders beyond the workspace — data
+arrives through the sources, never straight off the disk. Elsewhere there is no kernel
+sandbox: the interpreter refuses sockets to anything but loopback, which stops an innocent
+`pd.read_csv("https://…")` but not code set on getting out, and the code runs with this
+app's own rights — treat it as a guard against runaway and accident there. The switch is in
+*Guardrails*.
 
 ---
 
@@ -340,7 +400,16 @@ is in *Guardrails*.
 - **Other web pages** open in the same browser cannot use it: requests from another site
   are refused (`Sec-Fetch-Site`, `Origin`), the Host header must name this app (which stops
   DNS rebinding — add your own host names to `AGENT_ALLOWED_HOSTS`), and the page's content
-  security policy lets it load and connect to its own origin only.
+  security policy lets it load and connect to its own origin only — and run no `eval`:
+  charts use Vega's expression interpreter, so a chart spec cannot become code.
+- **A shared machine** — Remote Desktop, Citrix, a jump host — is "this machine" for
+  everyone logged on to it. `AGENT_REQUIRE_SIGNIN=true` ends the implicit trust: a password
+  for every request, loopback included. Diagnostics flags a remote session or a Windows
+  Server edition that runs without it.
+- **Over the network**, set `AGENT_TLS_CERT` and `AGENT_TLS_KEY`: passwords and answers
+  then travel encrypted, and the session cookie is marked Secure. Sign-in failures are
+  counted per client address — the real peer, never a forwarded header a client could
+  choose — and across all addresses at once, and each one is written to the audit log.
 
 ## Admin
 
@@ -366,9 +435,11 @@ UI: whoever reaches Admin cannot open a path out.
 | MCP over HTTP | the endpoint must be internal — loopback, a private address, or a suffix in `AGENT_INTERNAL_DOMAINS` — and so must every redirect |
 | MCP over stdio | `npx`/`uvx`/`pip` run offline; internet packages are refused by name; on macOS the process runs in a kernel sandbox allowing loopback only |
 | MCP needing an internal host | a database client (detected from its configuration, or set to *Internal network* in the server form) keeps the network; the enterprise firewall is what holds it inside |
-| `run_python` | kernel sandbox, network denied |
+| `run_python` | macOS: kernel sandbox, network denied. Windows, Linux: sockets refused inside the interpreter except to loopback, and on Windows network file paths too — a guard, not a sandbox (`AGENT_ENABLE_PYTHON_TOOL=false` removes it) |
+| Windows file paths | UNC, WebDAV and device paths refused before resolution, everywhere a path can come from the model or a URL — resolving one would already send credentials out |
+| Secrets in child processes | a stdio server never inherits `AGENT_*` variables or anything named like a credential from the API's environment; what it needs is set in its own configuration |
 | Tool arguments carrying a URL | refused unless the host is internal; cloud metadata addresses always refused (tools that only draw or write — charts, reports, exports — take URLs as data: nothing they are given is fetched) |
-| The browser | CSP `connect-src 'self'`, self-hosted fonts, no external asset of any kind |
+| The browser | CSP `connect-src 'self'`, no `unsafe-eval`, self-hosted fonts, no external asset of any kind |
 | Charts rendered server-side | the renderer's URL allowlist is empty |
 
 **Provisioning offline.** Nothing is downloaded at run time, so everything is installed
@@ -383,6 +454,61 @@ ollama pull gpt-oss:20b                       # on the Ollama host, or import th
 
 `npx -y package` works offline only once the package is in the npm cache or installed
 globally; a server that fails to start says so on its card, with its own stderr.
+
+## Locking it down
+
+Every capability the agent has can be removed from the deployment, in `backend/.env`. These
+are environment settings, not preferences: Admin can turn run_python off, never back on past
+what the environment allows, and cannot touch the others at all. Restart after changing them.
+
+| Setting | Default | Set to close |
+|---|---|---|
+| `AGENT_AIRGAPPED` | `true` | — keep it: models, MCP endpoints and packages stay inside the network |
+| `AGENT_REQUIRE_SIGNIN` | `false` | `true`: no implicit trust for 127.0.0.1 — for shared machines (RDS, Citrix) |
+| `AGENT_ADMIN_PASSWORD` · `AGENT_ACCESS_PASSWORD` | empty | long passwords (Diagnostics warns under 12 characters) |
+| `AGENT_ENABLE_PYTHON_TOOL` | `true` | `false`: the model cannot run code at all |
+| `AGENT_ENABLE_PANDAS` | `true` | `false`: the Pandas Frames server leaves the library, cannot be added, and a configured one does not start |
+| `AGENT_ALLOW_CUSTOM_COMMANDS` | `true` | `false`: only the servers bundled with the app run as processes — Admin cannot launch another program, change a bundled server's interpreter, or set `PYTHONPATH`, `NODE_OPTIONS`, `LD_PRELOAD` and the like on it. HTTP servers inside the network remain |
+| `AGENT_HOST` | `127.0.0.1` | keep loopback unless other machines need it — then with `AGENT_TLS_CERT` / `AGENT_TLS_KEY` |
+
+The strictest profile, for a deployment where documents from outside meet the agent:
+
+```ini
+AGENT_AIRGAPPED=true
+AGENT_REQUIRE_SIGNIN=true
+AGENT_ADMIN_PASSWORD=<long, known to the administrators>
+AGENT_ACCESS_PASSWORD=<long, given to the users>
+AGENT_ENABLE_PYTHON_TOOL=false
+AGENT_ENABLE_PANDAS=false
+AGENT_ALLOW_CUSTOM_COMMANDS=false
+```
+
+What remains is reading through MCP servers you chose, drawing charts and writing extracts
+and reports into the workspace. Whatever the switches, the data folder (conversations,
+memory, audit log, workspace) and `backend/.env` are narrowed at every start to the account
+running the app — owner-only on macOS and Linux; that account, SYSTEM and Administrators on
+Windows. Admin → *Diagnostics* shows each switch as it is enforced,
+and warns about what is open: a shared machine without `AGENT_REQUIRE_SIGNIN`, a network
+listener without TLS, `run_python` without a kernel sandbox, a data folder other accounts
+can read.
+
+**What no setting in an application can promise**, said so it is not assumed: an
+administrator of the machine can read anything the app stores; a model can be wrong or be
+talked into a wrong answer (the trust layer makes that visible, not impossible); and a
+database client MCP server reaches the host it is configured for — the enterprise firewall
+is the boundary there, as for everything outside this process. "100 %" is the firewall, the
+machine's own hardening and these switches together, not any one of them.
+
+**Checking it.** The protections above have tests that run offline, on Windows as elsewhere:
+
+```bash
+cd backend && python -m unittest discover tests
+```
+
+`npm audit` and `pip-audit` found no known vulnerability in the dependencies at the time of
+writing; the floors in `requirements.txt` sit at the releases that fixed the ones a
+network-facing server cares about, and `defusedxml` keeps workbooks from outside from
+expanding XML entities.
 
 ---
 
@@ -457,6 +583,63 @@ than an opaque import error.
   masked, and the middle is compacted. A turn cut off anyway is retried once in the smaller
   prompt before the run gives up and composes from what it has. Each turn's usage records
   the split (`context_parts`).
+- **A slow local model degrades, it does not fail.** Timeouts sized for a hosted model
+  broke a laptop one silently: source routing had 25 s, a local model takes longer than
+  that to read the source map, so every question fell back to all eighteen sources
+  described in full — the slowest prompt there is. Routing now gets a quarter of the model
+  timeout, and says so when it is skipped. A turn that times out is retried once with a
+  smaller prompt and no extended reasoning; a second one ends the loop and the answer is
+  composed from what was gathered — where it used to fail the run after 54 minutes and
+  publish the model's half-written plan.
+- **Dates are computed, not remembered.** A 4B model answered that 1 May 2026 "is a
+  Sunday" — a Friday, closed for Labour Day, whose answer was the close of 30 April. Every
+  date a question names now arrives in the prompt with its weekday, whether it is a
+  TARGET2 business day, the business days around it, and for "fin mai 2026" the month's
+  last business day (29 May); `business_days` covers the rest.
+- **Numbers typed into code are checked before it runs.** The answer's figures were
+  checked; the computation's inputs were not — a model typed a VaR limit of 5 800 000
+  where the source said 4 500 000, and the wrong ratio became evidence. `run_python` code
+  whose data-like literals (five digits or more, or two decimals or more) appear in no
+  result is refused with the way to load the real values (`rows('#N')`); a line marked
+  `# constant` is the analyst's parameter.
+- **SQL in the source's dialect.** A syntax error from a source comes back with the fix
+  in its own dialect — SQLite, Oracle, ClickHouse, PostgreSQL, MySQL, SQL Server, told
+  from the server's declared identity: `x::float` → `CAST(x AS REAL)`, `LIMIT n` →
+  `FETCH FIRST n ROWS ONLY`, `DATE_TRUNC` → `strftime` / `TRUNC` / `toStartOfMonth`. The
+  same help reaches the analyst's own *Edit & run*.
+- **One misnamed argument is renamed, not refused.** When a call fails with exactly one
+  unknown argument and exactly one required argument missing — `instrument_id` for
+  `identifier`, `table` for `table_name` — the value is sent under the schema's name and
+  the result says so. A run once ended on exactly that, the critic's own step having used
+  the wrong name.
+- **An answer with figures and no citation gets its sources written.** The trace knows
+  which step returned each figure; when the model forgets every `[#N]`, a *Sources* line
+  is added from it — M5 had the right trader and the right 41.9 %, and cited nothing.
+- **A chart is not lost to its JSON.** A complete spec followed by debris is kept; a spec
+  that cannot be read at all, with rows to draw, becomes a default chart from the rows'
+  shape (time on x, the measure on y, a small category as colour), said to the model so it
+  can revise. M7 had the right monthly counts and ran out of time rewriting 1 500
+  characters of broken JSON. A crash on list-valued fields in a spec (`unhashable type`)
+  is fixed, and Vega errors come back without their JavaScript stack.
+- **Code can call every read-only tool of the routed sources**, not only the ones whose
+  schemas fit in the prompt this turn: a function in the Python prelude costs no tokens.
+- **A parked result is described, not re-read.** Reading a parked 96 KB result back
+  parked the read — a copy the model then read, which was parked in turn: nine reads of the
+  same data in one run, until the time budget ran out. A read of `.results/…` now returns
+  the result's shape (rows, columns, first rows) and the ways to work on it that keep it
+  out of the context: `rows('#4')` in `run_python`, `batch_call(rows_from='#4')`,
+  `export_data(source='#4')`, `chart(data='#4')`.
+- **Looking is not fetching.** A small model lists the tables, describes them, then
+  answers that the data "is not accessible" — having never run a query. A draft that gives
+  up after exploration alone is sent back naming the source's query tool, and a source
+  whose tables were just described keeps its query tools on offer.
+- **A file in the workspace is a snapshot.** A stale `trades.csv` from another conversation
+  was once read in place of the trade store. A data file read from the workspace now comes
+  with its age and a reminder that the source is where current data lives.
+- **A tool that answers "no" is not down.** The loop guard counted three failures of a
+  tool as an outage — including *"VaR is computed at month ends only: …, 2026-05-29"*, the
+  tool telling the model exactly how to call it. The corrected call, with the right date,
+  was then refused. Only timeouts, disconnections, 5xx and rate limits count now.
 - **A small model's formatting slips are repaired, not punished.** Each of these cost a
   local 4B model its chart or its report during the PDF tests, on a call that was right in
   substance:
@@ -499,11 +682,15 @@ to have written now exists with the right content.
 
 - A small model gets things wrong. The guardrails make its mistakes visible and
   recoverable; they do not remove them.
-- `run_python` is not a security sandbox (see above).
+- `run_python` is not a security sandbox (see above) — `AGENT_ENABLE_PYTHON_TOOL=false`
+  where that matters.
 - The JSON store assumes **a single process**. It holds up well for a personal agent; a real
   database is needed the day several instances write at once.
 - Outside macOS there is no kernel sandbox for MCP processes: the air gap there rests on
   offline package managers, the checks above and your firewall — and Diagnostics says so.
+- Windows support is written for and checked on macOS, not yet run on a Windows machine:
+  report what breaks there, with *Diagnostics* → *Platform*. The tests in `backend/tests`
+  are the first thing to run there.
 - Memory recall uses weighted term overlap, not embeddings: inspectable, no second model to
   load, and enough for the handful of durable facts a personal agent accumulates.
 

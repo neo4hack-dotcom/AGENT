@@ -3,6 +3,7 @@ frontend/dist/
 backend/.env
 backend/.venv/
 backend/data/
+/data/
 __pycache__/
 *.pyc
 .DS_Store

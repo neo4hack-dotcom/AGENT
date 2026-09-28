@@ -12,6 +12,7 @@ captures and shows on the server card.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import traceback
 from typing import Any, Callable
@@ -22,6 +23,26 @@ PROTOCOL_VERSION = "2025-06-18"
 def log(message: str) -> None:
     """Diagnostics go to stderr. stdout is the protocol channel and nothing else."""
     print(message, file=sys.stderr, flush=True)
+
+
+def remote_path(raw: str, windows: bool = sys.platform == "win32") -> str:
+    r"""Why a path given by the caller must not even be looked at, or "".
+
+    On Windows, resolving `\\host\share\x` already opens it — the SMB client connects and
+    offers the user's NTLM credentials before any containment check can refuse. UNC and
+    device paths are judged on the string, as is any colon but a drive letter's (an
+    alternate data stream, a device). Same rule as the app's own file tools.
+    """
+    text = str(raw or "")
+    if "\x00" in text:
+        return "a path cannot contain a NUL character"
+    if not windows:
+        return ""
+    if re.match(r"^[\\/]{2}", text):
+        return "network (UNC) and device paths are refused"
+    if ":" in (text[2:] if re.match(r"^[A-Za-z]:[\\/]", text) else text):
+        return "a colon is only allowed after a drive letter"
+    return ""
 
 
 class McpServer:
@@ -92,6 +113,14 @@ class McpServer:
         return {"content": [{"type": "text", "text": text}], "isError": failed}
 
     def run(self) -> None:
+        # UTF-8 on the protocol channel, whatever launched us: on Windows piped stdio is
+        # cp1252 by default, which breaks every accent in either direction; and "\n", not
+        # "\r\n", as the line terminator the protocol specifies.
+        for stream, newline in ((sys.stdin, None), (sys.stdout, "\n"), (sys.stderr, None)):
+            try:
+                stream.reconfigure(encoding="utf-8", **({"newline": newline} if newline else {}))
+            except (AttributeError, ValueError):
+                pass
         routes = {"initialize": self._initialize, "tools/list": self._list_tools,
                   "tools/call": self._call_tool, "ping": lambda _p: {}}
         log(f"{self.title} {self.version} ready on stdio")

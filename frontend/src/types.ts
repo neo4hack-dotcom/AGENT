@@ -204,6 +204,8 @@ export interface Message {
   checks?: { name: string; result: string; detail?: string }[];
   /** The method in plain words, written on request from the lineage. */
   method?: { text: string; model?: string; at?: number };
+  /** Each figure the answer states, and the steps whose result holds it. */
+  figures?: FigureTrace[];
   /** 'direct': the model with the chosen servers' tools, no agent layer. */
   mode?: 'agent' | 'direct';
   servers?: string[];
@@ -305,6 +307,13 @@ export interface AdminState {
   local: boolean;
   signed_in?: boolean;
   remote?: 'password' | 'closed';
+}
+
+export interface FigureTrace {
+  raw: string;
+  refs: string[];
+  found: boolean;
+  asked?: boolean;
 }
 
 export interface DirectServer {
@@ -479,6 +488,14 @@ export interface Diagnostics {
   python_modules: string[];
   workspace: string;
   store: string;
+  platform?: { os: string; release: string; python: string; event_loop: string };
+  hardening?: {
+    airgapped: boolean; kernel_sandbox: boolean; require_signin: boolean;
+    admin_password: boolean; access_password: boolean; listens: string; tls: boolean;
+    python_tool: boolean; python_tool_allowed: boolean; pandas: boolean; custom_commands: boolean;
+    data_private: boolean; data: { path: string; private: boolean; detail: string }[];
+    shared_machine: string;
+  };
   warnings: string[];
   network?: { airgapped: boolean; internal_domains: string[]; kernel_sandbox: boolean;
               cloud_model_allowed: boolean };

@@ -229,7 +229,8 @@ class McpRegistry:
             self._emit()
             try:
                 from app import network
-                refused = network.check_mcp(server)
+                from app.mcp.catalog import deployment_refusal, launch_command
+                refused = deployment_refusal(server, self.settings) or network.check_mcp(server)
                 if refused:
                     raise McpError(refused)
                 if server["transport"] == "http":
@@ -241,7 +242,8 @@ class McpRegistry:
                     if not server.get("command"):
                         raise McpError("This server has no command configured.")
                     command, args, env, conn.fence = network.stdio_launch(
-                        server["command"], server.get("args") or [], server.get("env") or {}, server)
+                        launch_command(server, self.settings), server.get("args") or [],
+                        server.get("env") or {}, server)
                     transport = StdioTransport(command, args, env, server.get("cwd") or None)
                 client = McpClient(transport, self.settings.mcp_protocol_version,
                                    self.settings.mcp_startup_timeout_s,

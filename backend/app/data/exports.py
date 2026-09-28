@@ -23,11 +23,17 @@ class ExportError(ValueError):
     pass
 
 
+# Names Windows keeps for devices, extension or not: `nul.csv` is the null device there.
+_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(f"lpt{i}" for i in range(10))}
+
+
 def safe_name(name: str, extension: str) -> str:
     stem = re.sub(r"[^\w\-. ]+", "", (name or "export").strip(), flags=re.UNICODE)
     stem = re.sub(r"\s+", "-", stem).strip(".-") or "export"
-    stem = re.sub(rf"\.{extension}$", "", stem, flags=re.IGNORECASE)[:80]
-    return f"{stem}.{extension}"
+    stem = re.sub(rf"\.{extension}$", "", stem, flags=re.IGNORECASE)[:80].rstrip(". ")
+    if stem.split(".")[0].lower() in _RESERVED:
+        stem = f"{stem}-export"
+    return f"{stem or 'export'}.{extension}"
 
 
 def unique_path(folder: Path, name: str) -> Path:

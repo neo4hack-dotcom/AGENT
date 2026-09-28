@@ -93,15 +93,29 @@ def is_internal_host(host: str) -> bool:
 _RESOLVED: dict[str, tuple[float, bool]] = {}
 
 
+def _private(address: str) -> bool:
+    """A private or loopback address — judged on the IPv4 address an IPv6 form carries.
+
+    `::ffff:8.8.8.8` is 8.8.8.8, and so, for this purpose, are its 6to4 and Teredo forms.
+    Said here rather than left to `ipaddress`, whose answers for these ranges have changed
+    between Python releases (CVE-2024-4032): the air gap should not depend on which
+    interpreter the deployment happens to run.
+    """
+    ip = ipaddress.ip_address(address.split("%")[0])
+    if ip.version == 6:
+        embedded = ip.ipv4_mapped or ip.sixtofour or (ip.teredo[1] if ip.teredo else None)
+        if embedded is not None:
+            ip = embedded
+    return ip.is_private or ip.is_loopback
+
+
 def _resolves_inside(host: str) -> bool:
     cached = _RESOLVED.get(host)
     if cached and time.monotonic() - cached[0] < 300:
         return cached[1]
     try:
         addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
-        inside = bool(addresses) and all(
-            ipaddress.ip_address(a.split("%")[0]).is_private or ipaddress.ip_address(a.split("%")[0]).is_loopback
-            for a in addresses)
+        inside = bool(addresses) and all(_private(a) for a in addresses)
     except (socket.gaierror, UnicodeError, OSError, ValueError):
         inside = False
     _RESOLVED[host] = (time.monotonic(), inside)

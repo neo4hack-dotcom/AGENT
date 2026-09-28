@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _mcp_stdio import McpServer, log  # noqa: E402
+from _mcp_stdio import McpServer, log, remote_path  # noqa: E402
 
 MAX_READ_BYTES = 5_000_000
 MAX_MATCHES = 500
@@ -31,7 +31,18 @@ server = McpServer("files", "1.0.0", "Files")
 ROOTS: list[Path] = []
 
 
+def _under_root(text: str) -> bool:
+    r"""Spelled as a path under a configured root — which may itself be a share (`\\fs\data`)."""
+    def norm(value: str) -> str:
+        return value.replace("/", "\\").rstrip("\\").lower()
+    given = norm(text)
+    return any(given == r or given.startswith(r + "\\") for r in (norm(str(root)) for root in ROOTS))
+
+
 def _resolve(path: str) -> Path:
+    refused = remote_path(path)
+    if refused and not _under_root(str(path)):
+        raise PermissionError(f"{path}: {refused}.")
     raw = Path(path or ".").expanduser()
     candidate = (raw if raw.is_absolute() else (ROOTS[0] / raw)).resolve()
     for root in ROOTS:

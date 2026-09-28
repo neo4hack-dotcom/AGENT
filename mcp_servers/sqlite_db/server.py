@@ -37,7 +37,8 @@ def _connect() -> sqlite3.Connection:
     if STATE["write"]:
         con = sqlite3.connect(path, timeout=10)
     else:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        # as_uri(): `file:///C:/…` on Windows, and spaces, `?` or `#` in a path escaped.
+        con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
     con.row_factory = sqlite3.Row
     started = time.monotonic()
     # Abort a runaway query from inside the engine, every ~100k VM steps.

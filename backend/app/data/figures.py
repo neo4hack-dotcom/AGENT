@@ -117,5 +117,36 @@ def evidence_texts(scopes: list[list[dict]], workspace=None, extra: list[str] | 
                 for parked in parked_paths:
                     target = workspace / parked
                     if target.is_file() and target.stat().st_size <= 2_000_000:
-                        texts.append(target.read_text(errors="ignore"))
+                        texts.append(target.read_text(encoding="utf-8", errors="ignore"))
     return texts
+
+
+def trace(text: str, scopes: list[list[dict]], workspace=None, extra: list[str] | None = None,
+          limit: int = 60) -> list[dict]:
+    """Each figure the text states, with the steps whose result holds it.
+
+    [{"raw": "72,04", "refs": ["#7"], "found": True}, …] — what lets the reader point at a
+    number in an answer and be shown the step it came from, or told that none did.
+    """
+    stated = figures_in(text)[:limit]
+    if not stated:
+        return []
+    per_block: list[tuple[str, str, list[float]]] = []
+    for scope in scopes:
+        for block in scope:
+            if block.get("type") != "tool" or not block.get("ok") or not block.get("ref"):
+                continue
+            numbers = evidence_numbers(evidence_texts([[block]], workspace))
+            if numbers:
+                per_block.append((block["ref"], str(block.get("name") or ""), numbers))
+    asked = evidence_numbers(list(extra or []))
+    out, seen = [], set()
+    for raw, value, decimals in stated:
+        if raw in seen:
+            continue
+        seen.add(raw)
+        refs = [f"{ref} {name}".strip() for ref, name, numbers in per_block if _matches(value, decimals, numbers)]
+        out.append({"raw": raw, "refs": refs[:4],
+                    "found": bool(refs) or _matches(value, decimals, asked),
+                    "asked": not refs and _matches(value, decimals, asked)})
+    return out

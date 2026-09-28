@@ -13,6 +13,7 @@ import base64
 import contextlib
 import hashlib
 import re
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -23,12 +24,40 @@ from app import security
 from app.api.admin import guarded as admin_guarded, router as admin_router
 from app.api.routes import router as api_router
 from app.deps import container as c
+from app.tools.files import remote_path
+
+
+def platform_problem() -> str:
+    """What about this platform's setup would break the app, said up front — or "".
+
+    On Windows only the proactor event loop can start processes, and every local MCP server
+    and run_python is a process. uvicorn --reload switches to the selector loop; started that
+    way the app boots, then fails on the first tool with an error that names nothing.
+    """
+    if sys.platform == "win32":
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return ""
+        if not isinstance(loop, getattr(asyncio, "ProactorEventLoop", ())):
+            return ("This Windows server runs a selector event loop, which cannot start processes: "
+                    "local MCP servers and run_python will fail. Start the API without --reload "
+                    "(start-windows.bat does).")
+    return ""
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    problem = platform_problem()
+    if problem:
+        # Printed where whoever started the server is looking; also shown in Diagnostics.
+        print(f"[AGENT] {problem}", flush=True)
     await c.store.start_flusher()
     c.workspace()
+    from app import hardening
+    for entry in await asyncio.to_thread(hardening.restrict, c.env):
+        if not entry["private"]:
+            print(f"[AGENT] Not narrowed to this account: {entry['path']} — {entry['detail']}", flush=True)
     if c.settings.mcp_autoconnect:
         # In the background: one slow server must not delay the first page load.
         asyncio.create_task(c.mcp.connect_enabled())
@@ -64,8 +93,9 @@ _HEADERS = {
 
 
 def _csp(script_hashes: list[str]) -> str:
-    # 'unsafe-eval' is Vega's expression compiler; there is no inline script without a hash.
-    scripts = " ".join(["'self'", "'unsafe-eval'", *(f"'sha256-{h}'" for h in script_hashes)])
+    # No 'unsafe-eval': charts run Vega's expression interpreter, not its compiler. No inline
+    # script without a hash.
+    scripts = " ".join(["'self'", *(f"'sha256-{h}'" for h in script_hashes)])
     return ("default-src 'self'; "
             f"script-src {scripts}; "
             "style-src 'self' 'unsafe-inline'; "
@@ -87,6 +117,11 @@ async def guard(request: Request, call_next):
     and someone on another machine must have signed in. See app/security.py.
     """
     path = request.url.path
+    # No URL of this app contains a backslash. On Windows one decoded from %5C turns a
+    # file lookup — static assets, the SPA fallback, a workspace file — into `\\host\share`,
+    # which Windows opens (offering the user's NTLM credentials) before any check refuses it.
+    if "\\" in path or "\x00" in path:
+        return _refuse(400, "Refused: this path is not one this app serves.")
     if not security.host_allowed(c, request.headers.get("host") or ""):
         return _refuse(421, "This host name is not one this app answers to. If it is yours, "
                             "add it to AGENT_ALLOWED_HOSTS.")
@@ -148,6 +183,8 @@ if (STATIC_DIR / "index.html").is_file():
         # returns HTML that fails to parse as JSON three layers up.
         if path.startswith("api/"):
             return JSONResponse({"detail": "not found"}, status_code=404)
+        if remote_path(path):
+            return FileResponse(STATIC_DIR / "index.html")
         candidate = (STATIC_DIR / path).resolve()
         if candidate.is_file() and STATIC_DIR in candidate.parents:
             return FileResponse(candidate)

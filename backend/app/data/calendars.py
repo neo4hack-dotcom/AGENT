@@ -167,3 +167,65 @@ def describe(cal: Calendar, day: dt.date) -> str:
     why = cal.holiday_name(day) or ("weekend" if day.weekday() >= 5 else "")
     return (f"{day.isoformat()} ({day.strftime('%A')}): "
             + ("business day" if not why else f"not a business day — {why}"))
+
+
+_MONTHS = {"janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6,
+           "juillet": 7, "août": 8, "aout": 8, "septembre": 9, "octobre": 10, "novembre": 11,
+           "décembre": 12, "decembre": 12, "january": 1, "february": 2, "march": 3, "april": 4,
+           "may": 5, "june": 6, "july": 7, "august": 8, "september": 9, "october": 10,
+           "november": 11, "december": 12}
+
+
+def dates_in(text: str) -> list[tuple[str, dt.date, str]]:
+    """The dates a question names: (as written, date, "day" | "month_end")."""
+    import re
+    lowered = (text or "").lower()
+    months = "|".join(sorted(_MONTHS, key=len, reverse=True))
+    found: list[tuple[str, dt.date, str]] = []
+    for m in re.finditer(r"\b(\d{4})-(\d{2})-(\d{2})\b", lowered):
+        try:
+            found.append((m.group(0), dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))), "day"))
+        except ValueError:
+            pass
+    for m in re.finditer(rf"\b(\d{{1,2}})(?:er|st|nd|rd|th)? ({months}) (\d{{4}})\b", lowered):
+        try:
+            found.append((m.group(0), dt.date(int(m.group(3)), _MONTHS[m.group(2)], int(m.group(1))), "day"))
+        except ValueError:
+            pass
+    for m in re.finditer(rf"\b({months}) (\d{{1,2}})(?:st|nd|rd|th)?,? (\d{{4}})\b", lowered):
+        try:
+            found.append((m.group(0), dt.date(int(m.group(3)), _MONTHS[m.group(1)], int(m.group(2))), "day"))
+        except ValueError:
+            pass
+    for m in re.finditer(rf"\b(?:fin|end of|à fin|a fin)(?: de)? ({months}) (\d{{4}})\b", lowered):
+        month, year = _MONTHS[m.group(1)], int(m.group(2))
+        found.append((m.group(0), dt.date(year, month, 1), "month_end"))
+    seen, out = set(), []
+    for item in found:
+        if (item[1], item[2]) not in seen:
+            seen.add((item[1], item[2]))
+            out.append(item)
+    return out[:8]
+
+
+def facts_for(text: str, calendar: str = "TARGET2") -> list[str]:
+    """One computed line per date the question names — weekday, business day or not, the
+    business days around it — so that no model has to know what day 1 May 2026 was."""
+    cal = Calendar(calendar)
+    lines = []
+    for written, day, kind in dates_in(text):
+        if kind == "month_end":
+            end = cal.month_end(day.year, day.month)
+            lines.append(f"\"{written}\": last business day of the month ({cal.name}) = "
+                         f"{end.isoformat()} ({end.strftime('%A')}).")
+            continue
+        why = cal.holiday_name(day) or ("weekend" if day.weekday() >= 5 else "")
+        if why:
+            before, after = cal.roll(day, -1), cal.roll(day, 1)
+            lines.append(f"\"{written}\" = {day.isoformat()}, a {day.strftime('%A')}: NOT a business day "
+                         f"({cal.name}: {why}) — no close, no fixing that day. Previous business day "
+                         f"{before.isoformat()} ({before.strftime('%A')}), next {after.isoformat()} "
+                         f"({after.strftime('%A')}).")
+        else:
+            lines.append(f"\"{written}\" = {day.isoformat()}, a {day.strftime('%A')}: a business day ({cal.name}).")
+    return lines

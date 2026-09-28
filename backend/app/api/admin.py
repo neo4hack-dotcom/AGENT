@@ -8,6 +8,8 @@ categorically different from asking the agent a question.
 from __future__ import annotations
 
 import asyncio
+import platform
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -17,7 +19,7 @@ from app import network
 from app.deps import OVERRIDABLE, container as c
 from app.errors import McpError
 from app.mcp import runtimes
-from app.mcp.catalog import CATALOG, CATEGORIES, instantiate
+from app.mcp.catalog import CATEGORIES, deployment_refusal, instantiate, visible_catalog
 from app.security import COOKIE, admin_state, check_admin, login, logout, request_token
 from app.tools.code import available_modules
 
@@ -177,7 +179,8 @@ async def set_prefs(body: PrefsBody) -> dict:
 @guarded.get("/catalog")
 async def catalog() -> dict:
     used = {s.get("command") for s in c.store.mcp_servers().values() if s.get("enabled", True)}
-    return {"entries": CATALOG, "categories": CATEGORIES, "runtimes": runtimes.probe(used)}
+    return {"entries": visible_catalog(c.settings), "categories": CATEGORIES, "runtimes": runtimes.probe(used),
+            "custom_commands": bool(c.settings.allow_custom_commands)}
 
 
 @guarded.get("/servers")
@@ -222,6 +225,9 @@ async def add_server(body: InstallBody) -> dict:
                "args": body.args, "env": body.env, "url": body.url, "headers": body.headers,
                "cwd": body.cwd, "description": body.description, "category": "Custom",
                "network": body.network, "role": body.role}
+    refused = deployment_refusal(cfg, c.settings)
+    if refused:
+        raise HTTPException(403, refused)
     server = await c.mcp.add_server(cfg)
     await c.store.save()
     snapshot = {}
@@ -248,6 +254,11 @@ class PatchBody(BaseModel):
 @guarded.patch("/servers/{server_id}")
 async def patch_server(server_id: str, body: PatchBody) -> dict:
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    current = c.store.mcp_servers().get(server_id)
+    if current is not None and ({"command", "args", "env"} & patch.keys() or patch.get("enabled")):
+        refused = deployment_refusal({**current, **patch}, c.settings)
+        if refused:
+            raise HTTPException(403, refused)
     server = await c.mcp.update_server(server_id, patch)
     if server is None:
         raise HTTPException(404, "No such server.")
@@ -460,6 +471,64 @@ async def put_source(server_id: str, body: SourceBody) -> dict:
             "profile": knowledge["profile"], "errors": errors}
 
 
+def _append_checked_query(model_yaml: str, question: str, sql: str) -> str:
+    """The model text with one more checked query — inserted, not re-dumped, so the
+    administrator's comments and layout survive."""
+    import yaml
+    entry = yaml.safe_dump([{"question": question, "sql": sql}], allow_unicode=True, sort_keys=False,
+                           default_style=None, width=1000)
+    lines = model_yaml.rstrip("\n").split("\n") if model_yaml.strip() else []
+    start = next((i for i, line in enumerate(lines) if re.match(r"^verified_queries\s*:", line)), None)
+    if start is None:
+        return "\n".join([*lines, "verified_queries:", *("  " + l for l in entry.rstrip().split("\n"))]) + "\n"
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end][0] in " \t-#"):
+        end += 1
+    item = next((re.match(r"^(\s*)- ", l).group(1) for l in lines[start + 1:end] if re.match(r"^\s*- ", l)), "  ")
+    block = [item + l for l in entry.rstrip().split("\n")]
+    if lines[start].split(":", 1)[1].strip() in ("[]", "~", "null"):
+        lines[start] = "verified_queries:"
+    return "\n".join([*lines[:end], *block, *lines[end:]]) + "\n"
+
+
+class CheckedQueryBody(BaseModel):
+    tool: str = Field(max_length=200)
+    question: str = Field(min_length=3, max_length=300)
+    sql: str = Field(min_length=6, max_length=20_000)
+
+
+@guarded.post("/checked-queries")
+async def add_checked_query(body: CheckedQueryBody) -> dict:
+    """A query the analyst corrected and ran, kept as a worked example for its source.
+
+    The agent reads the checked queries that resemble a question before writing SQL from
+    scratch — the fastest way to teach it a definition ("count trades, not versions") is to
+    show it the query that gets it right. Added to the source's model, where Admin → Data
+    sources shows and edits it like any other.
+    """
+    import yaml
+    tool = c.mcp.resolve(body.tool)
+    if tool is None:
+        raise HTTPException(404, f"No connected tool {body.tool}.")
+    server_id = tool["server_id"]
+    _source_or_404(server_id)
+    knowledge = c.knowledge.get(server_id)
+    model = yaml.safe_load(knowledge.get("model_yaml") or "") or {}
+    if not isinstance(model, dict):
+        raise HTTPException(409, "This source's model is not a mapping; fix it in Admin → Data sources first.")
+    pairs = model.setdefault("verified_queries", []) or []
+    if any(" ".join(str(p.get("sql", "")).split()) == " ".join(body.sql.split()) for p in pairs if isinstance(p, dict)):
+        return {"ok": True, "added": False, "count": len(pairs), "source": tool["server_name"]}
+    updated, errors = c.knowledge.update(
+        server_id, model_yaml=_append_checked_query(knowledge.get("model_yaml") or "", body.question.strip(),
+                                                    body.sql.strip()))
+    if errors:
+        raise HTTPException(400, "; ".join(errors)[:500])
+    await c.store.save()
+    c.audit.record("source.checked_query", server=tool["server_name"], question=body.question[:200])
+    return {"ok": True, "added": True, "count": len(pairs) + 1, "source": tool["server_name"]}
+
+
 @guarded.post("/sources/{server_id}/profile")
 async def profile_source(server_id: str) -> dict:
     """Measure the source through its own tools and fold the facts into its model."""
@@ -596,6 +665,10 @@ async def diagnostics() -> dict:
             f"{llm.get('model')} does not support tool calling, so the agent cannot use any "
             f"tool — it can only answer from what it already knows. Pick a model with the "
             f"'tools' capability.")
+    from app.main import platform_problem
+    problem = platform_problem()
+    if problem:
+        warnings.append(problem)
     from app.mcp.catalog import downloads_at_start
     servers = c.store.mcp_servers()
     used = {s.get("command") for s in servers.values() if s.get("enabled", True)}
@@ -603,6 +676,9 @@ async def diagnostics() -> dict:
     for runtime in missing:
         warnings.append(f"{runtime['label']} is not on PATH — {runtime['why']}. "
                         f"To use it: {runtime['install']}")
+    from app import hardening
+    hardened, advice = hardening.posture(c.env, c.settings, bool(network.summary()["kernel_sandbox"]))
+    warnings.extend(advice)
     fetching = downloads_at_start(servers)
     if fetching and network.airgapped():
         warnings.append(f"{', '.join(fetching)} start{'s' if len(fetching) == 1 else ''} by fetching a "
@@ -621,5 +697,9 @@ async def diagnostics() -> dict:
         "python_modules": available_modules(),
         "workspace": str(c.workspace()),
         "store": str(c.env.db_path),
+        "hardening": hardened,
+        "platform": {"os": platform.system(), "release": platform.release(),
+                     "python": platform.python_version(),
+                     "event_loop": type(asyncio.get_running_loop()).__name__},
         "warnings": warnings,
     }

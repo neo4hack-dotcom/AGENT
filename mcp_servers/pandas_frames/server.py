@@ -28,7 +28,10 @@ import ast
 import json
 import multiprocessing as mp
 import os
-import resource
+try:
+    import resource   # POSIX only
+except ImportError:   # Windows: the parent's memory watchdog is the ceiling that holds
+    resource = None
 import shutil
 import subprocess
 import sys
@@ -40,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _mcp_stdio import McpServer, log  # noqa: E402
+from _mcp_stdio import McpServer, log, remote_path  # noqa: E402
 
 HARD_MAX_BYTES = 1024 ** 3           # 1 GB. Configurable downwards, never upwards.
 DEFAULT_MEMORY_MB = 2048
@@ -70,17 +73,20 @@ def _worker_main(request_q, response_q, memory_mb: int, cpu_seconds: int, max_by
     """Runs in the child. Applies its own limits before importing anything heavy, so a
     limit that cannot be honoured fails here rather than silently not applying."""
     applied = {}
-    try:
-        soft_as = memory_mb * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (soft_as, soft_as))
-        applied["address_space_mb"] = memory_mb
-    except (ValueError, OSError) as exc:
-        applied["address_space_error"] = str(exc)
-    try:
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 5))
-        applied["cpu_seconds"] = cpu_seconds
-    except (ValueError, OSError) as exc:
-        applied["cpu_error"] = str(exc)
+    if resource is None:
+        applied["rlimits"] = "not available on this OS — the memory watchdog enforces the ceiling"
+    else:
+        try:
+            soft_as = memory_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (soft_as, soft_as))
+            applied["address_space_mb"] = memory_mb
+        except (ValueError, OSError) as exc:
+            applied["address_space_error"] = str(exc)
+        try:
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 5))
+            applied["cpu_seconds"] = cpu_seconds
+        except (ValueError, OSError) as exc:
+            applied["cpu_error"] = str(exc)
 
     import numpy as np
     import pandas as pd
@@ -90,6 +96,8 @@ def _worker_main(request_q, response_q, memory_mb: int, cpu_seconds: int, max_by
                     "pandas": pd.__version__, "numpy": np.__version__})
 
     def peak_memory_mb() -> float:
+        if resource is None:
+            return _windows_rss_mb(os.getpid()) or 0.0
         usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         # macOS reports bytes, Linux kilobytes.
         return round(usage / (1024 ** 2 if sys.platform == "darwin" else 1024), 1)
@@ -298,6 +306,8 @@ def process_rss_mb(pid: int) -> float | None:
     killing is less elegant than an rlimit and works on every platform this runs on —
     which matters more than elegance for a limit the operator was promised.
     """
+    if sys.platform == "win32":
+        return _windows_rss_mb(pid)
     if not _PS:
         return None
     try:
@@ -310,6 +320,38 @@ def process_rss_mb(pid: int) -> float | None:
 
 
 _PS = shutil.which("ps")
+
+
+def _windows_rss_mb(pid: int) -> float | None:
+    """Working set of a process on Windows, from the kernel — no `ps` there, and no
+    third-party dependency for it either."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)  # QUERY_LIMITED_INFORMATION | VM_READ
+        if not handle:
+            return None
+        try:
+            counters = Counters()
+            counters.cb = ctypes.sizeof(Counters)
+            if not kernel32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                return None
+            return round(counters.WorkingSetSize / (1024 * 1024), 1)
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, AttributeError, ValueError):
+        return None
 
 
 class Worker:
@@ -477,6 +519,9 @@ def in_workspace(relative: str, must_exist: bool = True) -> Path:
     name = (relative or "").strip()
     if not name:
         raise ValueError("A path is required.")
+    refused = remote_path(name)
+    if refused:
+        raise ValueError(f"{name}: {refused}.")
     target = (CONFIG.workspace / name).resolve()
     if target != CONFIG.workspace and CONFIG.workspace not in target.parents:
         raise ValueError("Refusing to touch anything outside the workspace directory.")

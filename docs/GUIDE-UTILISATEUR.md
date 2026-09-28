@@ -101,7 +101,13 @@ Ouvrez une étape (clic sur sa ligne) :
   (**⌘/Ctrl+Entrée**), sans passer par l'agent. Seules les sources en lecture le permettent,
   et ces exécutions ne sont pas ajoutées aux preuves de la réponse ;
 - **Ask about #N** insère la référence de l'étape dans votre prochaine question
-  (« trace #5 par desk »).
+  (« trace #5 par desk ») ;
+- **Save as checked query** (administrateur) : une requête corrigée devient un exemple de
+  référence pour sa source, que l'agent réutilisera sur les questions semblables.
+
+**D'où vient ce chiffre ?** Dans une réponse, les chiffres sont soulignés en pointillé :
+survolez-en un pour voir l'étape qui l'a renvoyé, cliquez pour y aller. Un chiffre souligné
+en **orange** ne vient d'aucune étape : il a été calculé ou écrit par le modèle, à vérifier.
 
 Les tableaux écrits par l'agent dans sa réponse ont aussi, au survol, **Copy for Excel** et
 **CSV**.
@@ -266,13 +272,16 @@ secrets et la piste d'audit restent actifs dans les deux modes.
 
 ## 10. Conversations, raccourcis, mémoire
 
-| Raccourci | Effet |
-|---|---|
-| **⌘K** (Ctrl+K) | palette : actions, réglages, conversations, recherche dans leur contenu |
-| **⌘⇧K** | historique des conversations |
-| **⌘⇧O** | nouvelle conversation |
-| **⌘,** | administration (si vous y avez accès) |
-| **/** | placer le curseur dans le champ de saisie |
+| Mac | Windows | Effet |
+|---|---|---|
+| **⌘K** | **Ctrl+K** | palette : actions, réglages, conversations, recherche dans leur contenu |
+| **⌘⇧K** | **Ctrl+Maj+K** | historique des conversations |
+| **⌘⇧O** | **Ctrl+Maj+O** | nouvelle conversation |
+| **⌘,** | **Ctrl+,** | administration (si vous y avez accès) |
+| **/** | **/** | placer le curseur dans le champ de saisie |
+
+Partout ailleurs dans ce guide, **⌘** se lit **Ctrl** sous Windows ; l'interface affiche
+d'elle-même la touche de votre clavier.
 
 Une conversation reprend là où vous l'avez laissée, même après un rechargement de la page
 pendant une réponse.
@@ -299,7 +308,17 @@ depuis la machine du serveur, ou partout avec le mot de passe d'administration.
 | **Identity & skills** | identité de l'agent et procédures enregistrées |
 | **Memory** | ce que l'agent a retenu, et les faits en attente de validation |
 | **Audit log** | journal chaîné (inviolable) de toutes les actions |
-| **Diagnostics** | état du cloisonnement réseau, des serveurs, du modèle |
+| **Diagnostics** | état du cloisonnement réseau, des interrupteurs de sécurité, des serveurs, du modèle |
+
+**Verrouiller le déploiement.** Certaines capacités se retirent dans `backend/.env`, et
+l'administration ne peut pas les rétablir : `AGENT_ENABLE_PANDAS=false` retire le serveur
+Pandas Frames (il disparaît de la bibliothèque et ne démarre plus),
+`AGENT_ENABLE_PYTHON_TOOL=false` interdit l'exécution de code, `AGENT_ALLOW_CUSTOM_COMMANDS=false`
+limite les serveurs locaux à ceux fournis avec l'application, et `AGENT_REQUIRE_SIGNIN=true`
+exige un mot de passe même sur la machine elle-même (indispensable sur un serveur partagé,
+Bureau à distance ou Citrix). Redémarrez l'application après modification ; *Diagnostics*
+affiche l'état de chaque interrupteur. Le détail figure dans le README, section
+*Locking it down*.
 
 **Tester un serveur de modèles.** Dans *Model*, choisissez le type, saisissez l'URL (pour un
 serveur OpenAI-compatible, elle se termine en général par `/v1`), puis :
@@ -338,6 +357,11 @@ Ouvrez l'étape citée ([#N]) pour voir la requête et son résultat, ou cliquez
 **Un serveur MCP n'apparaît pas dans le mode direct.**
 Seuls les serveurs **connectés** sont proposés. Leur état et leurs messages d'erreur se lisent
 dans Admin → *MCP servers*.
+
+**Sous Windows : « … event loop cannot start … without --reload »**
+L'API a été lancée avec `--reload`, qui empêche sous Windows de démarrer Python et les
+serveurs MCP locaux. Relancez-la avec `start-windows.bat` (ou `serve-windows.bat`) ; Admin →
+*Diagnostics* → *Platform* doit alors indiquer `ProactorEventLoop`.
 
 **« … is outside the private network »**
 Le déploiement est cloisonné (air-gap) : un modèle, un serveur ou une URL hors du réseau

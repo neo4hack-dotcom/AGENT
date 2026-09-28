@@ -36,6 +36,10 @@ OVERRIDABLE = {
     "approval_timeout_s", "chart_locale",
 }
 
+# Switches the deployment caps: Admin may turn them off, never on when the environment
+# has them off. A preference cannot reopen what the deployment closed.
+CEILINGS = {"enable_python_tool"}
+
 # Values Admin may set that have no environment counterpart.
 EXTRA_DEFAULTS: dict[str, Any] = {"approval_mode": "writes"}
 
@@ -87,6 +91,9 @@ class Container:
 
     def get(self, key: str) -> Any:
         prefs = self.store.prefs()
+        if key in CEILINGS:
+            allowed = bool(getattr(self.env, key))
+            return allowed and (bool(prefs[key]) if prefs.get(key) not in (None, "") else True)
         if key in OVERRIDABLE and prefs.get(key) not in (None, ""):
             return prefs[key]
         if hasattr(self.env, key):

@@ -37,6 +37,19 @@ def now() -> float:
     return time.time()
 
 
+def _replace(source: Path, target: Path) -> None:
+    """os.replace, retried: on Windows an antivirus or an indexer holding the target for a
+    moment makes the swap fail with PermissionError, and a lost save is worse than a wait."""
+    for attempt in range(6):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 class JsonStore:
     def __init__(self, path: str) -> None:
         self.path = Path(path).expanduser()
@@ -44,9 +57,12 @@ class JsonStore:
         self.data: dict[str, Any] = dict(EMPTY)
         if self.path.exists():
             try:
-                loaded = json.loads(self.path.read_text() or "{}")
+                # UTF-8 explicitly: Windows would otherwise read it as cp1252 and every accent
+                # in the store would fail or turn to mojibake. -sig tolerates a BOM from an
+                # editor that added one.
+                loaded = json.loads(self.path.read_text(encoding="utf-8-sig") or "{}")
                 self.data = {**EMPTY, **loaded}
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 # A corrupted store must not stop the app from starting. Keep the broken
                 # file next to the fresh one so nothing is silently destroyed.
                 backup = self.path.with_suffix(f".corrupt-{int(now())}.json")
@@ -64,8 +80,8 @@ class JsonStore:
             self._dirty = False
             payload = json.dumps(self.data, ensure_ascii=False, indent=2, default=str)
             tmp = self.path.with_suffix(".tmp")
-            await asyncio.to_thread(tmp.write_text, payload)
-            await asyncio.to_thread(os.replace, tmp, self.path)
+            await asyncio.to_thread(tmp.write_text, payload, encoding="utf-8")
+            await asyncio.to_thread(_replace, tmp, self.path)
 
     def touch(self) -> None:
         """Mark dirty; the background flusher persists within a second."""
